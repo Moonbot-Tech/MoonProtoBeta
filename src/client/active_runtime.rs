@@ -36,7 +36,9 @@ pub struct MoonClient {
     shutdown: Arc<AtomicBool>,
     event_queue: Option<Arc<MoonEventQueue>>,
     snapshot: Arc<RwLock<Option<MoonClientSnapshot>>>,
+    #[cfg(any(test, feature = "diagnostics"))]
     err_emu_diagnostics: Arc<Mutex<super::diagnostics::ErrEmuDiagnosticsState>>,
+    #[cfg(any(test, feature = "diagnostics"))]
     protocol_metrics: Arc<ProtocolMetrics>,
     /// Shared subscription registry, mirrored from the runtime client so
     /// `active_subscriptions()` can read it without a channel round-trip.
@@ -128,11 +130,14 @@ impl MoonClient {
 
         let join = thread::spawn(move || {
             let mut client = Client::new(cfg);
+            #[cfg(any(test, feature = "diagnostics"))]
             let _ = diagnostics_tx.send((
                 client.err_emu_diagnostics_handle(),
                 Arc::clone(&client.metrics.protocol_metrics),
                 Arc::clone(&client.subscriptions.subscription_registry),
             ));
+            #[cfg(not(any(test, feature = "diagnostics")))]
+            let _ = diagnostics_tx.send(Arc::clone(&client.subscriptions.subscription_registry));
             client.set_runtime_shutdown_flag(runtime_shutdown);
             client.set_lifecycle_event_sender(Some(lifecycle_tx));
             let dispatcher = crate::events::EventDispatcher::new();
@@ -147,7 +152,12 @@ impl MoonClient {
                 ready_tx,
             );
         });
+        #[cfg(any(test, feature = "diagnostics"))]
         let (err_emu_diagnostics, protocol_metrics, subscription_registry) = diagnostics_rx
+            .recv()
+            .map_err(|_| MoonClientError::RuntimeStopped)?;
+        #[cfg(not(any(test, feature = "diagnostics")))]
+        let subscription_registry = diagnostics_rx
             .recv()
             .map_err(|_| MoonClientError::RuntimeStopped)?;
 
@@ -156,7 +166,9 @@ impl MoonClient {
             shutdown,
             event_queue,
             snapshot,
+            #[cfg(any(test, feature = "diagnostics"))]
             err_emu_diagnostics,
+            #[cfg(any(test, feature = "diagnostics"))]
             protocol_metrics,
             subscription_registry,
             join: Mutex::new(Some(join)),
@@ -191,8 +203,9 @@ impl MoonClient {
     /// Whether the latest published snapshot's server route has the fields
     /// required for market-level trade commands (`exchange_code` and
     /// `base_currency_code` from BaseCheck). Mirrors
-    /// [`Client::trade_route_status`] but reads the snapshot, so it reflects the
-    /// state after Init. Returns the all-missing error before the first snapshot.
+    /// Equivalent to the low-level route check, but reads the snapshot, so it
+    /// reflects the state after Init. Returns the all-missing error before the
+    /// first snapshot.
     pub fn trade_route_status(&self) -> Result<(), TradeContextError> {
         match self.snapshot() {
             Some(snapshot) => match TradeContextError::from_server_info(snapshot.server_info()) {
@@ -248,9 +261,10 @@ impl MoonClient {
     /// `set_err_emu` is enabled (see the "Packet Loss Test Hook" guide).
     ///
     /// This is a test/diagnostic facility — production applications should not
-    /// enable ErrEmu at all. Mirrors [`crate::Client::err_emu_diagnostics_snapshot`]
-    /// on the high-level runtime path so health/stress tests built on
-    /// `MoonClient` can read the same counters.
+    /// enable ErrEmu at all. Mirrors the low-level diagnostic counters on the
+    /// high-level runtime path so health/stress tests built on `MoonClient` can
+    /// read the same counters.
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub fn err_emu_diagnostics_snapshot(&self) -> crate::client::ErrEmuDiagnostics {
         let configured_rate = ERR_EMU_RATE.load(Ordering::Relaxed);
@@ -261,6 +275,7 @@ impl MoonClient {
     }
 
     /// Snapshot protocol/runtime CPU counters for tests and diagnostics.
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub fn protocol_metrics_snapshot(&self) -> ProtocolMetricsSnapshot {
         self.protocol_metrics.snapshot(0)
@@ -271,6 +286,7 @@ impl MoonClient {
     /// Normal applications must not use this. FireTest uses it to emulate a NAT
     /// blackhole and verify reconnect/subscription recovery on the public
     /// `MoonClient` path.
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub fn debug_set_outgoing_blackhole(&self, enabled: bool) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::DebugOutgoingBlackhole(enabled))
@@ -278,6 +294,7 @@ impl MoonClient {
 
     /// Hidden FireTest hook: reset client-side ErrEmu counters inside the
     /// runtime owner.
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub fn debug_reset_err_emu_diagnostics(&self) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::DebugResetErrEmuDiagnostics)

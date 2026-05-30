@@ -45,8 +45,8 @@ pub(super) fn write_trade_epoch_header(
 
 /// Route fields shared by client-originated trade command builders.
 ///
-/// Regular applications should obtain this from [`crate::Client::trade_ctx`],
-/// [`crate::Client::random_trade_ctx`], or from tracked order state via
+/// Regular applications should obtain this from `Client::trade_ctx`,
+/// `Client::random_trade_ctx`, or from tracked order state via
 /// [`crate::state::Order::trade_ctx`]. Low-level protocol tools can use
 /// [`TradeCtx::with_route_bytes`] when they intentionally provide raw Delphi
 /// enum ordinals themselves.
@@ -62,7 +62,7 @@ impl TradeCtx {
     ///
     /// `currency` is `cfg.BaseCurrency` and `platform` is
     /// `cfg.Header.Current` on the server. Prefer the higher-level helpers on
-    /// [`crate::Client`] unless you are writing a protocol tool.
+    /// `Client` unless you are writing a protocol tool.
     pub fn with_route(uid: u64, currency: BaseCurrency, platform: ExchangeCode) -> Self {
         Self {
             uid,
@@ -75,7 +75,7 @@ impl TradeCtx {
     ///
     /// This is for protocol tests/replay tools that intentionally start from
     /// wire bytes. Application code should use [`Self::with_route`] or
-    /// [`crate::Client::trade_ctx`].
+    /// `Client::trade_ctx`.
     #[doc(hidden)]
     pub fn with_route_bytes(uid: u64, currency: u8, platform: u8) -> Self {
         Self {

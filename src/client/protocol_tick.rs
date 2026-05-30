@@ -63,10 +63,12 @@ impl ProtocolCore<'_> {
         &mut self,
         cur_tm: i64,
         mode: &mut RunMode<'_>,
-        protocol_metrics: &ProtocolMetrics,
+        #[cfg(any(test, feature = "diagnostics"))] protocol_metrics: &ProtocolMetrics,
     ) {
+        #[cfg(any(test, feature = "diagnostics"))]
         let send_phase_start = Instant::now();
         self.transport_writer_maintenance_tick(cur_tm);
+        #[cfg(any(test, feature = "diagnostics"))]
         protocol_metrics.record_send_phase(send_phase_start.elapsed());
 
         // Active library: all-trades reconnect sequence lives on the

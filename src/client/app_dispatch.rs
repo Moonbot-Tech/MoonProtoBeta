@@ -2,6 +2,7 @@ use super::metrics::ProtocolMetrics;
 use crate::protocol::Command;
 #[cfg(test)]
 use std::sync::mpsc;
+#[cfg(any(test, feature = "diagnostics"))]
 use std::time::Instant;
 /// Raw callback used by [`crate::client::Client::run`].
 ///
@@ -96,27 +97,31 @@ impl DispatcherEventFn {
         &mut self,
         events: &mut Vec<crate::events::Event>,
         dispatcher: &mut crate::events::EventDispatcher,
-        protocol_metrics: &ProtocolMetrics,
-        source_cmd: Option<Command>,
-        source_api_method: u8,
-        source_payload_len: usize,
+        _protocol_metrics: &ProtocolMetrics,
+        _source_cmd: Option<Command>,
+        _source_api_method: u8,
+        _source_payload_len: usize,
     ) {
         if events.is_empty() {
             return;
         }
+        #[cfg(any(test, feature = "diagnostics"))]
         let enqueue_start = Instant::now();
+        #[cfg(any(test, feature = "diagnostics"))]
         let event_count = events.len();
+        #[cfg(any(test, feature = "diagnostics"))]
         let mode = 3;
         match self {
             Self::Queue => {
                 dispatcher.queue_events(events.drain(..));
             }
         }
-        protocol_metrics.record_app_enqueue_labeled(
+        #[cfg(any(test, feature = "diagnostics"))]
+        _protocol_metrics.record_app_enqueue_labeled(
             enqueue_start.elapsed(),
-            source_cmd.map_or(u8::MAX, Command::to_byte),
-            source_api_method,
-            source_payload_len,
+            _source_cmd.map_or(u8::MAX, Command::to_byte),
+            _source_api_method,
+            _source_payload_len,
             event_count,
             mode,
         );

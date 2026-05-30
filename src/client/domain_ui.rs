@@ -64,7 +64,7 @@ impl Client {
     /// Send `TMMOrdersSubscribeCommand` (UI CmdId=5, High,
     /// `UK_TurnMMDetection`) to set the market-maker orders subscription flag.
     pub fn ui_mm_subscribe(&self, subscribe: bool) {
-        self.sender().ui_mm_subscribe(subscribe);
+        self.sender_internal().ui_mm_subscribe(subscribe);
     }
 
     #[doc(hidden)]

@@ -1,9 +1,9 @@
-//! Event dispatcher: typed application events and read-only state on top of raw
-//! MoonProto channel payloads.
+//! Typed application events and read-only state on top of raw MoonProto channel
+//! payloads.
 //!
 //! Instead of making applications parse every protocol channel and apply every
-//! payload to their own state models, `EventDispatcher` performs that work
-//! automatically:
+//! payload to their own state models, `MoonClient` performs that work inside
+//! its owned runtime and publishes events plus immutable snapshots:
 //!
 //! ```ignore
 //! let client = moonproto::MoonClient::connect(cfg, connect)?;
@@ -25,7 +25,7 @@
 //! ```
 //!
 //! State models (`Orders`, `OrderBooks`, `TradesState`, and the other channel
-//! states) are owned by the dispatcher and exposed through read-only getters.
+//! states) are owned by the runtime and exposed through read-only snapshots.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -127,7 +127,8 @@ impl<T: Clone> CowState<T> {
 /// [`Self::balances`], [`Self::strats`], [`Self::settings`], [`Self::markets`].
 /// Applications should not mutate protocol state directly; state is maintained
 /// by [`Self::dispatch`], [`Self::dispatch_into`], and the active action
-/// outbox path used by `MoonClient` and low-level active runtimes.
+/// outbox path used by `MoonClient`.
+#[doc(hidden)]
 pub struct EventDispatcher {
     pub(crate) orders: CowState<Orders>,
     pub(crate) order_books: CowState<OrderBooks>,

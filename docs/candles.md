@@ -5,7 +5,10 @@ chunked response object.
 
 When an application subscribes to trades through `InitConfig.subscribe_trades`,
 `streams().subscribe_all_trades`, or `streams().subscribe_trades_for`, the runtime requests the
-initial full 5m candles snapshot exactly once for the active storage scope. After
+initial full 5m candles snapshot for the active storage scope. If the chunked
+request or history-worker barrier times out, Active Lib emits
+`Event::CandlesSnapshot::Failed` and retries while that trades scope remains
+active; after a successful snapshot it does not request the same scope again. After
 the chunked response is merged and parsed, Active Lib applies it to retained
 per-market history and emits `Event::CandlesSnapshot` only after the history
 worker acknowledges the barrier. Incoming trades then maintain the current 5m
@@ -24,6 +27,17 @@ if let Some(readers) = state.market_history_readers("BTCUSDT") {
         let mut last = Vec::new();
         candles.copy_last(200, &mut last);
         println!("candles={}", last.len());
+    }
+}
+```
+
+The in-progress candle is exposed through the derived snapshot. It is separate
+from the sealed 5m ring, matching Delphi's live chart bar:
+
+```rust
+if let Some(derived) = state.market_history_derived_snapshot_now("BTCUSDT") {
+    if let Some(live) = derived.current_candle {
+        draw_live_candle(live.open(), live.high(), live.low(), live.close(), live.volume());
     }
 }
 ```
@@ -68,7 +82,7 @@ history, a background owner calls blocking `Engine.getDeepHistory`, then
 These rows are separate from retained 5m history. Typical UI usage:
 
 ```rust
-use moonproto::commands::candles::DeepHistoryKind;
+use moonproto::DeepHistoryKind;
 use moonproto::Event;
 
 let ticket = client.candles().request_coin_card("BTCUSDT", DeepHistoryKind::Hour4)?;

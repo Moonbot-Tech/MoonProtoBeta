@@ -107,7 +107,7 @@ impl Client {
     }
 
     pub(crate) fn dispatch_candles_chunk(
-        pending_candles: &mut HashMap<u64, PartialCandles>,
+        pending_api: &mut PendingApi,
         cmd: u8,
         payload: &[u8],
         now_ms: i64,
@@ -123,13 +123,13 @@ impl Client {
         let Some(uid) = Self::engine_response_request_uid_from_payload(payload) else {
             return false;
         };
-        if !pending_candles.contains_key(&uid) {
+        if !pending_api.pending_candles.contains_key(&uid) {
             return false;
         }
         let Some(resp) = parse_engine_response(payload) else {
             return false;
         };
-        Self::handle_candles_chunk_in_map(pending_candles, &resp, now_ms)
+        Self::handle_candles_chunk_in_pending(pending_api, &resp, now_ms)
     }
 
     pub(crate) fn client_new_data_decoded(
@@ -180,11 +180,7 @@ impl Client {
             let now_ms = self.now_ms();
             if meta.method == EngineMethod::RequestCandlesData {
                 if let Some(resp) = parse_engine_response(&payload) {
-                    if Self::handle_candles_chunk_in_map(
-                        &mut self.pending_api.pending_candles,
-                        &resp,
-                        now_ms,
-                    ) {
+                    if Self::handle_candles_chunk_in_pending(&mut self.pending_api, &resp, now_ms) {
                         // The chunk was consumed by the aggregator. Forward to
                         // on_data only if the consumer does NOT use the async API
                         // (in that case the merged result is not ready yet — let
@@ -245,14 +241,14 @@ impl Client {
     /// the sender and the slot is removed. If the sender has already been dropped
     /// (no receiver waiting), the slot is removed anyway (semantics =
     /// "fire-and-forget with finalization").
-    pub(crate) fn handle_candles_chunk_in_map(
-        pending_candles: &mut HashMap<u64, PartialCandles>,
+    pub(crate) fn handle_candles_chunk_in_pending(
+        pending_api: &mut PendingApi,
         resp: &EngineResponse,
         _now_ms: i64,
     ) -> bool {
         // Check the slot with a separate lookup — then full removal via remove() if merged.
         if !resp.success {
-            if let Some(partial) = pending_candles.remove(&resp.request_uid) {
+            if let Some(partial) = pending_api.pending_candles.remove(&resp.request_uid) {
                 log::warn!(target: "moonproto::client",
                     "candles request uid={} failed code={} msg={}",
                     resp.request_uid, resp.error_code, resp.error_msg);
@@ -264,7 +260,7 @@ impl Client {
 
         let uid = resp.request_uid;
         let chunk_result = {
-            let Some(partial) = pending_candles.get_mut(&uid) else {
+            let Some(partial) = pending_api.pending_candles.get_mut(&uid) else {
                 return false;
             };
             let chunk_result = partial.aggregator.on_chunk_result(&resp.data);
@@ -280,44 +276,13 @@ impl Client {
             chunk_result
         };
         if let CandlesChunkResult::Complete(zipped_data) = chunk_result {
-            if let Some(partial) = pending_candles.remove(&uid) {
-                Self::spawn_candles_parse_result(uid, zipped_data, partial.sender);
+            if let Some(partial) = pending_api.pending_candles.remove(&uid) {
+                pending_api
+                    .candles_parse
+                    .submit(uid, zipped_data, partial.sender);
             }
         }
         true
-    }
-
-    fn spawn_candles_parse_result(
-        uid: u64,
-        zipped_data: Vec<u8>,
-        sender: mpsc::Sender<MergedCandles>,
-    ) {
-        // Full candles parse is deliberately outside the protocol reader. The
-        // reader has already ACKed all slices and only has to hand off the
-        // completed Delphi StoreCandlesToZip stream; zlib parse/apply can take
-        // milliseconds on a large market set and belongs to background work.
-        let spawn = thread::Builder::new()
-            .name("moonproto-candles-parse".to_string())
-            .spawn(move || {
-                let markets =
-                    parse_request_candles_data_response(&zipped_data).unwrap_or_else(|| {
-                        log::warn!(target: "moonproto::client",
-                            "candles aggregator merged but strict parse failed for uid={} ({} bytes); trying Delphi partial apply",
-                            uid,
-                            zipped_data.len()
-                        );
-                        parse_request_candles_data_response_partial(&zipped_data)
-                            .unwrap_or_default()
-                    });
-                let _ = sender.send(MergedCandles {
-                    uid,
-                    markets,
-                });
-            });
-        if let Err(err) = spawn {
-            log::warn!(target: "moonproto::client",
-                "failed to spawn candles parse worker for uid={uid}: {err}");
-        }
     }
 }
 

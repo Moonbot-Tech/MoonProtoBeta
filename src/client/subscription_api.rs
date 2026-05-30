@@ -17,22 +17,12 @@ impl Client {
     //  `BookSubbed: TSet<TMarket>` and `NeedResubscribeOrderBooks`.
     // ====================================================================
 
-    /// Thread-safe sender handle for subscribing and sending commands from any
-    /// thread.
+    /// Internal sender handle for low-level `Client` tests and runtime helpers.
     ///
     /// `MoonClient` is the normal subscription API. This lower-level sender is
     /// retained for internal runtime/tests.
     ///
-    /// ```ignore
-    /// let mut client = Client::new(cfg);
-    /// let sender = client.sender();
-    /// thread::spawn(move || {
-    ///     sender.subscribe_orderbook("DOGEUSDT");
-    /// });
-    /// // Custom low-level active pump owns `client`.
-    /// ```
-    #[doc(hidden)]
-    pub fn sender(&self) -> ClientSender {
+    pub(crate) fn sender_internal(&self) -> ClientSender {
         ClientSender {
             shared: Arc::new(ClientSenderShared {
                 app_queue_alive: Arc::clone(&self.lifecycle.app_queue_alive),
@@ -58,12 +48,19 @@ impl Client {
         }
     }
 
+    #[cfg(test)]
+    #[doc(hidden)]
+    pub(crate) fn sender(&self) -> ClientSender {
+        self.sender_internal()
+    }
+
     /// Hidden FireTest hook: when enabled, no outgoing datagrams are sent.
     ///
     /// Normal applications must not use this. The live FireTest uses it to make
     /// the MoonBot server stop hearing from this client, then verifies that the
     /// library reconnects and restores subscriptions after the flag is cleared.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "diagnostics"))]
     pub fn debug_set_outgoing_blackhole(&mut self, enabled: bool) {
         self.metrics
             .debug_outgoing_blackhole
@@ -72,12 +69,10 @@ impl Client {
 
     /// Subscribe to the orderbook stream for one market name.
     ///
-    /// This is a fire-and-forget convenience wrapper around
-    /// `self.sender().subscribe_orderbook(...)`. It records the intent in the
-    /// shared registry and appends the resulting wire request directly into the
-    /// Delphi-style send queues; a warning is logged only if the client is gone.
-    /// Use `client.sender().try_subscribe_orderbook(...)` when the caller needs
-    /// explicit failure feedback.
+    /// This records the intent in the shared registry and appends the resulting
+    /// wire request directly into the Delphi-style send queues; a warning is
+    /// logged only if the client is gone. Regular applications should use
+    /// `MoonClient::streams().subscribe_orderbook(...)`.
     ///
     /// The subscription is stored in the registry. Before init, reconnect does
     /// not send it. After init, reconnect restores it automatically without a
@@ -88,7 +83,7 @@ impl Client {
     /// call is idempotent; futures and spot books are distinguished by incoming
     /// `book_kind`, not by the subscribe request.
     pub fn subscribe_orderbook(&self, market_name: &str) {
-        self.sender().subscribe_orderbook(market_name);
+        self.sender_internal().subscribe_orderbook(market_name);
     }
 
     /// Subscribe to several orderbook streams in one registry-aware batch.
@@ -101,14 +96,14 @@ impl Client {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        self.sender().subscribe_orderbooks(market_names);
+        self.sender_internal().subscribe_orderbooks(market_names);
     }
 
     /// Unsubscribe from one market's orderbook stream.
     ///
     /// See [`Client::subscribe_orderbook`] for registry and reconnect behavior.
     pub fn unsubscribe_orderbook(&self, market_name: &str) {
-        self.sender().unsubscribe_orderbook(market_name);
+        self.sender_internal().unsubscribe_orderbook(market_name);
     }
 
     /// Unsubscribe from several orderbook streams in one registry-aware batch.
@@ -117,7 +112,7 @@ impl Client {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        self.sender().unsubscribe_orderbooks(market_names);
+        self.sender_internal().unsubscribe_orderbooks(market_names);
     }
 
     /// Unsubscribe from all remembered orderbook streams.
@@ -128,7 +123,7 @@ impl Client {
     /// raw call does not update the registry and reconnect would restore stale
     /// subscriptions.
     pub fn unsubscribe_all_orderbooks(&self) {
-        self.sender().unsubscribe_all_orderbooks();
+        self.sender_internal().unsubscribe_all_orderbooks();
     }
 
     /// Subscribe to the all-trades stream.
@@ -138,7 +133,7 @@ impl Client {
     /// init has completed. Calling it again with a different `want_mm` updates
     /// the remembered intent and sends a fresh subscribe request.
     pub fn subscribe_all_trades(&self, want_mm: bool) {
-        self.sender().subscribe_all_trades(want_mm);
+        self.sender_internal().subscribe_all_trades(want_mm);
     }
 
     /// Subscribe to all-trades on the wire, but keep retained Active Lib data
@@ -150,12 +145,13 @@ impl Client {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        self.sender().subscribe_trades_for(want_mm, market_names);
+        self.sender_internal()
+            .subscribe_trades_for(want_mm, market_names);
     }
 
     /// Unsubscribe from the all-trades stream and remove the registry intent.
     pub fn unsubscribe_all_trades(&self) {
-        self.sender().unsubscribe_all_trades();
+        self.sender_internal().unsubscribe_all_trades();
     }
 
     #[cfg(test)]

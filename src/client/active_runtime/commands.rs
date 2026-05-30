@@ -41,7 +41,9 @@ pub(super) enum RuntimeCommand {
     StrategyStartStop {
         is_start: bool,
     },
+    #[cfg(any(test, feature = "diagnostics"))]
     DebugOutgoingBlackhole(bool),
+    #[cfg(any(test, feature = "diagnostics"))]
     DebugResetErrEmuDiagnostics,
     OrderAction(RuntimeCommandKind),
     TradeAction(RuntimeTradeCommandKind),

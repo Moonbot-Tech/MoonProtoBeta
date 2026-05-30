@@ -184,25 +184,21 @@ fn build_engine_response_payload(request_uid: u64, method: EngineMethod, data: &
 }
 
 #[test]
-fn want_new_hello_allows_immediate_hello_on_young_client_clock() {
+fn want_new_hello_outside_rebind_is_dropped_but_clears_wait() {
     let mut client = dummy_client();
+    client.start_hello_wait(HelloWaitState::PrimaryHelloCold, 0);
+    client.last_sent_hello = 123;
+    let need_connect_before = client.need_connect;
 
     ProtocolCore {
         client: &mut client,
     }
     .on_handshake_control(Command::WantNewHello, 0, 0);
 
-    assert_eq!(client.last_sent_hello, NEVER_SENT_MS);
-    ProtocolCore {
-        client: &mut client,
-    }
-    .check_hello_send(100);
-
-    assert_eq!(
-        client.last_sent_hello, 100,
-        "Delphi LastSentHello=0 means an immediate retry; the Rust Instant clock must not wait 2s",
-    );
-    assert!(client.waiting_hello);
+    assert_eq!(client.last_sent_hello, 123);
+    assert!(!client.waiting_hello);
+    assert!(!client.next_primary_hello_new_session);
+    assert_eq!(client.need_connect, need_connect_before);
 }
 
 #[test]
@@ -1452,14 +1448,50 @@ fn ping_before_fine_does_not_stop_connect_retry_after_lost_fine() {
     client.clear_hello_wait_state();
 
     let ping_payload = vec![0u8; control::PING_SIZE];
-    client
-        .apply_ping_and_build_response(&ping_payload, 0.0, 0.0, 0, ping_payload.len() as u64)
-        .expect("valid ping");
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let events_cb = std::sync::Arc::clone(&events);
+    let mut mode = RunMode::Callback {
+        on_data: Box::new(move |cmd, payload| {
+            events_cb.lock().unwrap().push((cmd, payload.to_vec()));
+        }),
+    };
+    let sent_before = client.take_send_queues_for_test();
+    let sent_before_len = sent_before.0.len() + sent_before.1.len() + sent_before.2.len();
+    let mut protocol_wait = Duration::ZERO;
+
+    ProtocolCore {
+        client: &mut client,
+    }
+    .route_command(
+        Command::Ping.to_byte(),
+        &ping_payload,
+        ping_payload.len() as u64,
+        ping_payload.len() as u64,
+        10,
+        &mut mode,
+        &mut protocol_wait,
+    );
+    drop(mode);
+    let sent_after_ping = client.take_send_queues_for_test();
+    let sent_after_ping_len =
+        sent_after_ping.0.len() + sent_after_ping.1.len() + sent_after_ping.2.len();
 
     assert!(
             client.need_connect,
             "Ping before AuthDone proves server liveness, not a completed Fine; connect retry must stay armed",
         );
+    assert_eq!(
+        client.round_trip_delay, 0,
+        "pre-AuthDone Ping must not update RTT/PMTU fields",
+    );
+    assert!(
+        events.lock().unwrap().is_empty(),
+        "pre-AuthDone Ping must not reach app/domain callback",
+    );
+    assert_eq!(
+        sent_before_len, sent_after_ping_len,
+        "pre-AuthDone Ping must not send a Ping response",
+    );
 
     ProtocolCore {
         client: &mut client,

@@ -15,11 +15,11 @@ moonproto
   MoonClient          runtime thread + commands/events/snapshots
   MoonEventSink       event delivery adapter for UI frameworks/tools
   Snapshot state      read-only orders/books/trades/balances/markets view
-  Client              internal/diagnostic UDP, handshake, retry, pending API
-  EventDispatcher     mutable low-level state owner inside the runtime
+  Protocol core       UDP, handshake, retry, slicing, pending Engine API
+  Runtime state       mutable Active Lib owner inside the runtime
   Init spine          BaseCheck/AuthCheck/markets/prices/balances/post-init sync
-  commands::*         byte-level parsers/builders
-  state::*            orders, orderbooks, trades, balances, strategies, markets
+  command handles     typed user intents: streams/orders/settings/candles/etc.
+  state snapshots     orders, orderbooks, trades, balances, strategies, markets
         |
         v
 MoonBot server
@@ -142,7 +142,7 @@ let system_time = trade.time_delphi().system_time();
 |---|---|
 | `active_lib.md` | What `MoonClient` maintains automatically |
 | `client.md` | `MoonClient`, config, init, subscriptions, requests |
-| `events.md` | `MoonClient` events, immutable snapshots, low-level dispatcher |
+| `events.md` | `MoonClient` events and immutable snapshots |
 | `lifecycle.md` | Connection and critical status events |
 | `time.md` | Delphi `TDateTime` conversion helpers |
 | `engine_api.md` | Engine RPC wrappers and response parsing |
@@ -156,8 +156,9 @@ let system_time = trade.time_delphi().system_time();
 | `candles.md` | Historical candles APIs |
 | `multi_server.md` | Multiple independent connections |
 
-## Low-Level Modules
+## Advanced Modules
 
-`commands::*`, `state::*`, `Client`, and `EventDispatcher` remain public for
-custom tooling, tests, and advanced runtimes. Regular applications should prefer
-`MoonClient`, typed command handles, immutable snapshots, and typed events.
+Some low-level data-model modules remain available for protocol diagnostics and
+internal-style tooling, but they are not the normal application model. Regular
+applications should start from `MoonClient`, typed command handles, immutable
+snapshots, and typed events.

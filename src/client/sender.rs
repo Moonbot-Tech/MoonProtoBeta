@@ -1,4 +1,5 @@
-//! Thread-safe typed send/subscription handle.
+﻿//! Thread-safe typed send/subscription handle.
+#![allow(dead_code)]
 
 use super::*;
 
@@ -16,7 +17,7 @@ mod ui;
 /// `InitDone`/domain gate before the one-time init sequence completes.
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SubscribeError {
+pub(crate) enum SubscribeError {
     /// The owning `Client` was dropped or the main loop exited, so this sender
     /// can no longer enqueue work.
     Disconnected,
@@ -49,16 +50,11 @@ impl std::error::Error for SubscribeError {}
 /// balance wrappers so terminal UI code can send typed actions without
 /// rebuilding wire priorities, retry counts, or UKey values by hand.
 ///
-/// ```ignore
-/// let sender = client.sender();
-/// sender.subscribe_orderbook("DOGEUSDT");
-/// ```
-///
 /// Fire-and-forget methods log if the client is gone. `try_*` methods return
 /// [`SubscribeError`] when the caller needs explicit feedback.
 #[doc(hidden)]
 #[derive(Clone)]
-pub struct ClientSender {
+pub(crate) struct ClientSender {
     pub(crate) shared: Arc<ClientSenderShared>,
     pub(crate) start: Instant,
 }
@@ -100,7 +96,7 @@ impl ClientSender {
     /// build protocol payloads for the caller; use typed builders in
     /// [`crate::commands`] or prefer high-level `Client` wrappers when the caller
     /// already owns the client thread.
-    pub fn send_cmd(
+    pub(crate) fn send_cmd(
         &self,
         data: Vec<u8>,
         cmd: Command,
@@ -115,7 +111,7 @@ impl ClientSender {
     }
 
     /// Fallible variant of [`Self::send_cmd`].
-    pub fn try_send_cmd(
+    pub(crate) fn try_send_cmd(
         &self,
         data: Vec<u8>,
         cmd: Command,
@@ -136,7 +132,7 @@ impl ClientSender {
     /// Queue an already-serialized command payload with a Delphi UKey dedup key.
     ///
     /// This is the thread-safe counterpart of [`Client::send_cmd_keyed`].
-    pub fn send_cmd_keyed(
+    pub(crate) fn send_cmd_keyed(
         &self,
         data: Vec<u8>,
         cmd: Command,
@@ -153,7 +149,7 @@ impl ClientSender {
     }
 
     /// Fallible variant of [`Self::send_cmd_keyed`].
-    pub fn try_send_cmd_keyed(
+    pub(crate) fn try_send_cmd_keyed(
         &self,
         data: Vec<u8>,
         cmd: Command,
@@ -182,7 +178,7 @@ impl ClientSender {
     /// [`crate::commands::engine_request`]. This method does not register a
     /// pending response receiver; responses will surface as ordinary
     /// `Event::EngineResponse` values in the running dispatcher.
-    pub fn send_api_request(&self, request_payload: Vec<u8>) {
+    pub(crate) fn send_api_request(&self, request_payload: Vec<u8>) {
         if let Err(e) = self.try_send_api_request(request_payload) {
             log::warn!(target: "moonproto::client",
                 "ClientSender::send_api_request dropped: {e}");
@@ -190,7 +186,10 @@ impl ClientSender {
     }
 
     /// Fallible variant of [`Self::send_api_request`].
-    pub fn try_send_api_request(&self, request_payload: Vec<u8>) -> Result<(), SubscribeError> {
+    pub(crate) fn try_send_api_request(
+        &self,
+        request_payload: Vec<u8>,
+    ) -> Result<(), SubscribeError> {
         let method = engine_request_method(&request_payload);
         let request_uid = engine_request_uid(&request_payload);
         let result =

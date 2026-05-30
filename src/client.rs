@@ -7,10 +7,7 @@
 //! and keeps the session alive until `disconnect()` or drop.
 
 use crate::api_pending::ApiPending;
-use crate::commands::candles::{
-    parse_request_candles_data_response, parse_request_candles_data_response_partial,
-    CandlesAggregator, CandlesChunkResult,
-};
+use crate::commands::candles::{CandlesAggregator, CandlesChunkResult};
 use crate::commands::engine_api::{
     parse_auth_check_response, parse_base_check_response, parse_engine_response, AuthCheckResponse,
     EngineMethod, EngineResponse,
@@ -24,7 +21,6 @@ use log::{debug, error, warn};
 // inside one ProtocolCore owner: recv drain, immediate service replies,
 // domain dispatch enqueue, then send/maintenance.
 use polling::{Event as PollEvent, Poller};
-use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -92,8 +88,10 @@ pub use config::{
     AuthStatus, ClientConfig, LifecycleEvent, LifecycleFn, RefreshConfig, TradeContextError,
     TransportMode,
 };
+#[cfg(any(test, feature = "diagnostics"))]
 #[doc(hidden)]
 pub use diagnostics::ERR_EMU_RATE;
+#[cfg(any(test, feature = "diagnostics"))]
 #[doc(hidden)]
 pub use diagnostics::{
     set_err_emu, ErrEmuCommandDiagnostics, ErrEmuDiagnostics, ErrEmuSlicedBlockDiagnostics,
@@ -102,6 +100,7 @@ pub use diagnostics::{
 #[cfg(test)]
 pub(crate) use init::{connect_and_init, run_init_sequence, InitResult};
 pub use init::{ConnectConfig, ConnectError, InitConfig, InitError, InitialStrategies};
+#[cfg(any(test, feature = "diagnostics"))]
 pub use metrics::ProtocolMetricsSnapshot;
 pub use send_queue::{
     SendPriority, UniqueKey, UK_ARB_PRICES, UK_BALANCE_FULL, UK_BASE_UI_SETTINGS, UK_DEX_SWITCH,
@@ -109,8 +108,7 @@ pub use send_queue::{
     UK_ORDER_STATUS_SHORT, UK_SPOT_SWITCH, UK_STOP_MOVE, UK_STRAT_SELL_PRICE_UPDATE,
     UK_STRAT_SNAPSHOT, UK_TURN_MM_DETECTION,
 };
-#[doc(hidden)]
-pub use sender::{ClientSender, SubscribeError};
+pub(crate) use sender::{ClientSender, SubscribeError};
 pub use subscriptions::{ActiveSubscriptions, TradesSubscription};
 
 #[cfg(test)]
@@ -126,16 +124,19 @@ pub(crate) use clock::{
 use config::{CHECK_TAGS_BURST_COUNT, CHECK_TAGS_BURST_SPACING_MS};
 use constants::*;
 use diagnostics::{
-    diagnostic_duplicate_sliced_acks, err_emu_drop_decision, fnv1a64, trace_elapsed_ms, trace_head,
-    trace_io_enabled, ErrEmuDiagnosticsState,
+    diagnostic_duplicate_sliced_acks, fnv1a64, trace_elapsed_ms, trace_head, trace_io_enabled,
 };
+#[cfg(any(test, feature = "diagnostics"))]
+use diagnostics::{err_emu_drop_decision, ErrEmuDiagnosticsState};
 #[cfg(test)]
 use diagnostics::{err_emu_drop_rate_for_cmd, is_service_cmd};
 use helpers::*;
 #[cfg(test)]
 pub(crate) use init::{run_base_check_delphi, send_post_init_resync, CriticalInitStatus};
 use lifecycle::ClientLifecycle;
-use metrics::{ClientMetrics, ProtocolMetrics};
+use metrics::ClientMetrics;
+#[cfg(any(test, feature = "diagnostics"))]
+use metrics::ProtocolMetrics;
 use protocol_core::ProtocolCore;
 use refresh_clocks::{PendingApi, RefreshClocks};
 #[cfg(test)]
@@ -173,10 +174,7 @@ impl HelloWaitState {
 
     #[inline]
     pub(crate) fn allows_who_are_you(self) -> bool {
-        matches!(
-            self,
-            Self::PrimaryHelloCold | Self::PrimaryHelloNewSession | Self::PrimaryImFriendSent
-        )
+        matches!(self, Self::PrimaryHelloCold | Self::PrimaryHelloNewSession)
     }
 
     #[inline]
@@ -226,7 +224,12 @@ impl SessionIdentity {
     }
 }
 
-/// Public handle to the client. Allows sending commands from any thread.
+/// Low-level UDP session object behind [`MoonClient`].
+///
+/// Regular applications should not own this directly. It remains public under
+/// `moonproto::client` for internal diagnostics and custom protocol tools, but
+/// the application model is [`MoonClient`] plus EventSink/snapshots/intents.
+#[doc(hidden)]
 pub struct Client {
     cfg: ClientConfig,
 
@@ -418,7 +421,7 @@ impl Client {
 
     #[inline]
     pub(crate) fn should_accept_want_new_hello(&self) -> bool {
-        !self.authorized || self.need_connect || self.hello_wait_state.allows_hello_again_retry()
+        self.hello_wait_state.allows_hello_again_retry()
     }
 
     fn has_trades_subscription_intent(&self) -> bool {
@@ -469,9 +472,9 @@ impl Client {
             .as_ref()
             .and_then(|host| crate::ntp::acquire_process_sync(host.clone(), set_ntp_offset));
 
-        // Cached MacContext for cfg.mac_key — fixed for the whole life of the Client.
-        // Construction does 128 XOR + crc32c(ipad_block) once; afterwards `mac()` calls
-        // are only crc32c_append(cached, data) + crc32c_append(prev, opad_block).
+        // Cached SipHash-1-3 context for cfg.mac_key — fixed for the whole
+        // life of the Client. `mac()` reuses the keyed initial state instead of
+        // deriving it again for each packet.
         let mac_ctx = crate::transport::MacContext::new(&cfg.mac_key);
 
         Self {

@@ -4,8 +4,8 @@
 It owns a runtime thread and keeps the active session alive until
 `disconnect()` or drop.
 
-`Client` is the internal session object behind `MoonClient`. Regular
-applications should not own it directly.
+The low-level UDP session object is an internal/diagnostic layer behind
+`MoonClient`. Regular applications should not own it directly.
 
 Create one `MoonClient` per server in regular applications.
 
@@ -129,7 +129,7 @@ This path performs active-library work: state dispatch, per-client
 `ServerTimeDelta` linking, orderbook full requests, trades gap ticks, market-index
 gating, reconnect restore, and Engine API pending routing. Before the first Init,
 transport reconnects do not emit background Engine API. After Init, reconnect
-inside the same `Client` session maintains the user-requested active-lib state.
+inside the same `MoonClient` session maintains the user-requested active-lib state.
 
 `MoonClient::connect` starts the owned runtime thread and returns immediately.
 The background runtime performs AuthDone and the one-time Init sequence, then
@@ -223,6 +223,11 @@ session as "run the protocol for N seconds".
 
 ## Packet Loss Test Hook
 
+This section is available only when the crate is built with
+`--features diagnostics`. Regular applications should leave that feature off;
+the production Active Lib surface does not expose packet-loss emulation,
+per-packet CPU counters, or debug blackhole hooks.
+
 `moonproto::client::set_err_emu(percent)` enables Delphi-style client-side
 packet loss emulation for tests. It is process-global, affects every `Client` in
 the process, and drops only incoming packets after MoonProto transport
@@ -252,9 +257,10 @@ prevent the client from reaching the API phase at all.
 For live health tests, `err_emu_diagnostics_snapshot()` returns loss counters
 collected while `set_err_emu` is enabled. It is available on both the low-level
 `Client` and the high-level `MoonClient`, so a health/stress harness on either
-path reads the same counters. Use `Client::reset_err_emu_diagnostics()` to start
-a new measurement window without changing the loss rate. This whole facility is
-a test/diagnostic hook; production applications never enable ErrEmu.
+path reads the same counters. Use the matching hidden reset hook in diagnostic
+tests to start a new measurement window without changing the loss rate. This
+whole facility is a test/diagnostic hook; production applications never enable
+ErrEmu.
 
 The snapshot includes total valid/delivered/dropped incoming packets,
 per-command counters, test-only outgoing drop counters, and per-sliced-datagram
@@ -281,11 +287,13 @@ logs.
 
 ## Protocol Metrics
 
-`Client::protocol_metrics_snapshot()` returns passive protocol-loop counters:
-UDP receive count, receive-side protocol nanoseconds, writer tick nanoseconds,
-and send/maintenance nanoseconds. The old internal receive-decoded bridge is
-not part of the public metrics API because production decoded delivery is
-direct.
+This section also requires `--features diagnostics`.
+
+`MoonClient::protocol_metrics_snapshot()` returns passive protocol-loop counters:
+UDP receive count, the last PMTU value reported by server `Ping`,
+receive-side protocol nanoseconds, writer tick nanoseconds, and
+send/maintenance nanoseconds. The old internal receive-decoded bridge is not
+part of the public metrics API because production decoded delivery is direct.
 
 The snapshot also separates CPU-ish protocol work from wall-clock waits:
 `writer_cpu_*` excludes the fixed Delphi-style 5 ms sleep, `reader_protocol_*`
@@ -301,6 +309,12 @@ performance red flags. The
 unexpectedly heavy blocks. These are wall-clock durations of code sections, not
 OS CPU counters, but they intentionally exclude network waits and user callback
 body time.
+
+FireTest treats any `>5ms` sample in CPU-ish sections (`reader_protocol`,
+`writer_cpu`, `active_dispatch`, `app_enqueue`, or send/maintenance phase) as a
+hard health failure. `>1ms` samples stay visible in the summary as watch
+signals, because large initial snapshots and balance/strategy payloads can sit
+near that boundary while still matching the Delphi machine effect.
 
 For the current maximum samples, the snapshot carries diagnostic attribution:
 `reader_protocol_max_cmd/payload_len`, `active_dispatch_max_cmd/payload_len`
@@ -379,7 +393,7 @@ init spine consumes that marker, waits up to `34 * 300ms` for
 `settings().switch_spot`.
 
 Domain pushes received before init completion are ignored in every client run
-mode, including the raw `Client::run` callback. This matches the Delphi
+mode, including internal low-level test pumps. This matches the Delphi
 `InitDone` gate for `Order`, `Strat`, `Balance`, `TradesStream`,
 `TradesResendResponse`, `OrderBook`, and `UI` pushes. Engine API responses and
 transport service packets are not part of this domain gate, because Init itself
@@ -442,7 +456,7 @@ client.account().refresh_api_expiration_time()?; // async; read Event::Account +
 client.balances().refresh_transfer_assets()?; // async; read snapshot().transfer_assets()
 let coin_card_ticket = client.candles().request_coin_card(
     "BTCUSDT",
-    moonproto::commands::candles::DeepHistoryKind::Hour4,
+    moonproto::DeepHistoryKind::Hour4,
 )?;
 client.settings().refresh()?; // async; read Event::Settings + snapshot().settings()
 client.account().set_leverage("BTCUSDT", 20)?;
@@ -460,6 +474,8 @@ Chunked candles use a dedicated aggregator rather than the normal one-response
 pending slot. Active Lib sends the full 5m snapshot request automatically after
 trades storage is enabled, emits `Event::CandlesSnapshot` after the history
 worker applies it, and chart UI reads retained rows from market history readers.
+Lost chunked requests or history-worker barriers fail by event and are retried
+for the same active trades scope instead of leaving the scope stuck forever.
 
 ## UI Settings Request
 

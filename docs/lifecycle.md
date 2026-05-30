@@ -1,7 +1,7 @@
 # Lifecycle Events
 
 `LifecycleEvent` reports connection state and critical transport conditions.
-Init is run once per `Client` session. Before that Init, transport handshakes do
+Init is run once per `MoonClient` session. Before that Init, transport handshakes do
 not emit Engine API. After Init, reconnect restore refreshes market indexes only
 when `PeerAppToken` changed, then sends the needed market refresh/subscription
 replay, and replays only the registry subscriptions the application requested.
@@ -50,7 +50,7 @@ for event in client.drain_lifecycle_events() {
 | Event | Meaning | Application action |
 |---|---|---|
 | `Connecting` | A handshake attempt has started. | Update connection indicator. |
-| `Connected { fresh: true }` | First successful authorization for this `Client`. | UI status only for `MoonClient`; low-level `Client` owners may run one-time init here. |
+| `Connected { fresh: true }` | First successful authorization for this `MoonClient` runtime. | UI status; wait for `Ready` before treating Active Lib state as initialized. |
 | `Connected { fresh: false }` | Re-handshake after reconnect. | UI only; the library refreshes stale indexes after a changed `PeerAppToken`, refreshes markets, and restores saved subscriptions. |
 | `Ready` | `MoonClient` finished its one-time connect/init sequence and published the initial snapshot. | UI can treat the Active Lib state as initialized. |
 | `InitStepCompleted { step, elapsed_ms }` | One mandatory startup step finished; `elapsed_ms` is total wall-clock time since runtime startup, not the duration of that single step. Current cold-init steps: `BaseCheck`, `AuthCheck`, `GetMarketsList`, `UpdateMarketsList`, `StrategySchema`, `PostInitFlush`, `StartupSnapshot`, or `StartupEvents`. | Optional progress display/diagnostics only. |
@@ -90,6 +90,6 @@ packets, and later refreshes report their own domain events after `Ready`.
 Regular applications receive lifecycle events from `MoonClient` through the
 configured `MoonEventSink`. The default queue adapter exposes
 `drain_lifecycle_events` / `try_recv_lifecycle_event`; callback integrations can
-post lifecycle events directly into the host UI loop. Low-level protocol tools
-that own `Client` directly can still register `Client::on_lifecycle`; that
-callback is not the normal desktop/UI integration path.
+post lifecycle events directly into the host UI loop. Low-level protocol
+diagnostics have their own hidden hooks; they are not the normal desktop/UI
+integration path.

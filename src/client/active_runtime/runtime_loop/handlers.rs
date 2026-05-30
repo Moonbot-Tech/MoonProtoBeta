@@ -103,9 +103,7 @@ pub(super) fn handle_command(
         }
         RuntimeCommand::UnsubscribeAllTrades => {
             client.unsubscribe_all_trades();
-            pending.auto_candles.clear();
-            pending.auto_candles_apply.clear();
-            pending.auto_candles_requested = false;
+            clear_auto_candles_pending(client, pending);
             pending.auto_candles_scope = None;
             sync_runtime_trade_storage_scope(client, dispatcher);
             false
@@ -179,10 +177,12 @@ pub(super) fn handle_command(
             dispatcher.ui_strat_start_stop_v2(client, is_start);
             false
         }
+        #[cfg(any(test, feature = "diagnostics"))]
         RuntimeCommand::DebugOutgoingBlackhole(enabled) => {
             client.debug_set_outgoing_blackhole(enabled);
             false
         }
+        #[cfg(any(test, feature = "diagnostics"))]
         RuntimeCommand::DebugResetErrEmuDiagnostics => {
             client.reset_err_emu_diagnostics();
             false
@@ -208,9 +208,7 @@ pub(super) fn schedule_auto_candles_snapshot(client: &mut Client, pending: &mut 
         return;
     };
     if pending.auto_candles_scope.as_deref() != Some(scope.as_ref()) {
-        pending.auto_candles.clear();
-        pending.auto_candles_apply.clear();
-        pending.auto_candles_requested = false;
+        clear_auto_candles_pending(client, pending);
         pending.auto_candles_scope = Some(scope);
     }
     if pending.auto_candles_requested {
@@ -218,7 +216,11 @@ pub(super) fn schedule_auto_candles_snapshot(client: &mut Client, pending: &mut 
     }
     let (uid, rx) = client.api_request_candles_data_async_registered();
     pending.auto_candles_requested = true;
-    pending.auto_candles.push(PendingAutoCandles { uid, rx });
+    pending.auto_candles.push(PendingAutoCandles {
+        uid,
+        deadline: engine_pending_deadline(),
+        rx,
+    });
 }
 
 fn schedule_transfer_assets_refresh(client: &mut Client, pending: &mut RuntimePending) {

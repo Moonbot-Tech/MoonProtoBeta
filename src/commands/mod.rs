@@ -41,6 +41,7 @@ pub use engine_api::{
 pub use market::{
     ArbIsolationFlags, ArbPlatformCode, BaseCurrency, ExchangeCode, PositionType, TokenTags,
 };
+#[doc(hidden)]
 pub use order_book::{OrderBookUpdate, OrderLevel};
 pub use strategy_schema::{
     StrategyDynamicPicklist, StrategyFieldLayout, StrategyFieldType, StrategyFieldUiKind,
@@ -62,8 +63,9 @@ pub use trade::{
     PriceZone, ReplaceMultiKind, SetImmuneCommand, SplitOrderCommand, StopSettings, TradeCommand,
     TradeCtx, TurnPanicSellCommand, VStopUpdate,
 };
+#[doc(hidden)]
 pub use trades_stream::{parse_watcher_fills, Trade, TradeSection, TradesPacket, WatcherFill};
 pub use ui::{
     ArbConfigCompact, ClientSettingsCommand, LevManage, ResetProfitKind, SpotMarketKind,
-    TriggerAction,
+    TriggerAction, AS_CFG2_SIZE, AS_CFG_SIZE,
 };

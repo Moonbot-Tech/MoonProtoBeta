@@ -101,7 +101,10 @@ pub(super) fn runtime_loop(
                 }
             }
         } else {
-            let candles_changed = poll_auto_candles(&mut pending, &mut dispatcher);
+            let candles_changed = poll_auto_candles(&mut client, &mut pending, &mut dispatcher);
+            if !pending.auto_candles_requested && client.trades_storage_scope_intent().is_some() {
+                schedule_auto_candles_snapshot(&mut client, &mut pending);
+            }
             let coin_card_changed = poll_coin_card_candles(
                 &mut pending.coin_card_candles,
                 &mut dispatcher,
@@ -365,6 +368,78 @@ mod tests {
 
         assert!(pending.auto_candles_requested);
         assert_eq!(pending.auto_candles.len(), 1);
+    }
+
+    #[test]
+    fn auto_candles_timeout_cleans_chunk_collector_and_allows_retry() {
+        let mut client = ready_client();
+        let mut dispatcher = crate::events::EventDispatcher::new();
+        let mut pending = RuntimePending::default();
+
+        handle_command(
+            &mut client,
+            &mut dispatcher,
+            RuntimeCommand::SubscribeAllTrades(false),
+            &mut pending,
+        );
+        let uid = pending.auto_candles[0].uid;
+        assert!(client.pending_api.pending_candles.contains_key(&uid));
+        pending.auto_candles[0].deadline = Instant::now() - std::time::Duration::from_millis(1);
+
+        assert!(poll_auto_candles(
+            &mut client,
+            &mut pending,
+            &mut dispatcher
+        ));
+        assert!(!pending.auto_candles_requested);
+        assert!(pending.auto_candles.is_empty());
+        assert!(!client.pending_api.pending_candles.contains_key(&uid));
+        match dispatcher.take_queued_events().as_slice() {
+            [crate::events::Event::CandlesSnapshot(crate::state::CandlesSnapshotEvent::Failed {
+                request_uid: Some(failed_uid),
+                error,
+            })] => {
+                assert_eq!(*failed_uid, uid);
+                assert!(error.contains("timed out"));
+            }
+            other => panic!("unexpected events: {other:?}"),
+        }
+
+        schedule_auto_candles_snapshot(&mut client, &mut pending);
+        assert!(pending.auto_candles_requested);
+        assert_eq!(pending.auto_candles.len(), 1);
+    }
+
+    #[test]
+    fn auto_candles_scope_change_drops_old_chunk_collector() {
+        let mut client = ready_client();
+        let mut dispatcher = crate::events::EventDispatcher::new();
+        let mut pending = RuntimePending::default();
+
+        handle_command(
+            &mut client,
+            &mut dispatcher,
+            RuntimeCommand::SubscribeAllTrades(false),
+            &mut pending,
+        );
+        let old_uid = pending.auto_candles[0].uid;
+        assert!(client.pending_api.pending_candles.contains_key(&old_uid));
+
+        handle_command(
+            &mut client,
+            &mut dispatcher,
+            RuntimeCommand::SubscribeTradesFor {
+                want_mm: false,
+                markets: vec!["BTCUSDT".to_string()],
+            },
+            &mut pending,
+        );
+
+        assert!(!client.pending_api.pending_candles.contains_key(&old_uid));
+        assert!(pending.auto_candles_requested);
+        assert_eq!(pending.auto_candles.len(), 1);
+        let new_uid = pending.auto_candles[0].uid;
+        assert!(client.pending_api.pending_candles.contains_key(&new_uid));
     }
 
     #[test]

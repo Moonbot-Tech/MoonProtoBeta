@@ -28,7 +28,7 @@ pub struct TradesSubscription {
 
 /// Read-only snapshot of the streams a session currently has subscribed.
 ///
-/// Returned by [`crate::Client::active_subscriptions`] and
+/// Returned by [`crate::client::Client::active_subscriptions`] and
 /// [`crate::MoonClient::active_subscriptions`]. Because the active library
 /// replays these after reconnect, they reflect the session's maintained intent,
 /// not just the last packet.

@@ -164,6 +164,7 @@ impl ProtocolCore<'_> {
                     event_buf.clear();
                     active_actions_buf.clear();
                     let ctx = crate::events::ActiveDispatchContext::from_client(self.client);
+                    #[cfg(any(test, feature = "diagnostics"))]
                     let active_dispatch_start = Instant::now();
                     dispatcher.dispatch_into_active_actions(
                         c,
@@ -173,10 +174,13 @@ impl ProtocolCore<'_> {
                         &ctx,
                         active_actions_buf,
                     );
+                    #[cfg(any(test, feature = "diagnostics"))]
                     let event_count = event_buf.len();
+                    #[cfg(any(test, feature = "diagnostics"))]
                     let action_count = active_actions_buf.len();
                     self.client
                         .apply_active_actions(active_actions_buf.drain(..));
+                    #[cfg(any(test, feature = "diagnostics"))]
                     self.client
                         .metrics
                         .protocol_metrics

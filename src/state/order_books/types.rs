@@ -1,6 +1,5 @@
 //! OrderBook public/read-model types.
 
-use crate::commands::order_book::OrderLevel;
 use std::sync::Arc;
 
 /// Orderbook kind: futures or spot. Wire format is one byte.
@@ -49,8 +48,8 @@ pub struct OrderBookLevel {
     pub quantity: f64,
 }
 
-impl From<OrderLevel> for OrderBookLevel {
-    fn from(level: OrderLevel) -> Self {
+impl From<crate::commands::order_book::OrderLevel> for OrderBookLevel {
+    fn from(level: crate::commands::order_book::OrderLevel) -> Self {
         Self {
             rate: level.rate as f64,
             quantity: level.quantity as f64,
@@ -111,9 +110,8 @@ pub enum OrderBookEvent {
     /// Packet was applied; `OrderBooks` has already updated the read model.
     ///
     /// `market_index` is kept for diagnostics and low-level tools. Normal UI
-    /// code should use `market_name`, `kind`, and `top`: they describe the
-    /// already-applied book without forcing the caller to resolve server indexes
-    /// or inspect diff rows.
+    /// code should use `market_name`, `kind`, and `top`, or read the full
+    /// applied book from the snapshot by market name.
     Apply {
         market_index: u16,
         market_name: Option<Arc<str>>,
@@ -121,11 +119,6 @@ pub enum OrderBookEvent {
         is_full: bool,
         seq: u16,
         top: TopOfBook,
-        /// Raw packet rows. For diff packets these are the diff rows, not the
-        /// full applied book. Read `top` or `OrderBooks::book(...)` for the
-        /// current applied state.
-        buys: Vec<OrderLevel>,
-        sells: Vec<OrderLevel>,
     },
     /// Low-level control event: send `emk_RequestOrderBookFull` (throttle already
     /// applied). `EventDispatcher::dispatch_into_active` consumes this internally

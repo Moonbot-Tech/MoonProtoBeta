@@ -72,7 +72,7 @@ pub(crate) fn generate_sub_keys(master_key: &MoonKey, server_token: u64) -> (Moo
 ///   forge a matching `MixValues(rnd, mix_ts, server_token)`).
 ///
 /// **Not a cryptographically strong MAC** — this is a lightweight session authenticator;
-/// the real packet integrity protection is `calculate_mac32` (HMAC-CRC32C).
+/// the real packet integrity protection is `calculate_mac32` (SipHash MAC).
 ///
 /// A-14 (docs_api iter-2): doc comment expanded.
 pub(crate) fn mix_values(key: &MoonKey, token1: u64, token2: u64) -> u64 {

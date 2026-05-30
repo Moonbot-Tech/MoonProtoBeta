@@ -78,7 +78,7 @@ client.trade().penalty("BTCUSDT")?;
 Bulk buy/sell moves keep the Delphi mode enums in typed parameter structs:
 
 ```rust
-use moonproto::commands::trade::{
+use moonproto::{
     FixedPosition, MoveAllBuysCmdType, MoveAllBuysParams, ReplaceMultiKind,
 };
 

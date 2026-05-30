@@ -6,7 +6,7 @@
 //! ## What It Does
 //!
 //! - the client send path packs a command into a wire-ready UDP datagram:
-//!   header, HMAC-CRC32C MAC, obfuscation using a xoshiro128+ keystream XOR,
+//!   header, SipHash MAC, obfuscation using a xoroshiro128+ keystream XOR,
 //!   and selected transport mode handling.
 //! - [`transport_unpack`] performs the reverse operation: MAC verification,
 //!   de-obfuscation, and header parsing.
@@ -85,7 +85,7 @@ pub(crate) fn pack_client_packet(
     buf.extend_from_slice(&hdr.to_bytes());
     buf.extend_from_slice(payload);
 
-    // MAC: cached context (cached ipad CRC + opad block), with no per-packet recomputation.
+    // MAC: cached SipHash state, with no per-packet key-state recomputation.
     // Checksum bytes are already zeroed by hdr.to_bytes(), so no extra clearing is needed.
     let mac = mac_ctx.mac(buf);
     buf[1..5].copy_from_slice(&mac.to_le_bytes());
@@ -126,10 +126,10 @@ pub(crate) fn transport_unpack(
     transport_unpack_with_mac(&mac_ctx, mac_key, raw, mask_ver)
 }
 
-/// Hot-path unpack with a cached [`MacContext`]: one `crc32c_append(cached, data)`
-/// instead of recomputing ipad+data+opad from scratch for each packet.
+/// Hot-path unpack with a cached [`MacContext`]: reuse the SipHash keyed initial
+/// state instead of deriving it again for each packet.
 ///
-/// `mac_key` is still required for `outer_light_crypt` (xoshiro128+ keystream).
+/// `mac_key` is still required for `outer_light_crypt` (xoroshiro128+ keystream).
 #[inline]
 pub(crate) fn transport_unpack_with_mac(
     mac_ctx: &MacContext,

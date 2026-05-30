@@ -150,9 +150,9 @@ bitmask used by the serializer is not part of the public UI schema surface.
 Schema TypeIDs use the same value model as strategy snapshots:
 
 ```rust
-use moonproto::commands::strategy_schema::{
-    StrategyDynamicPicklist, StrategyFieldLayout, StrategyFieldType, StrategyFieldUiKind,
-    StrategySchema,
+use moonproto::{
+    StrategyDynamicPicklist, StrategyFieldLayout, StrategyFieldType,
+    StrategyFieldUiKind, StrategySchema,
 };
 ```
 

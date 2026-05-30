@@ -86,30 +86,33 @@ impl Client {
         extra: Option<&[u8]>,
         addr: SocketAddr,
     ) {
-        if self
-            .metrics
-            .debug_outgoing_blackhole
-            .load(Ordering::Relaxed)
+        #[cfg(any(test, feature = "diagnostics"))]
         {
-            self.metrics
-                .err_emu_diagnostics
-                .lock()
-                .unwrap()
-                .record_outgoing(cmd, true);
-            if trace_io_enabled() {
-                eprintln!(
-                    "[mp-io-tx-blackhole] t={} cmd={:?} raw={} packet_len={} extra_len={} packet_hash={:016X} packet_head={} addr={}",
-                    trace_elapsed_ms(),
-                    Command::from_byte(cmd),
-                    cmd,
-                    packet.len(),
-                    extra.map(|p| p.len()).unwrap_or(0),
-                    fnv1a64(packet),
-                    trace_head(packet, 16),
-                    addr
-                );
+            if self
+                .metrics
+                .debug_outgoing_blackhole
+                .load(Ordering::Relaxed)
+            {
+                self.metrics
+                    .err_emu_diagnostics
+                    .lock()
+                    .unwrap()
+                    .record_outgoing(cmd, true);
+                if trace_io_enabled() {
+                    eprintln!(
+                        "[mp-io-tx-blackhole] t={} cmd={:?} raw={} packet_len={} extra_len={} packet_hash={:016X} packet_head={} addr={}",
+                        trace_elapsed_ms(),
+                        Command::from_byte(cmd),
+                        cmd,
+                        packet.len(),
+                        extra.map(|p| p.len()).unwrap_or(0),
+                        fnv1a64(packet),
+                        trace_head(packet, 16),
+                        addr
+                    );
+                }
+                return;
             }
-            return;
         }
 
         if trace_io_enabled() {
@@ -143,6 +146,7 @@ impl Client {
         }
         match main_result {
             Ok(_) => {
+                #[cfg(any(test, feature = "diagnostics"))]
                 self.metrics
                     .err_emu_diagnostics
                     .lock()

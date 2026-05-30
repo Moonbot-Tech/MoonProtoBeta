@@ -68,9 +68,9 @@ const CMD_SWITCH_SPOT: u8 = 14;
 const LEV_CMD_VER: u8 = 1;
 
 /// `TAutoStartConfig` packed record size in bytes (Config.pas:344).
-pub(crate) const AS_CFG_SIZE: usize = 104;
+pub const AS_CFG_SIZE: usize = 104;
 /// `TAutoStartConfig2` packed record size in bytes (Config.pas:384).
-pub(crate) const AS_CFG2_SIZE: usize = 168;
+pub const AS_CFG2_SIZE: usize = 168;
 
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]

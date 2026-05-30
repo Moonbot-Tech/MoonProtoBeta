@@ -1,10 +1,18 @@
 //! Passive protocol timing counters.
 
 use super::bps::BpsCounter;
+#[cfg(any(test, feature = "diagnostics"))]
 use super::diagnostics::ErrEmuDiagnosticsState;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+#[cfg(any(test, feature = "diagnostics"))]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
+#[cfg(any(test, feature = "diagnostics"))]
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+#[cfg(any(test, feature = "diagnostics"))]
+use std::sync::Mutex;
+#[cfg(any(test, feature = "diagnostics"))]
 use std::time::{Duration, Instant};
 
 /// Observability/diagnostics cluster carved out of [`super::Client`].
@@ -26,13 +34,15 @@ pub(crate) struct ClientMetrics {
     pub(crate) bps_sent: BpsCounter,
     /// O(1) EMA sliding-window byte/sec counter for the recv direction.
     pub(crate) bps_recv: BpsCounter,
+    /// Log throttle table: key -> last raise timestamp (anti-spam).
+    pub(crate) log_last: HashMap<&'static str, i64>,
     /// Client-side ErrEmu packet-loss diagnostics (test-only loss emulator).
+    #[cfg(any(test, feature = "diagnostics"))]
     pub(crate) err_emu_diagnostics: Arc<Mutex<ErrEmuDiagnosticsState>>,
     /// Passive protocol loop timing counters.
     pub(crate) protocol_metrics: Arc<ProtocolMetrics>,
-    /// Log throttle table: key -> last raise timestamp (anti-spam).
-    pub(crate) log_last: HashMap<&'static str, i64>,
     /// FireTest-only hook: drop every outgoing datagram before socket send.
+    #[cfg(any(test, feature = "diagnostics"))]
     pub(crate) debug_outgoing_blackhole: Arc<AtomicBool>,
 }
 
@@ -44,9 +54,11 @@ impl ClientMetrics {
             total_recv_shared: AtomicU64::new(0),
             bps_sent: BpsCounter::new(),
             bps_recv: BpsCounter::new(),
+            log_last: HashMap::new(),
+            #[cfg(any(test, feature = "diagnostics"))]
             err_emu_diagnostics: Arc::new(Mutex::new(ErrEmuDiagnosticsState::default())),
             protocol_metrics: Arc::new(ProtocolMetrics::default()),
-            log_last: HashMap::new(),
+            #[cfg(any(test, feature = "diagnostics"))]
             debug_outgoing_blackhole: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -57,6 +69,7 @@ impl ClientMetrics {
 /// These counters never influence send/retry/drop decisions. They exist only to
 /// prove whether the protocol-owned work is bounded and fast enough for the
 /// Delphi machine-effect parity plan.
+#[cfg(any(test, feature = "diagnostics"))]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProtocolMetricsSnapshot {
     /// UDP datagrams returned by `recv_from`, before MoonProto MAC/version
@@ -144,8 +157,14 @@ pub struct ProtocolMetricsSnapshot {
     /// Current public event queue length when a dispatcher-backed snapshot was
     /// requested; otherwise zero.
     pub public_event_queue_len: usize,
+    /// Last PMTU value received from a server `Ping`.
+    ///
+    /// FireTest prints this so Linux/VPS runs prove the PMTU probing result
+    /// instead of leaving it hidden in the transport state.
+    pub last_pmtu: u16,
 }
 
+#[cfg(any(test, feature = "diagnostics"))]
 #[derive(Debug, Default)]
 pub(crate) struct ProtocolMetrics {
     recv_count: AtomicU64,
@@ -195,8 +214,14 @@ pub(crate) struct ProtocolMetrics {
     active_dispatch_over_5ms: AtomicU64,
     send_phase_ns: AtomicU64,
     send_phase_max_ns: AtomicU64,
+    last_pmtu: AtomicU64,
 }
 
+#[cfg(not(any(test, feature = "diagnostics")))]
+#[derive(Debug, Default)]
+pub(crate) struct ProtocolMetrics;
+
+#[cfg(any(test, feature = "diagnostics"))]
 impl ProtocolMetrics {
     pub(crate) fn record_recv_packet(&self) {
         self.recv_count.fetch_add(1, Ordering::Relaxed);
@@ -214,6 +239,10 @@ impl ProtocolMetrics {
         let ns = duration.as_nanos().min(u128::from(u64::MAX)) as u64;
         self.send_phase_ns.fetch_add(ns, Ordering::Relaxed);
         let _ = store_max(&self.send_phase_max_ns, ns);
+    }
+
+    pub(crate) fn record_pmtu(&self, pmtu: u16) {
+        self.last_pmtu.store(u64::from(pmtu), Ordering::Relaxed);
     }
 
     pub(crate) fn record_writer_cpu(&self, duration: Duration) {
@@ -350,6 +379,7 @@ impl ProtocolMetrics {
             send_phase_ns: self.send_phase_ns.load(Ordering::Relaxed),
             send_phase_max_ns: self.send_phase_max_ns.load(Ordering::Relaxed),
             public_event_queue_len,
+            last_pmtu: self.last_pmtu.load(Ordering::Relaxed) as u16,
         }
     }
 
@@ -402,12 +432,14 @@ impl ProtocolMetrics {
     }
 }
 
+#[cfg(any(test, feature = "diagnostics"))]
 pub(crate) struct ProtocolMetricsTimer<'a> {
     metrics: &'a ProtocolMetrics,
     kind: TimerKind,
     start: Instant,
 }
 
+#[cfg(any(test, feature = "diagnostics"))]
 impl Drop for ProtocolMetricsTimer<'_> {
     fn drop(&mut self) {
         let duration = self.start.elapsed();
@@ -417,11 +449,13 @@ impl Drop for ProtocolMetricsTimer<'_> {
     }
 }
 
+#[cfg(any(test, feature = "diagnostics"))]
 #[derive(Debug, Clone, Copy)]
 enum TimerKind {
     WriterTick,
 }
 
+#[cfg(any(test, feature = "diagnostics"))]
 fn store_max(slot: &AtomicU64, value: u64) -> bool {
     let mut current = slot.load(Ordering::Relaxed);
     while value > current {
@@ -433,6 +467,7 @@ fn store_max(slot: &AtomicU64, value: u64) -> bool {
     false
 }
 
+#[cfg(any(test, feature = "diagnostics"))]
 fn record_timing(
     count: &AtomicU64,
     total: &AtomicU64,

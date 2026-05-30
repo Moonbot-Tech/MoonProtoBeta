@@ -53,13 +53,13 @@ for event in client.drain_events() {
 
 `Apply` is emitted after the retained current book has already been updated.
 For UI code, use the resolved `market_name`, typed `kind`, and `top` fields.
-The event also contains decoded diff rows for diagnostics, but those rows are
-not the full applied book.
+For the full book, read the retained `OrderBookSnapshot` by market name.
 
 `RequestFullNeeded` is a low-level recovery signal. `MoonClient` consumes it
 internally and requests a fresh full book automatically.
 Diagnostic `Ignored` events are also kept out of the high-level `MoonClient`
-event sink; they remain visible only to low-level `EventDispatcher` tools.
+event sink. Application code observes the maintained book snapshot and typed
+applied/failed events.
 
 ## Reading Current Book
 
@@ -122,7 +122,7 @@ synchronized for the current server session. This prevents a new server
 
 ## Protocol Data
 
-`commands::order_book::parse_order_book_packet`, `OrderBookUpdate`, raw
+The internal orderbook parser, `OrderBookUpdate`, raw packet rows, raw
 `market_index`, and raw orderbook kind bytes are for protocol tests and replay
 tools. Regular applications should subscribe by name, react to
 `OrderBookEvent::Apply`, and read current books from `MoonClient` snapshots.

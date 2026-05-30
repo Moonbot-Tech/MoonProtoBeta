@@ -32,8 +32,8 @@ pub(crate) struct ClientTransport {
     pub(crate) first_bind_failure_ms: i64,
     /// Wall-clock ms of the last emitted `BindFailed` event (event throttle).
     pub(crate) last_bind_failed_event_ms: i64,
-    /// Cached MAC context (ipad CRC + opad block) for `cfg.mac_key` — fixed for
-    /// the whole life of the Client, reused by the recv/send phases.
+    /// Cached SipHash-1-3 MAC context for `cfg.mac_key` — fixed for the whole
+    /// life of the Client, reused by the recv/send phases.
     pub(crate) mac_ctx: crate::transport::MacContext,
     /// Delphi `SentCountDNS` equivalent for transport mode V2.
     pub(crate) transport_mode_state: crate::transport::ClientTransportModeState,

@@ -296,10 +296,8 @@ LastPrice line for the same market; both are retained by the same
 
 When trades retained storage is active, `MoonClient` queues these rows into its
 retained-history worker immediately after applying market prices. The default
-worker is lazy-created from the all-trades subscription scope; low-level
-`EventDispatcher::set_market_history_handle` is only for custom runtimes that
-own storage themselves. The UDP/protocol loop does not write the retained ring
-directly.
+worker is lazy-created from the all-trades subscription scope. The UDP/protocol
+loop does not write the retained ring directly.
 
 `Market::futures_type` uses `BaseCurrency`, a small public wrapper that
 preserves unknown future server values:

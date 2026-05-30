@@ -237,6 +237,7 @@ pub struct MarketDerivedSnapshot {
     pub candle_deltas: DerivedDeltaSnapshot,
     pub last_price_deltas: DerivedDeltaSnapshot,
     pub deltas: DerivedDeltaSnapshot,
+    pub current_candle: Option<Candle5mRow>,
 }
 ```
 
@@ -291,8 +292,6 @@ requests manually.
 
 ## Protocol Data
 
-`commands::trades_stream::parse_trades_packet`, raw `TradesPacket` /
-`TradeSection`, `TradesState`, and `iter_trades_resend_response` remain public
-for protocol tests and loss diagnostics. Normal applications should subscribe
-through `MoonClient`, react to `TradesEvent::Applied`, and read retained rows
-from `MarketHistoryReaders`.
+Raw packet parsers and resend-state helpers are internal protocol-test
+machinery. Normal applications should subscribe through `MoonClient`, react to
+`TradesEvent::Applied`, and read retained rows from `MarketHistoryReaders`.

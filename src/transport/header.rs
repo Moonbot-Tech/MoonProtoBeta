@@ -35,7 +35,7 @@ const _: () = assert!(core::mem::size_of::<WireClientMsgHeader>() == CLIENT_HDR_
 pub struct ServerMsgHeader {
     /// Random byte used as the seed for outer obfuscation.
     pub rnd: u8,
-    /// HMAC-CRC32C checksum stored in little-endian order on the wire.
+    /// SipHash MAC stored in little-endian order on the wire.
     pub checksum: u32,
     /// Transport version. Valid packets use `TRANSPORT_VER`.
     pub ver: u8,
@@ -48,7 +48,7 @@ pub struct ServerMsgHeader {
 pub(crate) struct ClientMsgHeader {
     /// Random byte used as the seed for outer obfuscation.
     pub(crate) rnd: u8,
-    /// HMAC-CRC32C checksum stored in little-endian order on the wire.
+    /// SipHash MAC stored in little-endian order on the wire.
     pub(crate) checksum: u32,
     /// Transport version. Valid packets use `TRANSPORT_VER`.
     pub(crate) ver: u8,

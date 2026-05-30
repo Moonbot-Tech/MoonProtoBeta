@@ -196,7 +196,6 @@ can still attach to the order, matching the Delphi client behavior.
 
 ## Protocol Data
 
-`commands::trade::*`, `TradeCommand::parse`, and `Orders::apply` document the
-wire/state model for tests and packet replay. Regular applications should use
-`MoonClient`, snapshots, events, and the `client.orders()` / `client.trade()`
-handles.
+The internal `commands::trade` wire model and `Orders::apply` exist for tests
+and packet replay. Regular applications should use `MoonClient`, snapshots,
+events, and the `client.orders()` / `client.trade()` handles.

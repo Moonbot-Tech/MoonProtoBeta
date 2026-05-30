@@ -106,6 +106,7 @@ const QUICK_CONNECT_TIMEOUT_SECS: u64 = 18;
 const QUICK_STREAM_TIMEOUT_SECS: u64 = 8;
 const QUICK_TOTAL_TARGET_SECS: u64 = 30;
 const FIRETEST_SLOW_STARTUP_DIAG_SECS: f64 = 8.0;
+const FIRETEST_CPU_HARD_RED_FLAG_NS: u64 = 5_000_000;
 const ACTIVE_LIB_REPORT_MARKETS: [&str; 2] = ["BTCUSDT", "ETHUSDT"];
 const FIRETEST_COIN_CARD_KIND: DeepHistoryKind = DeepHistoryKind::Hour4;
 const FIRETEST_MIN_COIN_CARD_CANDLES: usize = 24;
@@ -869,8 +870,9 @@ impl Session {
             })
             .unwrap_or_default();
         format!(
-            "recv={} reader_cpu(avg/max={}us/{}us max_src={} >100us/>1ms/>5ms={}/{}/{}) reader_wait(count={} avg/max={}us/{}us max_src={}) writer_cpu(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) active_dispatch(avg/max={}us/{}us max_src={} events={} actions={} >100us/>1ms/>5ms={}/{}/{}) app_enqueue(avg/max={}us/{}us max_src={} events={} mode={} >100us/>1ms/>5ms={}/{}/{}) writer_tick_wall(count={} avg/max={}us/{}us) send_max={}us public_events={}{}",
+            "recv={} pmtu={} reader_cpu(avg/max={}us/{}us max_src={} >100us/>1ms/>5ms={}/{}/{}) reader_wait(count={} avg/max={}us/{}us max_src={}) writer_cpu(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) active_dispatch(avg/max={}us/{}us max_src={} events={} actions={} >100us/>1ms/>5ms={}/{}/{}) app_enqueue(avg/max={}us/{}us max_src={} events={} mode={} >100us/>1ms/>5ms={}/{}/{}) writer_tick_wall(count={} avg/max={}us/{}us) send_max={}us public_events={}{}",
             m.recv_count,
+            m.last_pmtu,
             avg_us(m.reader_protocol_ns, m.reader_protocol_count),
             m.reader_protocol_max_ns / 1_000,
             metric_cmd_label(
@@ -1830,8 +1832,9 @@ fn metric_app_mode_label(mode: u8) -> &'static str {
 
 fn protocol_metrics_summary(m: &ProtocolMetricsSnapshot) -> String {
     format!(
-        "recv={} reader_cpu(avg/max={}us/{}us max_src={} >100us/>1ms/>5ms={}/{}/{}) reader_wait(count={} avg/max={}us/{}us max_src={}) writer_cpu(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) active_dispatch(avg/max={}us/{}us max_src={} events={} actions={} >100us/>1ms/>5ms={}/{}/{}) app_enqueue(avg/max={}us/{}us max_src={} events={} mode={} >100us/>1ms/>5ms={}/{}/{}) writer_tick_wall(count={} avg/max={}us/{}us) send_max={}us public_events={}",
+        "recv={} pmtu={} reader_cpu(avg/max={}us/{}us max_src={} >100us/>1ms/>5ms={}/{}/{}) reader_wait(count={} avg/max={}us/{}us max_src={}) writer_cpu(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) active_dispatch(avg/max={}us/{}us max_src={} events={} actions={} >100us/>1ms/>5ms={}/{}/{}) app_enqueue(avg/max={}us/{}us max_src={} events={} mode={} >100us/>1ms/>5ms={}/{}/{}) writer_tick_wall(count={} avg/max={}us/{}us) send_max={}us public_events={}",
         m.recv_count,
+        m.last_pmtu,
         avg_us(m.reader_protocol_ns, m.reader_protocol_count),
         m.reader_protocol_max_ns / 1_000,
         metric_cmd_label(
@@ -1885,6 +1888,67 @@ fn protocol_metrics_summary(m: &ProtocolMetricsSnapshot) -> String {
         m.send_phase_max_ns / 1_000,
         m.public_event_queue_len,
     )
+}
+
+fn assert_protocol_cpu_gate(label: &str, m: &ProtocolMetricsSnapshot) {
+    let mut red_flags = Vec::new();
+
+    if m.reader_protocol_over_5ms > 0 {
+        red_flags.push(format!(
+            "reader_cpu >5ms count={} max={}us src={}",
+            m.reader_protocol_over_5ms,
+            m.reader_protocol_max_ns / 1_000,
+            metric_cmd_label(
+                m.reader_protocol_max_cmd,
+                u8::MAX,
+                m.reader_protocol_max_payload_len
+            )
+        ));
+    }
+    if m.writer_cpu_over_5ms > 0 {
+        red_flags.push(format!(
+            "writer_cpu >5ms count={} max={}us",
+            m.writer_cpu_over_5ms,
+            m.writer_cpu_max_ns / 1_000
+        ));
+    }
+    if m.active_dispatch_over_5ms > 0 {
+        red_flags.push(format!(
+            "active_dispatch >5ms count={} max={}us src={} events={} actions={}",
+            m.active_dispatch_over_5ms,
+            m.active_dispatch_max_ns / 1_000,
+            metric_cmd_label(
+                m.active_dispatch_max_cmd,
+                m.active_dispatch_max_api_method,
+                m.active_dispatch_max_payload_len
+            ),
+            m.active_dispatch_max_events,
+            m.active_dispatch_max_actions
+        ));
+    }
+    if m.app_enqueue_over_5ms > 0 {
+        red_flags.push(format!(
+            "app_enqueue >5ms count={} max={}us src={} events={} mode={}",
+            m.app_enqueue_over_5ms,
+            m.app_enqueue_max_ns / 1_000,
+            metric_cmd_label(
+                m.app_enqueue_max_cmd,
+                m.app_enqueue_max_api_method,
+                m.app_enqueue_max_payload_len
+            ),
+            m.app_enqueue_max_events,
+            metric_app_mode_label(m.app_enqueue_max_mode)
+        ));
+    }
+    if m.send_phase_max_ns > FIRETEST_CPU_HARD_RED_FLAG_NS {
+        red_flags.push(format!("send_phase max={}us", m.send_phase_max_ns / 1_000));
+    }
+
+    assert!(
+        red_flags.is_empty(),
+        "FIRETEST CPU gate {label}: {}. reader_wait and writer_tick_wall are intentionally excluded from this hard gate.",
+        red_flags.join("; ")
+    );
 }
 
 fn delphi_now_raw_for_test() -> f64 {
@@ -2215,8 +2279,6 @@ fn record_event(
             is_full,
             seq,
             top,
-            buys,
-            sells,
         }) => {
             st.orderbook_apply += 1;
             let raw_kind = kind.as_u8();
@@ -2272,26 +2334,24 @@ fn record_event(
                 }
             }
             if should_log_stream_count(st.orderbook_apply) {
-                let top_buy = buys
-                    .first()
+                let top_buy = top
+                    .bid
                     .map(|l| format!("{:.8}@{:.8}", l.quantity, l.rate))
                     .unwrap_or_else(|| "none".to_string());
-                let top_sell = sells
-                    .first()
+                let top_sell = top
+                    .ask
                     .map(|l| format!("{:.8}@{:.8}", l.quantity, l.rate))
                     .unwrap_or_else(|| "none".to_string());
                 log_server_event(
                     &st,
                     event_no,
                     format!(
-                        "OrderBook Apply #{} market_index={} kind={} full={} seq={} buys={} sells={} top_buy={} top_sell={}",
+                        "OrderBook Apply #{} market_index={} kind={} full={} seq={} top_buy={} top_sell={}",
                         st.orderbook_apply,
                         market_index,
                         raw_kind,
                         is_full,
                         seq,
-                        buys.len(),
-                        sells.len(),
                         top_buy,
                         top_sell
                     ),
@@ -2949,6 +3009,8 @@ fn log_err_emu_pair(label: &str, a: &Session, b: &Session) {
 fn log_protocol_cpu_pair(label: &str, a: &Session, b: &Session) {
     println!("FIRETEST CPU {label} A: {}", a.protocol_summary());
     println!("FIRETEST CPU {label} B: {}", b.protocol_summary());
+    assert_protocol_cpu_gate(&format!("{label} A"), &a.client.protocol_metrics_snapshot());
+    assert_protocol_cpu_gate(&format!("{label} B"), &b.client.protocol_metrics_snapshot());
 }
 
 fn log_err_emu_snapshot(
@@ -3903,10 +3965,12 @@ fn run_moonclient_public_smoke(
         "FIRETEST {label}: MoonClient public path did not reach health within startup={startup_timeout:?} + stream_after_ready={stream_after_ready:?}: {}",
         stats.summary()
     );
+    let metrics = client.protocol_metrics_snapshot();
     println!(
         "FIRETEST CPU {label}: {}",
-        protocol_metrics_summary(&client.protocol_metrics_snapshot())
+        protocol_metrics_summary(&metrics)
     );
+    assert_protocol_cpu_gate(label, &metrics);
     println!(
         "OK: FIRETEST {label}: MoonClient public path healthy after {:.2}s [{}]",
         start.elapsed().as_secs_f64(),

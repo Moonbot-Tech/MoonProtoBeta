@@ -1,11 +1,12 @@
-//! `ClientSender` subscription helpers and reconnect registry updates.
+﻿//! `ClientSender` subscription helpers and reconnect registry updates.
+#![allow(dead_code)]
 
 use super::*;
 
 impl ClientSender {
     /// Subscribe to an orderbook stream and remember the intent for reconnect
     /// restore.
-    pub fn subscribe_orderbook(&self, market_name: &str) {
+    pub(crate) fn subscribe_orderbook(&self, market_name: &str) {
         if let Err(e) = self.try_subscribe_orderbook(market_name) {
             log::warn!(target: "moonproto::client",
                 "subscribe_orderbook({market_name}) dropped: {e}");
@@ -13,7 +14,7 @@ impl ClientSender {
     }
 
     /// Unsubscribe from an orderbook stream and update the reconnect registry.
-    pub fn unsubscribe_orderbook(&self, market_name: &str) {
+    pub(crate) fn unsubscribe_orderbook(&self, market_name: &str) {
         if let Err(e) = self.try_unsubscribe_orderbook(market_name) {
             log::warn!(target: "moonproto::client",
                 "unsubscribe_orderbook({market_name}) dropped: {e}");
@@ -26,7 +27,7 @@ impl ClientSender {
     /// This updates the shared reconnect registry immediately, deduplicates
     /// already remembered market names, and appends one batched
     /// `emk_SubscribeOrderBook` request for newly added markets.
-    pub fn subscribe_orderbooks<I, S>(&self, market_names: I)
+    pub(crate) fn subscribe_orderbooks<I, S>(&self, market_names: I)
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
@@ -39,7 +40,7 @@ impl ClientSender {
 
     /// Unsubscribe from several orderbook streams and update the reconnect
     /// registry.
-    pub fn unsubscribe_orderbooks<I, S>(&self, market_names: I)
+    pub(crate) fn unsubscribe_orderbooks<I, S>(&self, market_names: I)
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
@@ -51,7 +52,7 @@ impl ClientSender {
     }
 
     /// Unsubscribe from all orderbook streams remembered by the registry.
-    pub fn unsubscribe_all_orderbooks(&self) {
+    pub(crate) fn unsubscribe_all_orderbooks(&self) {
         if let Err(e) = self.try_unsubscribe_all_orderbooks() {
             log::warn!(target: "moonproto::client",
                 "unsubscribe_all_orderbooks dropped: {e}");
@@ -60,7 +61,7 @@ impl ClientSender {
 
     /// Subscribe to the all-trades stream and remember the intent for reconnect
     /// restore.
-    pub fn subscribe_all_trades(&self, want_mm: bool) {
+    pub(crate) fn subscribe_all_trades(&self, want_mm: bool) {
         if let Err(e) = self.try_subscribe_all_trades(want_mm) {
             log::warn!(target: "moonproto::client",
                 "subscribe_all_trades(want_mm={want_mm}) dropped: {e}");
@@ -73,7 +74,7 @@ impl ClientSender {
     /// Empty `market_names` means all markets. The wire command is still
     /// Delphi-compatible `emk_SubscribeAllTrades`; the scope affects only
     /// Active Lib typed events, retained trades/candles, and derived analytics.
-    pub fn subscribe_trades_for<I, S>(&self, want_mm: bool, market_names: I)
+    pub(crate) fn subscribe_trades_for<I, S>(&self, want_mm: bool, market_names: I)
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
@@ -85,7 +86,7 @@ impl ClientSender {
     }
 
     /// Unsubscribe from the all-trades stream and update the reconnect registry.
-    pub fn unsubscribe_all_trades(&self) {
+    pub(crate) fn unsubscribe_all_trades(&self) {
         if let Err(e) = self.try_unsubscribe_all_trades() {
             log::warn!(target: "moonproto::client",
                 "unsubscribe_all_trades dropped: {e}");
@@ -93,7 +94,7 @@ impl ClientSender {
     }
 
     /// Fallible orderbook subscription.
-    pub fn try_subscribe_orderbook(&self, market_name: &str) -> Result<(), SubscribeError> {
+    pub(crate) fn try_subscribe_orderbook(&self, market_name: &str) -> Result<(), SubscribeError> {
         if !self.shared.app_queue_alive.load(Ordering::Relaxed) {
             return Err(SubscribeError::Disconnected);
         }
@@ -113,7 +114,10 @@ impl ClientSender {
     }
 
     /// Fallible orderbook unsubscribe.
-    pub fn try_unsubscribe_orderbook(&self, market_name: &str) -> Result<(), SubscribeError> {
+    pub(crate) fn try_unsubscribe_orderbook(
+        &self,
+        market_name: &str,
+    ) -> Result<(), SubscribeError> {
         if !self.shared.app_queue_alive.load(Ordering::Relaxed) {
             return Err(SubscribeError::Disconnected);
         }
@@ -133,7 +137,10 @@ impl ClientSender {
     }
 
     /// Fallible batched orderbook subscription.
-    pub fn try_subscribe_orderbooks<I, S>(&self, market_names: I) -> Result<(), SubscribeError>
+    pub(crate) fn try_subscribe_orderbooks<I, S>(
+        &self,
+        market_names: I,
+    ) -> Result<(), SubscribeError>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
@@ -168,7 +175,10 @@ impl ClientSender {
     }
 
     /// Fallible batched orderbook unsubscribe.
-    pub fn try_unsubscribe_orderbooks<I, S>(&self, market_names: I) -> Result<(), SubscribeError>
+    pub(crate) fn try_unsubscribe_orderbooks<I, S>(
+        &self,
+        market_names: I,
+    ) -> Result<(), SubscribeError>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
@@ -203,7 +213,7 @@ impl ClientSender {
     }
 
     /// Fallible all-orderbooks unsubscribe.
-    pub fn try_unsubscribe_all_orderbooks(&self) -> Result<(), SubscribeError> {
+    pub(crate) fn try_unsubscribe_all_orderbooks(&self) -> Result<(), SubscribeError> {
         if !self.shared.app_queue_alive.load(Ordering::Relaxed) {
             return Err(SubscribeError::Disconnected);
         }
@@ -223,12 +233,12 @@ impl ClientSender {
     }
 
     /// Fallible all-trades subscription.
-    pub fn try_subscribe_all_trades(&self, want_mm: bool) -> Result<(), SubscribeError> {
+    pub(crate) fn try_subscribe_all_trades(&self, want_mm: bool) -> Result<(), SubscribeError> {
         self.try_subscribe_trades_with_scope(want_mm, crate::state::TradeStorageScope::All)
     }
 
     /// Fallible scoped all-trades subscription.
-    pub fn try_subscribe_trades_for<I, S>(
+    pub(crate) fn try_subscribe_trades_for<I, S>(
         &self,
         want_mm: bool,
         market_names: I,
@@ -271,7 +281,7 @@ impl ClientSender {
     }
 
     /// Fallible all-trades unsubscribe.
-    pub fn try_unsubscribe_all_trades(&self) -> Result<(), SubscribeError> {
+    pub(crate) fn try_unsubscribe_all_trades(&self) -> Result<(), SubscribeError> {
         if !self.shared.app_queue_alive.load(Ordering::Relaxed) {
             return Err(SubscribeError::Disconnected);
         }

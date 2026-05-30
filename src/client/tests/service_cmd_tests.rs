@@ -788,7 +788,7 @@ fn reader_handles_fine_auth_done_without_recv_event_backlog() {
 }
 
 #[test]
-fn reader_keeps_primary_wait_after_invalid_who_are_you() {
+fn reader_clears_primary_wait_after_invalid_who_are_you() {
     let _err_emu_guard = err_emu_test_guard();
     let (server_sock, client_addr, mut client) = inline_reader_test_client();
     client.start_hello_wait(HelloWaitState::PrimaryHelloCold, 0);
@@ -799,7 +799,7 @@ fn reader_keeps_primary_wait_after_invalid_who_are_you() {
 
     pump_inline_reader(&mut client);
 
-    assert!(client.waiting_hello);
+    assert!(!client.waiting_hello);
     assert_eq!(
         client.server_token, 0x1234,
         "invalid handshake payload must not apply WhoAreYou fields",
@@ -807,7 +807,37 @@ fn reader_keeps_primary_wait_after_invalid_who_are_you() {
 }
 
 #[test]
-fn reader_keeps_fine_wait_after_invalid_fine() {
+fn reader_drops_late_who_are_you_after_server_token_is_set() {
+    let _err_emu_guard = err_emu_test_guard();
+    let (server_sock, client_addr, mut client) = inline_reader_test_client();
+    let token_before = client.client_token;
+    client.start_hello_wait(HelloWaitState::PrimaryImFriendSent, 0);
+    client.server_token = 0x1111;
+    client.peer_app_token = 0x2222;
+
+    let who = encrypted_server_hello(
+        &client.cfg.master_key,
+        Command::WhoAreYou,
+        client.cfg.client_id,
+        0xAAAA,
+        0xBBBB,
+    );
+    let packet = pack_server_packet(&client.cfg.mac_key, Command::WhoAreYou, &who);
+    server_sock.send_to(&packet, client_addr).unwrap();
+
+    pump_inline_reader(&mut client);
+
+    assert!(!client.waiting_hello);
+    assert_eq!(client.server_token, 0x1111);
+    assert_eq!(client.peer_app_token, 0x2222);
+    assert_eq!(
+        client.client_token, token_before,
+        "late WhoAreYou after first ServerToken must not build another ImFriend",
+    );
+}
+
+#[test]
+fn reader_clears_fine_wait_after_invalid_fine() {
     let _err_emu_guard = err_emu_test_guard();
     let (server_sock, client_addr, mut client) = inline_reader_test_client();
     client.start_hello_wait(HelloWaitState::PrimaryImFriendSent, 0);
@@ -818,7 +848,7 @@ fn reader_keeps_fine_wait_after_invalid_fine() {
 
     pump_inline_reader(&mut client);
 
-    assert!(client.waiting_hello);
+    assert!(!client.waiting_hello);
     assert!(client.need_connect);
     assert!(!client.authorized);
     assert_ne!(client.auth_status, AuthStatus::AuthDone);

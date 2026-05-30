@@ -1,4 +1,5 @@
-//! `ClientSender` order/trade command helpers.
+﻿//! `ClientSender` order/trade command helpers.
+#![allow(dead_code)]
 
 use super::*;
 
@@ -79,7 +80,7 @@ impl ClientSender {
     /// This mirrors [`Client::new_order`]: `MPC_Order`, high priority,
     /// encrypted, `MaxRetries=3`.
     #[doc(hidden)]
-    pub fn new_order(
+    pub(crate) fn new_order(
         &self,
         ctx: crate::commands::trade::TradeCtx,
         market: &str,
@@ -100,7 +101,7 @@ impl ClientSender {
     }
 
     /// Apply Delphi replace request locally and send `TOrderReplaceCommand`.
-    pub fn replace_order(
+    pub(crate) fn replace_order(
         &self,
         orders: &mut crate::state::Orders,
         uid: u64,
@@ -120,7 +121,7 @@ impl ClientSender {
     }
 
     /// Replace an order already tracked by `EventDispatcher::orders()`.
-    pub fn replace_tracked_order(
+    pub(crate) fn replace_tracked_order(
         &self,
         orders: &mut crate::state::Orders,
         uid: u64,
@@ -134,13 +135,13 @@ impl ClientSender {
     /// This is fire-and-forget. Use [`Client::request_order_snapshot`] when the
     /// caller owns the `Client` and wants to wait for the applied snapshot.
     #[doc(hidden)]
-    pub fn request_all_statuses(&self, uid: u64) -> bool {
+    pub(crate) fn request_all_statuses(&self, uid: u64) -> bool {
         let raw = crate::commands::trade::build_all_statuses_request(uid);
         self.send_trade(raw, 3)
     }
 
     /// Apply Delphi cancel request locally and send `TOrderCancelCommand`.
-    pub fn cancel_order(&self, orders: &mut crate::state::Orders, uid: u64) -> bool {
+    pub(crate) fn cancel_order(&self, orders: &mut crate::state::Orders, uid: u64) -> bool {
         if !self.domain_ready_for_typed_send() {
             return false;
         }
@@ -152,13 +153,13 @@ impl ClientSender {
     }
 
     /// Cancel an order already tracked by `EventDispatcher::orders()`.
-    pub fn cancel_tracked_order(&self, orders: &mut crate::state::Orders, uid: u64) -> bool {
+    pub(crate) fn cancel_tracked_order(&self, orders: &mut crate::state::Orders, uid: u64) -> bool {
         self.cancel_order(orders, uid)
     }
 
     /// Send `TJoinOrdersCommand`.
     #[doc(hidden)]
-    pub fn join_orders(
+    pub(crate) fn join_orders(
         &self,
         ctx: crate::commands::trade::TradeCtx,
         market: &str,
@@ -170,7 +171,7 @@ impl ClientSender {
 
     /// Send `TSplitOrderCommand`.
     #[doc(hidden)]
-    pub fn split_order(
+    pub(crate) fn split_order(
         &self,
         ctx: crate::commands::trade::TradeCtx,
         market: &str,
@@ -190,7 +191,7 @@ impl ClientSender {
 
     /// Split an order already tracked by `EventDispatcher::orders()`.
     #[doc(hidden)]
-    pub fn split_tracked_order(
+    pub(crate) fn split_tracked_order(
         &self,
         order: &crate::state::Order,
         split_parts: i32,
@@ -207,7 +208,7 @@ impl ClientSender {
     }
 
     /// Send `TMoveAllSellsCommand` if Delphi active-client gate finds a candidate order.
-    pub fn move_all_sells(
+    pub(crate) fn move_all_sells(
         &self,
         orders: &crate::state::Orders,
         ctx: crate::commands::trade::TradeCtx,
@@ -227,7 +228,7 @@ impl ClientSender {
 
     /// Send `TDoClosePositionCommand` (`MaxRetries=1`).
     #[doc(hidden)]
-    pub fn do_close_position(
+    pub(crate) fn do_close_position(
         &self,
         ctx: crate::commands::trade::TradeCtx,
         market: &str,
@@ -239,7 +240,7 @@ impl ClientSender {
 
     /// Send `TDoLimitClosePositionCommand` (`MaxRetries=1`).
     #[doc(hidden)]
-    pub fn do_limit_close_position(
+    pub(crate) fn do_limit_close_position(
         &self,
         ctx: crate::commands::trade::TradeCtx,
         market: &str,
@@ -251,7 +252,7 @@ impl ClientSender {
 
     /// Send `TDoSplitPositionCommand` (`MaxRetries=1`).
     #[doc(hidden)]
-    pub fn do_split_position(
+    pub(crate) fn do_split_position(
         &self,
         ctx: crate::commands::trade::TradeCtx,
         market: &str,
@@ -263,7 +264,7 @@ impl ClientSender {
 
     /// Send `TDoSellOrderCommand` (`MaxRetries=1`).
     #[doc(hidden)]
-    pub fn do_sell_order(
+    pub(crate) fn do_sell_order(
         &self,
         ctx: crate::commands::trade::TradeCtx,
         market: &str,
@@ -276,7 +277,7 @@ impl ClientSender {
 
     /// Send `TOrderStatusRequest`.
     #[doc(hidden)]
-    pub fn request_order_status(
+    pub(crate) fn request_order_status(
         &self,
         ctx: crate::commands::trade::TradeCtx,
         market: &str,
@@ -288,12 +289,12 @@ impl ClientSender {
     /// Request a fresh status for an order already tracked by
     /// `EventDispatcher::orders()`.
     #[doc(hidden)]
-    pub fn request_tracked_order_status(&self, order: &crate::state::Order) -> bool {
+    pub(crate) fn request_tracked_order_status(&self, order: &crate::state::Order) -> bool {
         self.request_order_status(order.trade_ctx(), &order.market_name)
     }
 
     /// Apply Delphi `SendStopsIfChanged` locally and send `TOrderStopsUpdate`.
-    pub fn update_order_stops(
+    pub(crate) fn update_order_stops(
         &self,
         orders: &mut crate::state::Orders,
         uid: u64,
@@ -311,7 +312,7 @@ impl ClientSender {
     }
 
     /// Update stops for an order already tracked by `EventDispatcher::orders()`.
-    pub fn update_tracked_order_stops(
+    pub(crate) fn update_tracked_order_stops(
         &self,
         orders: &mut crate::state::Orders,
         uid: u64,
@@ -322,7 +323,7 @@ impl ClientSender {
 
     /// Delphi `TOrdersWorkers.TurnPanicSell`: set panic sell for every local
     /// active sell order in `market_name`.
-    pub fn turn_panic_sell(
+    pub(crate) fn turn_panic_sell(
         &self,
         orders: &mut crate::state::Orders,
         market_name: &str,
@@ -340,7 +341,7 @@ impl ClientSender {
     }
 
     /// Delphi `TOrdersWorkers.SwitchPanicSellByMarket` button semantics.
-    pub fn switch_panic_sell_by_market(
+    pub(crate) fn switch_panic_sell_by_market(
         &self,
         orders: &mut crate::state::Orders,
         market_name: &str,
@@ -357,7 +358,7 @@ impl ClientSender {
     }
 
     /// Apply Delphi per-worker panic-sell flag and send `TTurnPanicSellCommand`.
-    pub fn turn_order_panic_sell(
+    pub(crate) fn turn_order_panic_sell(
         &self,
         orders: &mut crate::state::Orders,
         uid: u64,
@@ -375,7 +376,7 @@ impl ClientSender {
 
     /// Toggle panic sell for an order already tracked by
     /// `EventDispatcher::orders()`.
-    pub fn turn_tracked_order_panic_sell(
+    pub(crate) fn turn_tracked_order_panic_sell(
         &self,
         orders: &mut crate::state::Orders,
         uid: u64,
@@ -385,7 +386,7 @@ impl ClientSender {
     }
 
     /// Apply Delphi `SetImmuneClicks` locally and send `TSetImmuneCommand`.
-    pub fn set_immune(
+    pub(crate) fn set_immune(
         &self,
         orders: &mut crate::state::Orders,
         items: &[crate::commands::trade::ImmuneItem],
@@ -406,7 +407,7 @@ impl ClientSender {
     }
 
     /// Send `TMoveAllBuysCommand` if Delphi active-client gate finds a candidate order.
-    pub fn move_all_buys(
+    pub(crate) fn move_all_buys(
         &self,
         orders: &crate::state::Orders,
         ctx: crate::commands::trade::TradeCtx,
@@ -430,7 +431,7 @@ impl ClientSender {
     }
 
     /// Apply Delphi `SendVStopIfChanged` locally and send `TVStopUpdate`.
-    pub fn update_vstop(
+    pub(crate) fn update_vstop(
         &self,
         orders: &mut crate::state::Orders,
         uid: u64,
@@ -453,7 +454,7 @@ impl ClientSender {
     }
 
     /// Update VStop for an order already tracked by `EventDispatcher::orders()`.
-    pub fn update_tracked_order_vstop(
+    pub(crate) fn update_tracked_order_vstop(
         &self,
         orders: &mut crate::state::Orders,
         uid: u64,
@@ -467,7 +468,7 @@ impl ClientSender {
 
     /// Send `TDoMarketSplitPositionCommand` (`MaxRetries=1`).
     #[doc(hidden)]
-    pub fn do_market_split_position(
+    pub(crate) fn do_market_split_position(
         &self,
         ctx: crate::commands::trade::TradeCtx,
         market: &str,
@@ -479,7 +480,7 @@ impl ClientSender {
 
     /// Send `TPenaltyCommand`.
     #[doc(hidden)]
-    pub fn penalty(&self, ctx: crate::commands::trade::TradeCtx, market: &str) -> bool {
+    pub(crate) fn penalty(&self, ctx: crate::commands::trade::TradeCtx, market: &str) -> bool {
         let raw = crate::commands::trade::build_penalty(ctx, market);
         self.send_trade(raw, 3)
     }

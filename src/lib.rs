@@ -2,7 +2,7 @@
 //!
 //! Rust client for the MoonProto UDP protocol used by MoonBot servers.
 //! It ports the Delphi client behavior for the wire format, AES-128-GCM
-//! payload encryption, HMAC-CRC32C transport MAC, handshake, retry, slicing,
+//! payload encryption, SipHash transport MAC, handshake, retry, slicing,
 //! ACK handling, PMTU discovery, and payload commands.
 //!
 //! `moonproto` is an **active session manager**. Transport reconnect,
@@ -10,7 +10,7 @@
 //! trades gap recovery, pending Engine API routing, NTP sync, and candle chunk
 //! merging are owned by the library. Before the first Init, transport handshake
 //! readiness (`Fine`) does not send Engine API requests. After the single Init
-//! for a `Client` session, reconnect restores fresh indexes for indexed streams
+//! for a `MoonClient` session, reconnect restores fresh indexes for indexed streams
 //! and registry subscriptions automatically.
 //!
 //! ## Quick Start
@@ -97,10 +97,9 @@
 //! - [`client`] — [`MoonClient`], `ClientConfig` builder, lifecycle,
 //!   EventSink adapters, snapshots, and high-level intents.
 //! - [`events`] — typed [`Event`] values and the read-only
-//!   [`EventDispatcherSnapshot`]. The mutable [`EventDispatcher`] is for
-//!   custom runtimes and diagnostics.
-//! - [`commands`] — wire-format builders and parsers for protocol diagnostics
-//!   and custom low-level tools.
+//!   [`EventDispatcherSnapshot`].
+//! - [`commands`] — protocol value types re-exported by the high-level API;
+//!   direct parser/builder use is for diagnostics and internal tests.
 //! - [`state`] — Active Lib read models: Orders / OrderBooks / Trades /
 //!   Balances / Strats / Settings / Markets.
 //! - [`key_import`] — parser for base64 MoonBot exported keys.
@@ -129,6 +128,7 @@
 mod api_pending;
 mod app_queue;
 pub mod client;
+#[doc(hidden)]
 pub mod commands;
 pub mod events;
 pub mod key_import;
@@ -145,34 +145,39 @@ mod crypto;
 mod protocol;
 mod transport;
 
-pub use client::{
-    ActiveSubscriptions, Client, ClientConfig, ClosePositionParams, CoinCardCandlesTicket,
-    ConnectConfig, ConnectError, EngineActionTicket, InitConfig, InitError, InitialStrategies,
-    LifecycleEvent, MoonAccount, MoonBalances, MoonCandles, MoonClient, MoonClientError,
-    MoonClientEvent, MoonClientSnapshot, MoonEventQueue, MoonEventSink, MoonOrders, MoonSettings,
-    MoonStrategies, MoonStreams, MoonTrade, NewOrderParams, NewOrderTicket, OrderSide, OrderTarget,
-    ProtocolMetricsSnapshot, RefreshConfig, SellOrderParams, SendPriority, SplitOrderParams,
-    TradeContextError, TradesStreamMode, TradesSubscription, TransportMode, UniqueKey, VStopParams,
-};
+#[cfg(feature = "diagnostics")]
 #[doc(hidden)]
-pub use client::{ClientSender, SubscribeError};
+pub use client::ProtocolMetricsSnapshot;
+pub use client::{
+    ActiveSubscriptions, ClientConfig, ClosePositionParams, CoinCardCandlesTicket, ConnectConfig,
+    ConnectError, EngineActionTicket, InitConfig, InitError, InitialStrategies, LifecycleEvent,
+    MoonAccount, MoonBalances, MoonCandles, MoonClient, MoonClientError, MoonClientEvent,
+    MoonClientSnapshot, MoonEventQueue, MoonEventSink, MoonOrders, MoonSettings, MoonStrategies,
+    MoonStreams, MoonTrade, NewOrderParams, NewOrderTicket, OrderSide, OrderTarget, RefreshConfig,
+    SellOrderParams, SendPriority, SplitOrderParams, TradeContextError, TradesStreamMode,
+    TradesSubscription, TransportMode, UniqueKey, VStopParams,
+};
 pub use commands::engine_api::{
     AuthCheckResponse, DexInfo, ExchangeTypeMask, HyperDexIndex, ServerInfo,
 };
 pub use commands::{
     field_names, ArbConfigCompact, ArbIsolationFlags, ArbPlatformCode, BaseCurrency,
-    ClientSettingsCommand, ExchangeCode, FieldValue, LevManage, OrderType, PositionType,
-    ResetProfitKind, SpotMarketKind, StrategyActiveMode, StrategyFields, StrategyKind,
-    StrategySnapshot, TokenTags, TriggerAction,
+    ClientSettingsCommand, DelphiBool, ExchangeCode, FieldValue, FixedPosition, ImmuneItem,
+    LevManage, MoveAllBuysCmdType, MoveAllCmdType, OrderCompact, OrderType, OrderUpdateData,
+    OrderWorkerStatus, PositionType, PriceZone, ReplaceMultiKind, ResetProfitKind, SpotMarketKind,
+    StopSettings, StrategyActiveMode, StrategyDynamicPicklist, StrategyFieldLayout,
+    StrategyFieldType, StrategyFieldUiKind, StrategyFields, StrategyKind, StrategySchema,
+    StrategySchemaField, StrategySchemaKind, StrategySnapshot, TokenTags, TriggerAction,
+    AS_CFG2_SIZE, AS_CFG_SIZE,
 };
 // Parameter types named by public high-level handle methods but defined in
 // command submodules (`MoonTrade::move_all_sells`/`move_all_buys`,
-// `MoonCandles::request_coin_card`, `Client::ui_emu_trades`).
-pub use commands::candles::DeepHistoryKind;
+// `MoonCandles::request_coin_card`, UI emulation helpers).
+pub use commands::candles::{DeepHistoryKind, DeepPrice};
 pub use commands::trade::{MoveAllBuysParams, MoveAllSellsParams};
 pub use commands::ui::EmuTradePoint;
 pub use events::{
-    ArbEvent, EngineActionEvent, EngineActionKind, Event, EventDispatcher, EventDispatcherSnapshot,
+    ArbEvent, EngineActionEvent, EngineActionKind, Event, EventDispatcherSnapshot,
     MissingOrderStatusRequest, StrategySnapshotReply, WatcherFillEvent, WatcherFillsEvent,
 };
 pub use key_import::{

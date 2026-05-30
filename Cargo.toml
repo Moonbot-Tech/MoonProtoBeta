@@ -8,7 +8,13 @@ license = "Apache-2.0"
 publish = false
 
 [features]
-diagnostic-trace = []
+diagnostics = []
+diagnostic-trace = ["diagnostics"]
+
+[[test]]
+name = "fire_test"
+path = "tests/fire_test.rs"
+required-features = ["diagnostics"]
 
 [dependencies]
 aes-gcm = "0.10"

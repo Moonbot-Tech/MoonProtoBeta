@@ -121,8 +121,6 @@ impl OrderBooks {
                 is_full: true,
                 seq: pkt.seq,
                 top,
-                buys: pkt.buys,
-                sells: pkt.sells,
             });
             // Try to apply the accumulated diffs from the cache.
             self.drain_cache(key, events);
@@ -153,8 +151,6 @@ impl OrderBooks {
                 is_full: false,
                 seq,
                 top,
-                buys: pkt.buys,
-                sells: pkt.sells,
             });
             if cache.packets.len() >= BOOK_CACHE_MAX_PACKETS {
                 cache.drop_oldest();
@@ -194,8 +190,6 @@ impl OrderBooks {
                 is_full: false,
                 seq: pkt.seq,
                 top,
-                buys: pkt.buys,
-                sells: pkt.sells,
             });
             // The cache may hold the following seq values — drain.
             self.drain_cache(key, events);
@@ -270,8 +264,6 @@ impl OrderBooks {
                 is_full: entry.pkt.is_full,
                 seq: entry.seq,
                 top,
-                buys: entry.pkt.buys,
-                sells: entry.pkt.sells,
             });
         }
         cache.check_cache_empty();

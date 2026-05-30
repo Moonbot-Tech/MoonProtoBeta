@@ -22,12 +22,14 @@ pub(super) struct RuntimePending {
 
 pub(super) struct PendingAutoCandles {
     pub(super) uid: u64,
+    pub(super) deadline: Instant,
     pub(super) rx: mpsc::Receiver<crate::client::MergedCandles>,
 }
 
 pub(super) struct PendingAutoCandlesApply {
     pub(super) uid: u64,
     pub(super) summary: crate::state::CandlesSnapshotApplySummary,
+    pub(super) deadline: Instant,
     pub(super) rx: mpsc::Receiver<()>,
 }
 
@@ -71,6 +73,18 @@ fn remove_api_pending(api_pending: &ApiPending, request_uid: Option<u64>) {
     }
 }
 
+fn engine_pending_deadline() -> Instant {
+    Instant::now() + Duration::from_millis(crate::api_pending::DEFAULT_PENDING_TIMEOUT_MS as u64)
+}
+
+pub(super) fn clear_auto_candles_pending(client: &mut Client, pending: &mut RuntimePending) {
+    for item in pending.auto_candles.drain(..) {
+        client.pending_api.pending_candles.remove(&item.uid);
+    }
+    pending.auto_candles_apply.clear();
+    pending.auto_candles_requested = false;
+}
+
 pub(super) struct PendingEngineAction {
     pub(super) kind: crate::events::EngineActionKind,
     pub(super) ticket: super::super::EngineActionTicket,
@@ -79,11 +93,13 @@ pub(super) struct PendingEngineAction {
 }
 
 pub(super) fn poll_auto_candles(
+    client: &mut Client,
     pending: &mut RuntimePending,
     dispatcher: &mut crate::events::EventDispatcher,
 ) -> bool {
     let mut changed = false;
     let mut i = 0;
+    let now = Instant::now();
     while i < pending.auto_candles.len() {
         match pending.auto_candles[i].rx.try_recv() {
             Ok(merged) => {
@@ -96,6 +112,7 @@ pub(super) fn poll_auto_candles(
                         pending.auto_candles_apply.push(PendingAutoCandlesApply {
                             uid: request_uid,
                             summary,
+                            deadline: engine_pending_deadline(),
                             rx,
                         });
                     } else {
@@ -125,6 +142,8 @@ pub(super) fn poll_auto_candles(
             }
             Err(mpsc::TryRecvError::Disconnected) => {
                 let uid = pending.auto_candles.swap_remove(i).uid;
+                client.pending_api.pending_candles.remove(&uid);
+                pending.auto_candles_requested = false;
                 dispatcher.queue_candles_snapshot_event(
                     crate::state::CandlesSnapshotEvent::Failed {
                         request_uid: Some(uid),
@@ -134,12 +153,26 @@ pub(super) fn poll_auto_candles(
                 changed = true;
             }
             Err(mpsc::TryRecvError::Empty) => {
-                i += 1;
+                if pending.auto_candles[i].deadline <= now {
+                    let uid = pending.auto_candles.swap_remove(i).uid;
+                    client.pending_api.pending_candles.remove(&uid);
+                    pending.auto_candles_requested = false;
+                    dispatcher.queue_candles_snapshot_event(
+                        crate::state::CandlesSnapshotEvent::Failed {
+                            request_uid: Some(uid),
+                            error: "pending full candles request timed out".to_string(),
+                        },
+                    );
+                    changed = true;
+                } else {
+                    i += 1;
+                }
             }
         }
     }
 
     let mut i = 0;
+    let now = Instant::now();
     while i < pending.auto_candles_apply.len() {
         match pending.auto_candles_apply[i].rx.try_recv() {
             Ok(()) => {
@@ -154,6 +187,7 @@ pub(super) fn poll_auto_candles(
             }
             Err(mpsc::TryRecvError::Disconnected) => {
                 let applied = pending.auto_candles_apply.swap_remove(i);
+                pending.auto_candles_requested = false;
                 dispatcher.queue_candles_snapshot_event(
                     crate::state::CandlesSnapshotEvent::Failed {
                         request_uid: Some(applied.uid),
@@ -163,7 +197,19 @@ pub(super) fn poll_auto_candles(
                 changed = true;
             }
             Err(mpsc::TryRecvError::Empty) => {
-                i += 1;
+                if pending.auto_candles_apply[i].deadline <= now {
+                    let applied = pending.auto_candles_apply.swap_remove(i);
+                    pending.auto_candles_requested = false;
+                    dispatcher.queue_candles_snapshot_event(
+                        crate::state::CandlesSnapshotEvent::Failed {
+                            request_uid: Some(applied.uid),
+                            error: "market history worker barrier timed out".to_string(),
+                        },
+                    );
+                    changed = true;
+                } else {
+                    i += 1;
+                }
             }
         }
     }

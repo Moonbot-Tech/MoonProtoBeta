@@ -117,11 +117,16 @@ impl ProtocolCore<'_> {
         recv_bytes: u64,
         mode: &mut RunMode<'_>,
     ) -> bool {
+        #[cfg(any(test, feature = "diagnostics"))]
         let protocol_metrics = Arc::clone(&self.client.metrics.protocol_metrics);
+        #[cfg(any(test, feature = "diagnostics"))]
         protocol_metrics.record_recv_packet();
+        #[cfg(any(test, feature = "diagnostics"))]
         let protocol_start = Instant::now();
         let mut protocol_wait = Duration::ZERO;
+        #[cfg(any(test, feature = "diagnostics"))]
         let mut metric_cmd = u8::MAX;
+        #[cfg(any(test, feature = "diagnostics"))]
         let mut metric_payload_len = datagram.len();
 
         let continue_recv = if let Some((hdr, payload)) =
@@ -131,8 +136,11 @@ impl ProtocolCore<'_> {
                 datagram,
                 self.client.cfg.mask_ver.to_byte(),
             ) {
-            metric_cmd = Command::from_byte(hdr.cmd).to_byte();
-            metric_payload_len = payload.len();
+            #[cfg(any(test, feature = "diagnostics"))]
+            {
+                metric_cmd = Command::from_byte(hdr.cmd).to_byte();
+                metric_payload_len = payload.len();
+            }
 
             if trace_io_enabled() {
                 eprintln!(
@@ -158,16 +166,29 @@ impl ProtocolCore<'_> {
                 .fetch_add(recv_bytes, Ordering::Relaxed)
                 + recv_bytes;
 
-            if let Some(decision) = err_emu_drop_decision(hdr.cmd) {
-                self.client
-                    .metrics
-                    .err_emu_diagnostics
-                    .lock()
-                    .unwrap()
-                    .record_packet(hdr.cmd, &payload, decision);
-                if decision.dropped {
-                    Self::on_err_emu_drop(hdr.cmd, &payload);
-                    true
+            #[cfg(any(test, feature = "diagnostics"))]
+            {
+                if let Some(decision) = err_emu_drop_decision(hdr.cmd) {
+                    self.client
+                        .metrics
+                        .err_emu_diagnostics
+                        .lock()
+                        .unwrap()
+                        .record_packet(hdr.cmd, &payload, decision);
+                    if decision.dropped {
+                        Self::on_err_emu_drop(hdr.cmd, &payload);
+                        true
+                    } else {
+                        self.route_command(
+                            hdr.cmd,
+                            &payload,
+                            recv_bytes,
+                            total_recv_after,
+                            timestamp_ms,
+                            mode,
+                            &mut protocol_wait,
+                        )
+                    }
                 } else {
                     self.route_command(
                         hdr.cmd,
@@ -179,7 +200,9 @@ impl ProtocolCore<'_> {
                         &mut protocol_wait,
                     )
                 }
-            } else {
+            }
+            #[cfg(not(any(test, feature = "diagnostics")))]
+            {
                 self.route_command(
                     hdr.cmd,
                     &payload,
@@ -203,6 +226,7 @@ impl ProtocolCore<'_> {
             true
         };
 
+        #[cfg(any(test, feature = "diagnostics"))]
         if protocol_wait > Duration::ZERO {
             protocol_metrics.record_reader_protocol_wait_labeled(
                 protocol_wait,
@@ -210,6 +234,7 @@ impl ProtocolCore<'_> {
                 metric_payload_len,
             );
         }
+        #[cfg(any(test, feature = "diagnostics"))]
         protocol_metrics.record_reader_protocol_labeled(
             protocol_start.elapsed().saturating_sub(protocol_wait),
             metric_cmd,
@@ -240,6 +265,13 @@ impl ProtocolCore<'_> {
 
         match Command::from_byte(raw_cmd) {
             Command::Ping => {
+                // Delphi UDPRead treats Ping as an established-session packet:
+                // LastOnline/recv counters are already updated, but before
+                // AuthDone the Ping body must not update RTT/PMTU, TmpSlider
+                // ACK state, NeedConnect, or emit a Ping response.
+                if !self.client.authorized {
+                    return true;
+                }
                 self.on_new_ping(payload, recv_bytes, total_recv_after, timestamp_ms, mode);
             }
             Command::WrongHello | Command::WantNewHello | Command::NeedHelloAgain => {
@@ -429,11 +461,12 @@ impl ProtocolCore<'_> {
             &payload,
         );
         let candles_chunk_consumed = Client::dispatch_candles_chunk(
-            &mut self.client.pending_api.pending_candles,
+            &mut self.client.pending_api,
             cmd,
             &payload,
             timestamp_ms,
         );
+        #[cfg(any(test, feature = "diagnostics"))]
         if let Some(stats) = sliced_stats.as_ref() {
             self.client
                 .metrics

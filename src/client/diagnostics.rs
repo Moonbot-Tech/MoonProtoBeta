@@ -1,4 +1,8 @@
 //! Client-side diagnostic hooks used by live stress tests.
+#![cfg_attr(
+    not(any(test, feature = "diagnostics")),
+    allow(dead_code, unused_imports, unreachable_pub)
+)]
 
 use super::COMPRESSED_FLAG;
 use crate::commands::engine_api::parse_engine_response;

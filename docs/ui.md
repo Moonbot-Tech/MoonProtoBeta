@@ -78,8 +78,8 @@ client.settings().switch_dex("Main")?;
 client.settings().switch_spot(SpotMarketKind::Crypto)?;
 ```
 
-Low-level protocol tools can still build the same wire payloads through
-`commands::ui`, but normal application code should use the high-level method
+Internal protocol tools build the same wire payloads through the crate-private
+UI command module; normal application code should use the high-level method
 names above.
 
 For strategy start/stop with an explicit checked-state delta, normal UI code
@@ -122,8 +122,8 @@ commands and are gated by Init. Low-level diagnostic tools that send the same
 payload by hand are responsible for preserving the matching `ServerUpdateSent`
 side effect.
 
-Low-level builders in `commands::ui` remain available for diagnostics and
-compatibility tools, but normal applications should use the typed methods above.
+Low-level builders remain internal diagnostics/compatibility machinery; normal
+applications should use the typed methods above.
 
 Inbound listing notifications are internal to the active library. They force an
 immediate listing refresh, but they are not emitted as settings events. User
@@ -131,10 +131,10 @@ code gets the listing signal from the market domain only after the refreshed
 market list actually inserts new markets:
 `Event::Markets(MarketsEvent::NewMarketsAdded { names })`.
 
-Low-level `UICommand::ClientSettings` stores the settings snapshot as
-`Box<ClientSettingsCommand>` to keep the internal command envelope small.
-Normal application code does not parse `UICommand` directly; it reads the
-applied `SettingsState`.
+Internally, `UICommand::ClientSettings` stores the settings snapshot as
+`Box<ClientSettingsCommand>` to keep the command envelope small. Normal
+application code does not parse `UICommand` directly; it reads the applied
+`SettingsState`.
 
 ## ClientSettings
 
@@ -146,7 +146,7 @@ hotkey sell prices, multi-order join mode, and `ArbConfigCompact`.
 AutoStart blobs are opaque byte arrays with fixed public sizes:
 
 ```rust
-use moonproto::commands::ui::{AS_CFG_SIZE, AS_CFG2_SIZE};
+use moonproto::{AS_CFG2_SIZE, AS_CFG_SIZE};
 ```
 
 ## Pending Deduplication

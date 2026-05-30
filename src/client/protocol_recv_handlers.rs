@@ -2,6 +2,7 @@ use super::protocol_core::ProtocolCore;
 use super::*;
 
 impl ProtocolCore<'_> {
+    #[cfg(any(test, feature = "diagnostics"))]
     pub(crate) fn on_err_emu_drop(raw_cmd: u8, payload: &[u8]) {
         if trace_io_enabled() {
             eprintln!(
@@ -71,12 +72,13 @@ impl ProtocolCore<'_> {
         recv_bytes: u64,
         timestamp_ms: i64,
     ) {
-        if cmd == Command::WantNewHello && !self.client.should_accept_want_new_hello() {
-            let _ = (recv_bytes, timestamp_ms);
-            return;
-        }
+        let accept_want_new_hello = self.client.should_accept_want_new_hello();
         if matches!(cmd, Command::WrongHello | Command::WantNewHello) {
             self.client.clear_hello_wait_state();
+        }
+        if cmd == Command::WantNewHello && !accept_want_new_hello {
+            let _ = (recv_bytes, timestamp_ms);
+            return;
         }
         if cmd == Command::WantNewHello {
             self.client.recv.data_read_state.reset();
@@ -106,7 +108,9 @@ impl ProtocolCore<'_> {
         recv_bytes: u64,
         timestamp_ms: i64,
     ) -> Duration {
-        if !self.client.hello_wait_state.allows_who_are_you() {
+        let wait_state = self.client.hello_wait_state;
+        self.client.clear_hello_wait_state();
+        if !wait_state.allows_who_are_you() || self.client.server_token != 0 {
             let _ = (payload, recv_bytes, timestamp_ms);
             return Duration::ZERO;
         }
@@ -144,7 +148,9 @@ impl ProtocolCore<'_> {
     }
 
     pub(crate) fn on_fine(&mut self, payload: &[u8], recv_bytes: u64, timestamp_ms: i64) {
-        if !self.client.hello_wait_state.allows_fine() {
+        let wait_state = self.client.hello_wait_state;
+        self.client.clear_hello_wait_state();
+        if !wait_state.allows_fine() {
             let _ = (payload, recv_bytes, timestamp_ms);
             return;
         }

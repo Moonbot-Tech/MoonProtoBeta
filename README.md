@@ -183,13 +183,16 @@ FireTest:
 
 ```powershell
 $env:MOONPROTO_FIRETEST_PROFILE = "quick"
-cargo test --release --test fire_test -- --ignored --nocapture
+cargo test --release --features diagnostics --test fire_test -- --ignored --nocapture
 ```
 
 For a baseline without client-side packet loss, set
 `MOONPROTO_FIRETEST_ERR_EMU=0`; the default is 10%.
 
-`tests/fire_test.rs` is the main live health test for the active library.
+`tests/fire_test.rs` is the main live health test for the active library. It
+requires the `diagnostics` feature because it deliberately enables packet-loss
+emulation, protocol CPU counters, and test-only reconnect probes. Regular
+applications do not need this feature.
 
 Quick profile target is under 30 seconds and checks one client:
 
@@ -200,7 +203,8 @@ Quick profile target is under 30 seconds and checks one client:
 - retained trades/LastPrice/derived history state;
 - retained MarkPrice line and funding/balance/order UI state;
 - ParseFailed equals zero;
-- CPU summary for protocol/apply paths.
+- PMTU plus CPU summary for protocol/apply paths; `>5ms` in CPU-ish
+  protocol/apply sections is a hard FireTest red flag.
 
 Full profile runs the destructive/stress gate:
 
@@ -214,7 +218,8 @@ Full profile runs the destructive/stress gate:
   a manual balance request;
 - `err_emu=50%` simple-operation/reconnect gate;
 - forced reconnect and stream delivery after reconnect;
-- detailed server-message, sliced, retry, parse, and CPU diagnostics.
+- detailed server-message, sliced, retry, parse, PMTU, and CPU diagnostics,
+  including the same `>5ms` CPU hard gate.
 
 FireTest writes strategy diagnostics under `target/` by default:
 

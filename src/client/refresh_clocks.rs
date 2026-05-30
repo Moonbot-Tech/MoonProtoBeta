@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
+use super::candles::CandlesParseQueue;
 use super::config::CHECK_TAGS_BURST_COUNT;
 use super::PartialCandles;
 
@@ -75,6 +76,14 @@ pub(crate) struct PendingApi {
     /// Application code does not see this packet-shaped layer; it gets retained
     /// candles through snapshots/events.
     pub(crate) pending_candles: HashMap<u64, PartialCandles>,
+
+    /// Persistent parser worker for completed full-candles snapshots.
+    ///
+    /// The protocol reader must never spawn a thread on the final Sliced block:
+    /// thread creation showed up as a 20ms+ reader stall on Linux/VPS. Reader
+    /// path only queues a completed zipped stream here; zlib parse/apply stays
+    /// outside UDP receive.
+    pub(crate) candles_parse: CandlesParseQueue,
 }
 
 impl PendingApi {
@@ -82,6 +91,7 @@ impl PendingApi {
         Self {
             api_pending: ApiPending::new_arc(),
             pending_candles: HashMap::new(),
+            candles_parse: CandlesParseQueue::new(),
         }
     }
 }

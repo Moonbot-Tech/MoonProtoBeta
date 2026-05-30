@@ -57,8 +57,6 @@ fn main() {
                         is_full,
                         seq,
                         top,
-                        buys,
-                        sells,
                         ..
                     } => {
                         applies += 1;
@@ -75,16 +73,14 @@ fn main() {
                             .map(|level| format!("{} @ {}", level.quantity, level.rate))
                             .unwrap_or_else(|| "none".to_string());
                         println!(
-                        "[book] market={} kind={} full={} seq={} bids={} asks={} top_bid={} top_ask={}",
-                        name,
-                        book_kind_name(kind.as_u8()),
-                        is_full,
-                        seq,
-                        buys.len(),
-                        sells.len(),
-                        bid,
-                        ask
-                    );
+                            "[book] market={} kind={} full={} seq={} top_bid={} top_ask={}",
+                            name,
+                            book_kind_name(kind.as_u8()),
+                            is_full,
+                            seq,
+                            bid,
+                            ask
+                        );
                     }
                     OrderBookEvent::Ignored {
                         market_index,

@@ -6,6 +6,7 @@ impl Client {
     /// This does not affect protocol behavior. FireTest uses it to distinguish
     /// "server did not send", "ErrEmu dropped all retries", and
     /// "Sliced reassembly/parse failed after packets arrived".
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub fn err_emu_diagnostics_snapshot(&self) -> ErrEmuDiagnostics {
         let configured_rate = ERR_EMU_RATE.load(std::sync::atomic::Ordering::Relaxed);
@@ -16,11 +17,13 @@ impl Client {
             .snapshot(configured_rate)
     }
 
+    #[cfg(any(test, feature = "diagnostics"))]
     pub(super) fn err_emu_diagnostics_handle(&self) -> Arc<Mutex<ErrEmuDiagnosticsState>> {
         Arc::clone(&self.metrics.err_emu_diagnostics)
     }
 
     /// Clear client-side [`set_err_emu`] counters without changing the loss rate.
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub fn reset_err_emu_diagnostics(&self) {
         *self.metrics.err_emu_diagnostics.lock().unwrap() = ErrEmuDiagnosticsState::default();
@@ -32,12 +35,14 @@ impl Client {
     /// reconnect, queueing, or drop decisions. Use this to prove that
     /// receive-side protocol work and writer send/maintenance phases stay
     /// bounded while auditing Delphi machine-effect parity.
+    #[cfg(any(test, feature = "diagnostics"))]
     pub fn protocol_metrics_snapshot(&self) -> ProtocolMetricsSnapshot {
         self.metrics.protocol_metrics.snapshot(0)
     }
 
     /// Snapshot protocol metrics and include the current dispatcher public
     /// event queue length.
+    #[cfg(any(test, feature = "diagnostics"))]
     pub fn protocol_metrics_snapshot_with_dispatcher(
         &self,
         dispatcher: &crate::events::EventDispatcher,

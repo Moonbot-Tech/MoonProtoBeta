@@ -43,8 +43,9 @@ if let Some(snapshot) = client.snapshot() {
 There are two user-facing candle paths:
 
 - retained 5m candles: after trades storage is enabled, Active Lib requests the
-  initial full 5m snapshot once, applies it to market history, emits
-  `Event::CandlesSnapshot`, then keeps candles current from trades;
+  initial full 5m snapshot for that storage scope, retries lost/stuck chunked
+  requests by event+timeout, applies the successful snapshot to market history,
+  emits `Event::CandlesSnapshot`, then keeps candles current from trades;
 - CoinCard/deep-history candles: call `candles().request_coin_card(market, kind)`,
   wait for `Event::CoinCardCandles`, then read
   `snapshot().coin_card_candles()`.

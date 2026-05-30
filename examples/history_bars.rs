@@ -11,9 +11,8 @@ use std::env;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use moonproto::commands::{DeepHistoryKind, DeepPrice};
 use moonproto::state::CoinCardCandlesEvent;
-use moonproto::Event;
+use moonproto::{DeepHistoryKind, DeepPrice, Event};
 
 mod common;
 

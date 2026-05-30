@@ -69,6 +69,8 @@ impl Client {
         const MAX_RATE: i32 = 8 * 1024 * 1024;
         self.round_trip_delay = ping.trip_delay as i64;
         self.actual_pmtu = ping.pmtu;
+        #[cfg(any(test, feature = "diagnostics"))]
+        self.metrics.protocol_metrics.record_pmtu(ping.pmtu);
         self.overheat = ping.overheat;
         self.rs = rs;
         // A server can start sending Ping after it created its side of the
