@@ -76,7 +76,10 @@ impl ProtocolCore<'_> {
             .data_read_state
             .set_decode_cipher(crate::crypto::cipher_from_key(&self.client.decode_key));
 
-        let aad = self.client.cfg.client_id.to_le_bytes();
+        let aad = crate::protocol::handshake::handshake_aad(
+            self.client.cfg.client_id,
+            crate::protocol::Command::ImFriend.to_byte(),
+        );
         crypto::encrypt_with_cipher(&encode_cipher, &packed, &aad)
     }
 

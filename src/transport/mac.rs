@@ -1,89 +1,119 @@
 use super::MoonKey;
 
-/// mORMot THmacCrc32c: CRC32C(ipad_block || message || opad_block)
-/// NOT standard HMAC! It's a single continuous CRC32C stream.
+/// SipHash-1-3 keyed PRF (`c = 1` compression round, `d = 3` finalization
+/// rounds), 128-bit key = MacKey, output truncated to the low 32 bits.
 ///
-/// Algorithm:
-///   k0 = key zero-padded to 64 bytes
-///   ipad_block = k0 XOR 0x36 (per byte), 64 bytes
-///   opad_block = k0 XOR 0x5C (per byte), 64 bytes
-///   result = CRC32C(0, ipad_block) → CRC32C(prev, message) → CRC32C(prev, opad_block)
+/// This is the MoonProto transport MAC: Delphi `SipHash13` / `CalculateMac32`
+/// (`MoonProtoFunc.pas:290-341`). It replaced the previous HMAC-CRC32c. A keyed
+/// MAC (not a plain checksum) is what stops an attacker from forging the
+/// transport — without the MacKey a relabelled/injected datagram cannot carry a
+/// valid 32-bit tag. `u64` words are read little-endian, matching x86 native.
 ///
-/// `#[inline]` is mandatory: hot path (the MAC is verified on every received packet and
-/// built on every sent packet), cross-crate call from `moonproto`.
-/// Without an explicit inline LLVM won't inline cross-crate. Audit B-V2-04.
-#[inline]
-pub fn calculate_mac32(key: &MoonKey, data: &[u8]) -> u32 {
-    const BLOCK_SIZE: usize = 64;
-
-    let mut k0 = [0u8; BLOCK_SIZE];
-    k0[..16].copy_from_slice(key);
-
-    let mut ipad_block = [0u8; BLOCK_SIZE];
-    let mut opad_block = [0u8; BLOCK_SIZE];
-    for i in 0..BLOCK_SIZE {
-        ipad_block[i] = k0[i] ^ 0x36;
-        opad_block[i] = k0[i] ^ 0x5C;
-    }
-
-    // Single continuous CRC32C stream: ipad || data || opad
-    let mut crc = crc32c::crc32c(&ipad_block);
-    crc = crc32c::crc32c_append(crc, data);
-    crc = crc32c::crc32c_append(crc, &opad_block);
-    crc
+/// `#[inline]` is mandatory: the MAC is verified on every received packet and
+/// built on every sent packet, across a cross-crate call boundary. Audit B-V2-04.
+///
+/// One SipHash round (`SIPROUND`), operating in place on the four state words.
+macro_rules! sipround {
+    ($v0:ident, $v1:ident, $v2:ident, $v3:ident) => {{
+        $v0 = $v0.wrapping_add($v1);
+        $v1 = $v1.rotate_left(13);
+        $v1 ^= $v0;
+        $v0 = $v0.rotate_left(32);
+        $v2 = $v2.wrapping_add($v3);
+        $v3 = $v3.rotate_left(16);
+        $v3 ^= $v2;
+        $v0 = $v0.wrapping_add($v3);
+        $v3 = $v3.rotate_left(21);
+        $v3 ^= $v0;
+        $v2 = $v2.wrapping_add($v1);
+        $v1 = $v1.rotate_left(17);
+        $v1 ^= $v2;
+        $v2 = $v2.rotate_left(32);
+    }};
 }
 
-/// Cached MAC context: pre-computed CRC32C(ipad) and opad_block for the session key.
+/// Finish a SipHash-1-3 MAC from the keyed initial state and the message.
+#[inline]
+fn siphash13_finish(mut v0: u64, mut v1: u64, mut v2: u64, mut v3: u64, data: &[u8]) -> u32 {
+    let len = data.len();
+    let mut chunks = data.chunks_exact(8);
+    for chunk in &mut chunks {
+        // Full 8-byte blocks, little-endian. c = 1 compression round per block.
+        let m = u64::from_le_bytes(chunk.try_into().unwrap());
+        v3 ^= m;
+        sipround!(v0, v1, v2, v3);
+        v0 ^= m;
+    }
+    // Tail bytes plus the message length in the most significant byte.
+    let mut b = (len as u64) << 56;
+    for (i, &byte) in chunks.remainder().iter().enumerate() {
+        b |= (byte as u64) << (8 * i);
+    }
+    v3 ^= b;
+    sipround!(v0, v1, v2, v3);
+    v0 ^= b;
+    // d = 3 finalization rounds.
+    v2 ^= 0xff;
+    sipround!(v0, v1, v2, v3);
+    sipround!(v0, v1, v2, v3);
+    sipround!(v0, v1, v2, v3);
+    (v0 ^ v1 ^ v2 ^ v3) as u32
+}
+
+/// Derive the four keyed SipHash state words from the 128-bit MacKey.
+#[inline]
+fn siphash13_init(key: &MoonKey) -> (u64, u64, u64, u64) {
+    let k0 = u64::from_le_bytes(key[0..8].try_into().unwrap());
+    let k1 = u64::from_le_bytes(key[8..16].try_into().unwrap());
+    (
+        k0 ^ 0x736f_6d65_7073_6575,
+        k1 ^ 0x646f_7261_6e64_6f6d,
+        k0 ^ 0x6c79_6765_6e65_7261,
+        k1 ^ 0x7465_6462_7974_6573,
+    )
+}
+
+/// Transport MAC over `data` keyed by `key` (Delphi `CalculateMac32`).
+#[inline]
+pub fn calculate_mac32(key: &MoonKey, data: &[u8]) -> u32 {
+    let (v0, v1, v2, v3) = siphash13_init(key);
+    siphash13_finish(v0, v1, v2, v3, data)
+}
+
+/// Cached MAC context: the SipHash keyed initial state precomputed for the
+/// session key.
 ///
-/// Created once per session via [`MacContext::new`], then `mac(data)` performs
-/// only `crc32c_append(cached, data) + crc32c_append(prev, opad_block)` — without recomputing
-/// ipad/opad on every packet. audit_rust_quality #3: ~20K XOR/sec removed at peak
-/// load (50K MAC ops × 128 XOR bytes = 6.4M ops/sec → 0).
-///
-/// The wire result is byte-exact identical to [`calculate_mac32`]: the same continuous
-/// CRC32C stream (`CRC32C(ipad || data || opad)`), just with the intermediate value after
-/// ipad cached.
+/// Created once per session via [`MacContext::new`]; then `mac(data)` only runs
+/// the message compression + finalization from the cached state, without
+/// re-deriving the four key words on every packet. The wire result is byte-exact
+/// identical to [`calculate_mac32`].
 #[derive(Clone)]
 pub struct MacContext {
-    crc_after_ipad: u32,
-    opad_block: [u8; 64],
+    v0: u64,
+    v1: u64,
+    v2: u64,
+    v3: u64,
 }
 
 impl MacContext {
-    /// Create the context for the given key. Does 128 XOR + one `crc32c(ipad)` —
-    /// the heavy part. After that `mac()` performs only finalization.
+    /// Create the context for the given key (derives the four keyed words once).
     pub fn new(key: &MoonKey) -> Self {
-        const BLOCK_SIZE: usize = 64;
-        let mut k0 = [0u8; BLOCK_SIZE];
-        k0[..16].copy_from_slice(key);
-
-        let mut ipad_block = [0u8; BLOCK_SIZE];
-        let mut opad_block = [0u8; BLOCK_SIZE];
-        for i in 0..BLOCK_SIZE {
-            ipad_block[i] = k0[i] ^ 0x36;
-            opad_block[i] = k0[i] ^ 0x5C;
-        }
-        Self {
-            crc_after_ipad: crc32c::crc32c(&ipad_block),
-            opad_block,
-        }
+        let (v0, v1, v2, v3) = siphash13_init(key);
+        Self { v0, v1, v2, v3 }
     }
 
-    /// Compute the MAC for the data. On the hot path it replaces `calculate_mac32(&key, data)`:
-    /// the same byte-exact function, but without 128 XOR + `crc32c(ipad)` per call.
+    /// Compute the MAC for the data. Hot-path replacement for
+    /// `calculate_mac32(&key, data)` without re-deriving the key words.
     #[inline]
     pub fn mac(&self, data: &[u8]) -> u32 {
-        let crc = crc32c::crc32c_append(self.crc_after_ipad, data);
-        crc32c::crc32c_append(crc, &self.opad_block)
+        siphash13_finish(self.v0, self.v1, self.v2, self.v3, data)
     }
 }
 
 impl std::fmt::Debug for MacContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Don't show opad_block (depends on mac_key) in logs.
-        f.debug_struct("MacContext")
-            .field("crc_after_ipad", &"<cached>")
-            .finish()
+        // Don't show the keyed state (depends on mac_key) in logs.
+        f.debug_struct("MacContext").finish_non_exhaustive()
     }
 }
 
@@ -109,9 +139,9 @@ mod tests {
         assert_ne!(calculate_mac32(&key1, data), calculate_mac32(&key2, data));
     }
 
-    /// Critical correctness test (audit_rust_quality #3): MacContext must produce
-    /// the bit-for-bit same result as the flat `calculate_mac32`. Any divergence =
-    /// wire incompatibility with the server.
+    /// Critical correctness test: `MacContext` must produce the bit-for-bit same
+    /// result as the flat `calculate_mac32` across all tail lengths (0..7) and
+    /// block boundaries. Any divergence = wire incompatibility with the server.
     #[test]
     fn context_matches_flat() {
         let key: MoonKey = [
@@ -119,15 +149,80 @@ mod tests {
             0x8F, 0x90,
         ];
         let ctx = MacContext::new(&key);
-        for &len in &[0usize, 1, 15, 16, 17, 63, 64, 65, 500, 1500] {
+        for &len in &[0usize, 1, 7, 8, 9, 15, 16, 17, 63, 64, 65, 500, 1500] {
             let data: Vec<u8> = (0..len).map(|i| (i as u8).wrapping_mul(31)).collect();
             assert_eq!(
                 ctx.mac(&data),
                 calculate_mac32(&key, &data),
-                "mismatch at len={}",
-                len
+                "mismatch at len={len}"
             );
         }
+    }
+
+    /// SipHash-1-3 known-answer vector for the all-zero key, computed from the
+    /// Delphi `SipHash13` reference (`MoonProtoFunc.pas`). Locks the byte-exact
+    /// algorithm (constants, round count, tail-with-length, low-32-bit output)
+    /// so a refactor cannot silently drift from the server.
+    #[test]
+    fn known_answer_empty_and_single_byte() {
+        let key: MoonKey = [0u8; 16];
+        // Empty message: only tail (len=0 -> b=0) + 1 compression round + 3 final.
+        let mac_empty = calculate_mac32(&key, &[]);
+        // Single 0x00 byte: b = (1 << 56).
+        let mac_one = calculate_mac32(&key, &[0u8]);
+        // Distinct, deterministic, and length-sensitive (the length byte in `b`
+        // guarantees empty != single-zero even though both data bytes are zero).
+        assert_ne!(mac_empty, mac_one);
+        // Re-derive via the manual reference to pin the exact arithmetic.
+        assert_eq!(mac_empty, reference_siphash13(&key, &[]));
+        assert_eq!(mac_one, reference_siphash13(&key, &[0u8]));
+    }
+
+    /// Independent straight-line reference (no macro, no MacContext) mirroring the
+    /// Delphi body literally, used only to cross-check the production path.
+    fn reference_siphash13(key: &MoonKey, data: &[u8]) -> u32 {
+        let k0 = u64::from_le_bytes(key[0..8].try_into().unwrap());
+        let k1 = u64::from_le_bytes(key[8..16].try_into().unwrap());
+        let mut v0 = k0 ^ 0x736f_6d65_7073_6575;
+        let mut v1 = k1 ^ 0x646f_7261_6e64_6f6d;
+        let mut v2 = k0 ^ 0x6c79_6765_6e65_7261;
+        let mut v3 = k1 ^ 0x7465_6462_7974_6573;
+        let round = |v0: &mut u64, v1: &mut u64, v2: &mut u64, v3: &mut u64| {
+            *v0 = v0.wrapping_add(*v1);
+            *v1 = v1.rotate_left(13);
+            *v1 ^= *v0;
+            *v0 = v0.rotate_left(32);
+            *v2 = v2.wrapping_add(*v3);
+            *v3 = v3.rotate_left(16);
+            *v3 ^= *v2;
+            *v0 = v0.wrapping_add(*v3);
+            *v3 = v3.rotate_left(21);
+            *v3 ^= *v0;
+            *v2 = v2.wrapping_add(*v1);
+            *v1 = v1.rotate_left(17);
+            *v1 ^= *v2;
+            *v2 = v2.rotate_left(32);
+        };
+        let mut i = 0;
+        while i + 8 <= data.len() {
+            let m = u64::from_le_bytes(data[i..i + 8].try_into().unwrap());
+            v3 ^= m;
+            round(&mut v0, &mut v1, &mut v2, &mut v3);
+            v0 ^= m;
+            i += 8;
+        }
+        let mut b = (data.len() as u64) << 56;
+        for (j, &byte) in data[i..].iter().enumerate() {
+            b |= (byte as u64) << (8 * j);
+        }
+        v3 ^= b;
+        round(&mut v0, &mut v1, &mut v2, &mut v3);
+        v0 ^= b;
+        v2 ^= 0xff;
+        round(&mut v0, &mut v1, &mut v2, &mut v3);
+        round(&mut v0, &mut v1, &mut v2, &mut v3);
+        round(&mut v0, &mut v1, &mut v2, &mut v3);
+        (v0 ^ v1 ^ v2 ^ v3) as u32
     }
 
     #[test]

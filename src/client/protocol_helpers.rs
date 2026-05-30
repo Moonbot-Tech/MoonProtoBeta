@@ -20,9 +20,12 @@ impl Client {
     pub(crate) fn decode_handshake_hello(
         master_key: &MoonKey,
         client_id: u64,
+        cmd: u8,
         payload: &[u8],
     ) -> Option<handshake::Hello> {
-        let aad = client_id.to_le_bytes();
+        // AAD = {client_id, cmd}: the inbound handshake command (WhoAreYou or
+        // Fine) is bound into the GCM tag, so a relabelled header fails decode.
+        let aad = handshake::handshake_aad(client_id, cmd);
         let decrypted = crypto::decrypt(master_key, payload, &aad)?;
         handshake::Hello::from_bytes(&decrypted)
     }

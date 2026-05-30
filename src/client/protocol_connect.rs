@@ -19,7 +19,8 @@ impl ProtocolCore<'_> {
         hello.timestamp = delphi_now();
         hello.peer_mix = crypto::mix_values(&hello.rnd, hello.mix_ts, self.client.server_token);
         let packed = hello.to_bytes_packed();
-        let aad = self.client.cfg.client_id.to_le_bytes();
+        let aad =
+            handshake::handshake_aad(self.client.cfg.client_id, Command::HelloAgain.to_byte());
         if let Some(cipher) = self.client.encode_cipher.as_ref() {
             crypto::encrypt_with_cipher(cipher, &packed, &aad)
         } else {

@@ -109,6 +109,7 @@ impl ProtocolCore<'_> {
         if let Some(hello) = Client::decode_handshake_hello(
             &self.client.cfg.master_key,
             self.client.cfg.client_id,
+            Command::WhoAreYou.to_byte(),
             payload,
         ) {
             let encrypted = self.apply_who_are_you_hello_and_build_imfriend(hello);
@@ -146,6 +147,7 @@ impl ProtocolCore<'_> {
         if Client::decode_handshake_hello(
             &self.client.cfg.master_key,
             self.client.cfg.client_id,
+            Command::Fine.to_byte(),
             payload,
         )
         .is_some()

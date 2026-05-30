@@ -101,19 +101,26 @@ fn install_session_key(client: &mut Client) {
     client.encode_cipher = Some(crypto::cipher_from_key(&[0; 16]));
 }
 
-fn encrypted_hello(client: &Client, server_token: u64, peer_app_token: u64) -> Vec<u8> {
+fn encrypted_hello(
+    client: &Client,
+    cmd: Command,
+    server_token: u64,
+    peer_app_token: u64,
+) -> Vec<u8> {
     let mut hello = handshake::Hello::new(client.client_token, client.app_token);
     hello.server_token = server_token;
     hello.app_token = peer_app_token;
     hello.timestamp = delphi_now();
-    let aad = client.cfg.client_id.to_le_bytes();
+    let aad = handshake::handshake_aad(client.cfg.client_id, cmd.to_byte());
     crypto::encrypt(&client.cfg.master_key, &hello.to_bytes_packed(), &aad)
 }
 
 fn apply_reader_handshake_payload(client: &mut Client, cmd: Command, payload: &[u8]) -> bool {
     let master_key = client.cfg.master_key;
     let client_id = client.cfg.client_id;
-    let Some(hello) = Client::decode_handshake_hello(&master_key, client_id, payload) else {
+    let Some(hello) =
+        Client::decode_handshake_hello(&master_key, client_id, cmd.to_byte(), payload)
+    else {
         return false;
     };
 
@@ -213,7 +220,7 @@ fn want_new_hello_makes_late_fine_invalid_until_new_who_are_you() {
     }
     .on_handshake_control_inline(Command::WantNewHello, 0, 0);
 
-    let fine = encrypted_hello(&client, 0x2222, 0x3333);
+    let fine = encrypted_hello(&client, Command::Fine, 0x2222, 0x3333);
     ProtocolCore {
         client: &mut client,
     }
@@ -277,7 +284,7 @@ fn early_hello_again_uses_master_key_before_whoareyou() {
         client: &mut client,
     }
     .build_hello_again_packet();
-    let aad = client.cfg.client_id.to_le_bytes();
+    let aad = handshake::handshake_aad(client.cfg.client_id, Command::HelloAgain.to_byte());
     let decrypted = crypto::decrypt(&client.cfg.master_key, &payload, &aad)
         .expect("early HelloAgain must be encrypted with MasterKey");
     let hello = handshake::Hello::from_bytes(&decrypted).expect("valid HelloAgain payload");
@@ -306,7 +313,7 @@ fn fine_requires_master_key_hello_payload_like_delphi() {
 
     let mut hello = handshake::Hello::new(client.client_token, client.app_token);
     hello.timestamp = delphi_now();
-    let aad = client.cfg.client_id.to_le_bytes();
+    let aad = handshake::handshake_aad(client.cfg.client_id, Command::Fine.to_byte());
     let payload = crypto::encrypt(&client.cfg.master_key, &hello.to_bytes_packed(), &aad);
 
     assert!(apply_reader_handshake_payload(
@@ -334,7 +341,7 @@ fn first_fine_before_init_does_not_send_engine_api_or_restore_subscriptions() {
 
     let mut hello = handshake::Hello::new(client.client_token, client.app_token);
     hello.timestamp = delphi_now();
-    let aad = client.cfg.client_id.to_le_bytes();
+    let aad = handshake::handshake_aad(client.cfg.client_id, Command::Fine.to_byte());
     let payload = crypto::encrypt(&client.cfg.master_key, &hello.to_bytes_packed(), &aad);
 
     assert!(apply_reader_handshake_payload(
@@ -372,13 +379,13 @@ fn post_init_reconnect_restores_domain_without_second_init_and_reopens_stream_ga
         registry.orderbook_subs.insert("BTCUSDT".to_string());
     });
 
-    let who = encrypted_hello(&client, 0x2222, 0x2000);
+    let who = encrypted_hello(&client, Command::WhoAreYou, 0x2222, 0x2000);
     assert!(apply_reader_handshake_payload(
         &mut client,
         Command::WhoAreYou,
         &who,
     ));
-    let fine = encrypted_hello(&client, 0x2222, 0x2000);
+    let fine = encrypted_hello(&client, Command::Fine, 0x2222, 0x2000);
     assert!(apply_reader_handshake_payload(
         &mut client,
         Command::Fine,
@@ -611,13 +618,13 @@ fn post_init_reconnect_same_peer_app_token_does_not_refetch_indexes() {
         registry.orderbook_subs.insert("BTCUSDT".to_string());
     });
 
-    let who = encrypted_hello(&client, 0x2222, 0x1000);
+    let who = encrypted_hello(&client, Command::WhoAreYou, 0x2222, 0x1000);
     assert!(apply_reader_handshake_payload(
         &mut client,
         Command::WhoAreYou,
         &who,
     ));
-    let fine = encrypted_hello(&client, 0x2222, 0x1000);
+    let fine = encrypted_hello(&client, Command::Fine, 0x2222, 0x1000);
     assert!(apply_reader_handshake_payload(
         &mut client,
         Command::Fine,

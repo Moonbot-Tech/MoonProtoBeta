@@ -1,6 +1,19 @@
 use crate::crypto;
+use crate::protocol::Command;
 use crate::MoonKey;
 use rand::Rng;
+
+/// Handshake AEAD associated data: `{client_id: u64 LE, cmd: u8}` packed = 9
+/// bytes, matching Delphi `THandShakeAAD` / `HandShakeAAD`
+/// (`MoonProtoDataStruct.pas:115-141`). Binding the command into the AAD means a
+/// relabel of the header command (e.g. WhoAreYou -> Fine) breaks the GCM tag, so
+/// Decode fails. Every handshake encode/decode must use the same `cmd`.
+pub(crate) fn handshake_aad(client_id: u64, cmd: u8) -> [u8; 9] {
+    let mut aad = [0u8; 9];
+    aad[..8].copy_from_slice(&client_id.to_le_bytes());
+    aad[8] = cmd;
+    aad
+}
 use zerocopy::byteorder::little_endian::U64 as LeU64;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
@@ -92,7 +105,7 @@ impl Hello {
 }
 
 /// Build the Hello packet ready to send (encrypted with MasterKey).
-/// AAD = client_id (8 bytes LE). Vars.pas:434 `MakeCorrectAAD = true` ⇒ AAD is actually applied.
+/// AAD = `{client_id, MPC_Hello}` (9 bytes, see [`handshake_aad`]).
 /// `timestamp_dt` — TDateTime from the caller (client.rs::delphi_now includes the NTP offset).
 pub fn build_hello_packet(
     master_key: &MoonKey,
@@ -105,7 +118,7 @@ pub fn build_hello_packet(
     let mut hello = Hello::new(*client_token, app_token);
     hello.timestamp = timestamp_dt;
     let packed = hello.to_bytes_packed();
-    let aad = client_id.to_le_bytes();
+    let aad = handshake_aad(client_id, Command::Hello.to_byte());
     crypto::encrypt(master_key, &packed, &aad)
 }
 

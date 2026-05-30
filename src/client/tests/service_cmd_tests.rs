@@ -155,6 +155,7 @@ fn service_ping_payload(
 
 fn encrypted_server_hello(
     master_key: &MoonKey,
+    cmd: Command,
     client_id: u64,
     server_token: u64,
     peer_app_token: u64,
@@ -163,7 +164,7 @@ fn encrypted_server_hello(
     hello.server_token = server_token;
     hello.app_token = peer_app_token;
     hello.timestamp = delphi_now();
-    let aad = client_id.to_le_bytes();
+    let aad = handshake::handshake_aad(client_id, cmd.to_byte());
     crypto::encrypt(master_key, &hello.to_bytes_packed(), &aad)
 }
 
@@ -630,6 +631,7 @@ fn reader_handles_who_are_you_imfriend_without_main_loop_tick() {
 
     let who = encrypted_server_hello(
         &client.cfg.master_key,
+        Command::WhoAreYou,
         client.cfg.client_id,
         server_token,
         peer_app_token,
@@ -654,7 +656,7 @@ fn reader_handles_who_are_you_imfriend_without_main_loop_tick() {
         "WhoAreYou handler must preserve Delphi's 32ms ImFriend barrier; elapsed={elapsed:?}"
     );
     let (encode_key, decode_key) = crypto::generate_sub_keys(&client.cfg.master_key, server_token);
-    let aad = client.cfg.client_id.to_le_bytes();
+    let aad = handshake::handshake_aad(client.cfg.client_id, Command::ImFriend.to_byte());
     let decrypted = crypto::decrypt(&encode_key, &imfriend1, &aad)
         .expect("ImFriend decrypts with client encode key");
     let im = handshake::Hello::from_bytes(&decrypted).expect("valid ImFriend Hello");
@@ -700,7 +702,7 @@ fn reader_who_are_you_uses_writer_updated_hello_token() {
 
     let (hello_hdr, hello_payload) = recv_client_packet(&server_sock, &mut client);
     assert_eq!(hello_hdr.cmd, Command::Hello.to_byte());
-    let aad = client.cfg.client_id.to_le_bytes();
+    let aad = handshake::handshake_aad(client.cfg.client_id, Command::Hello.to_byte());
     let hello = crypto::decrypt(&client.cfg.master_key, &hello_payload, &aad)
         .and_then(|payload| handshake::Hello::from_bytes(&payload))
         .expect("sent Hello decrypts with master key");
@@ -708,6 +710,7 @@ fn reader_who_are_you_uses_writer_updated_hello_token() {
 
     let who = encrypted_server_hello(
         &client.cfg.master_key,
+        Command::WhoAreYou,
         client.cfg.client_id,
         server_token,
         peer_app_token,
@@ -722,7 +725,8 @@ fn reader_who_are_you_uses_writer_updated_hello_token() {
     assert_eq!(hdr2.cmd, Command::ImFriend.to_byte());
     assert!(events1.is_empty());
     let (encode_key, _decode_key) = crypto::generate_sub_keys(&client.cfg.master_key, server_token);
-    let im = crypto::decrypt(&encode_key, &imfriend1, &aad)
+    let imfriend_aad = handshake::handshake_aad(client.cfg.client_id, Command::ImFriend.to_byte());
+    let im = crypto::decrypt(&encode_key, &imfriend1, &imfriend_aad)
         .and_then(|payload| handshake::Hello::from_bytes(&payload))
         .expect("ImFriend decrypts with client encode key");
     assert_eq!(
@@ -751,7 +755,13 @@ fn reader_handles_fine_auth_done_without_recv_event_backlog() {
     client.socket = Some(client_sock);
     client.start_inline_reader_session();
 
-    let fine = encrypted_server_hello(&client.cfg.master_key, client.cfg.client_id, 0x2222, 0x3333);
+    let fine = encrypted_server_hello(
+        &client.cfg.master_key,
+        Command::Fine,
+        client.cfg.client_id,
+        0x2222,
+        0x3333,
+    );
     let packet = pack_server_packet(&client.cfg.mac_key, Command::Fine, &fine);
     server_sock.send_to(&packet, client_addr).unwrap();
 
@@ -912,7 +922,7 @@ fn nat_binding_change_rebinds_with_hello_again_from_new_socket() {
     assert_eq!(from, new_addr);
     let (hdr, payload) = unpack_client_packet(&client.cfg.mac_key, &raw[..n]);
     assert_eq!(hdr.cmd, Command::HelloAgain.to_byte());
-    let aad = client.cfg.client_id.to_le_bytes();
+    let aad = handshake::handshake_aad(client.cfg.client_id, Command::HelloAgain.to_byte());
     let hello_again = crypto::decrypt(&encode_key, &payload, &aad)
         .and_then(|bytes| handshake::Hello::from_bytes(&bytes))
         .expect("HelloAgain decrypts with session encode key");
@@ -923,6 +933,7 @@ fn nat_binding_change_rebinds_with_hello_again_from_new_socket() {
 
     let fine = encrypted_server_hello(
         &client.cfg.master_key,
+        Command::Fine,
         client.cfg.client_id,
         server_token,
         0xAAAA_BBBB_CCCC_DDDD,
