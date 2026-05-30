@@ -332,7 +332,7 @@ fn first_fine_before_init_does_not_send_engine_api_or_restore_subscriptions() {
     let mut client = dummy_client();
     client.set_domain_ready(false);
     client.peer_app_token = 0xABCD;
-    client.tracked_indexes_peer_app_token = 0;
+    client.reconnect.tracked_indexes_peer_app_token = 0;
     client.with_subscription_registry_mut(|registry| {
         registry.trades_sub = Some(TradesSubscription { want_mm: true });
         registry.mm_orders_sub = Some(true);
@@ -370,8 +370,8 @@ fn post_init_reconnect_restores_domain_without_second_init_and_reopens_stream_ga
     client.prev_auth_status = AuthStatus::AuthDone;
     client.authorized = true;
     client.peer_app_token = 0x1000;
-    client.tracked_indexes_peer_app_token = 0x1000;
-    client.domain_restore = DomainRestoreIntent {
+    client.reconnect.tracked_indexes_peer_app_token = 0x1000;
+    client.subscriptions.domain_restore = DomainRestoreIntent {
         fetch_indexes: true,
     };
     client.with_subscription_registry_mut(|registry| {
@@ -395,7 +395,7 @@ fn post_init_reconnect_restores_domain_without_second_init_and_reopens_stream_ga
     assert!(client.authorized);
     assert_eq!(client.auth_status, AuthStatus::AuthDone);
     assert!(
-        client.indexes_fetch_in_flight,
+        client.reconnect.indexes_fetch_in_flight,
         "post-init reconnect must request fresh indexes without user re-running Init"
     );
 
@@ -467,6 +467,7 @@ fn post_init_reconnect_restores_domain_without_second_init_and_reopens_stream_ga
         );
     }
     let subscribe_due = client
+        .reconnect
         .pending_trades_resubscribe_after_ms
         .expect("unsubscribe response starts the Delphi Sleep(100) window");
     client.tick_trades_reconnect_sequence(subscribe_due - 1, 0);
@@ -504,7 +505,7 @@ fn post_init_reconnect_restores_domain_without_second_init_and_reopens_stream_ga
             &mut sink,
         );
     }
-    assert!(!client.indexes_fetch_in_flight);
+    assert!(!client.reconnect.indexes_fetch_in_flight);
     assert!(client.market_indexes_current_for_peer());
     let after_indexes_sent = drain_send_items(&client);
     let after_indexes_methods = api_methods(&after_indexes_sent);
@@ -574,7 +575,10 @@ fn post_init_reconnect_restores_domain_without_second_init_and_reopens_stream_ga
             &mut sink,
         );
     }
-    assert_eq!(client.subscribed_book_server_token, client.server_token);
+    assert_eq!(
+        client.reconnect.subscribed_book_server_token,
+        client.server_token
+    );
 
     out.clear();
     actions.clear();
@@ -610,8 +614,8 @@ fn post_init_reconnect_same_peer_app_token_does_not_refetch_indexes() {
     client.prev_auth_status = AuthStatus::AuthDone;
     client.authorized = true;
     client.peer_app_token = 0x1000;
-    client.tracked_indexes_peer_app_token = 0x1000;
-    client.domain_restore = DomainRestoreIntent {
+    client.reconnect.tracked_indexes_peer_app_token = 0x1000;
+    client.subscriptions.domain_restore = DomainRestoreIntent {
         fetch_indexes: true,
     };
     client.with_subscription_registry_mut(|registry| {
@@ -682,7 +686,10 @@ fn trades_reconnect_restores_distinct_mm_orders_override_after_delayed_subscribe
             &mut sink,
         );
     }
-    let subscribe_due = client.pending_trades_resubscribe_after_ms.unwrap();
+    let subscribe_due = client
+        .reconnect
+        .pending_trades_resubscribe_after_ms
+        .unwrap();
     client.tick_trades_reconnect_sequence(subscribe_due, 0);
     let sent = drain_send_items(&client);
     let api: Vec<_> = sent
@@ -720,8 +727,8 @@ fn orderbook_reconnect_retries_until_full_batch_response_confirms_server_token()
     client.authorized = true;
     client.server_token = 0x2222;
     client.peer_app_token = 0x3333;
-    client.tracked_indexes_peer_app_token = 0x3333;
-    client.subscribed_book_server_token = 0x1111;
+    client.reconnect.tracked_indexes_peer_app_token = 0x3333;
+    client.reconnect.subscribed_book_server_token = 0x1111;
     client.with_subscription_registry_mut(|registry| {
         registry.orderbook_subs.insert("BTCUSDT".to_string());
         registry.orderbook_subs.insert("ETHUSDT".to_string());
@@ -739,8 +746,11 @@ fn orderbook_reconnect_retries_until_full_batch_response_confirms_server_token()
         "reconnect retry sends one batched SubscribeOrderBook"
     );
     let first_uid = request_uid(&first_sent[0].data).expect("request uid");
-    assert_eq!(client.pending_orderbook_resubscribe_uid, Some(first_uid));
-    assert_eq!(client.last_book_reconnect_check_ms, 10_000);
+    assert_eq!(
+        client.reconnect.pending_orderbook_resubscribe_uid,
+        Some(first_uid)
+    );
+    assert_eq!(client.reconnect.last_book_reconnect_check_ms, 10_000);
 
     assert!(
         !client.tick_orderbook_reconnect_sequence(21_999),
@@ -762,12 +772,12 @@ fn orderbook_reconnect_retries_until_full_batch_response_confirms_server_token()
         );
     }
     assert_eq!(
-        client.subscribed_book_server_token, 0x1111,
+        client.reconnect.subscribed_book_server_token, 0x1111,
         "non-reconnect SubscribeOrderBook success must not stop a pending full replay"
     );
     assert_ne!(
             client
-                .last_orderbook_subscribe_request_ms
+                .reconnect.last_orderbook_subscribe_request_ms
                 .load(Ordering::Relaxed),
             NEVER_TIME_MS,
             "non-matching SubscribeOrderBook response must not close the pending batch SendAndWait gate"
@@ -779,7 +789,10 @@ fn orderbook_reconnect_retries_until_full_batch_response_confirms_server_token()
     );
     let second_sent = drain_send_items(&client);
     let second_uid = request_uid(&second_sent[0].data).expect("request uid");
-    assert_eq!(client.pending_orderbook_resubscribe_uid, Some(second_uid));
+    assert_eq!(
+        client.reconnect.pending_orderbook_resubscribe_uid,
+        Some(second_uid)
+    );
 
     let response_payload =
         build_engine_response_payload(second_uid, EngineMethod::SubscribeOrderBook, &[]);
@@ -794,8 +807,11 @@ fn orderbook_reconnect_retries_until_full_batch_response_confirms_server_token()
             &mut sink,
         );
     }
-    assert_eq!(client.subscribed_book_server_token, client.server_token);
-    assert_eq!(client.pending_orderbook_resubscribe_uid, None);
+    assert_eq!(
+        client.reconnect.subscribed_book_server_token,
+        client.server_token
+    );
+    assert_eq!(client.reconnect.pending_orderbook_resubscribe_uid, None);
     assert!(
         !client.tick_orderbook_reconnect_sequence(20_000),
         "after confirmed current ServerToken, NeedResubscribeOrderBooks stops"
@@ -811,8 +827,8 @@ fn orderbook_reconnect_first_tick_is_immediate_without_inflight_subscribe() {
     client.authorized = true;
     client.server_token = 0x2222;
     client.peer_app_token = 0x3333;
-    client.tracked_indexes_peer_app_token = 0x3333;
-    client.subscribed_book_server_token = 0x1111;
+    client.reconnect.tracked_indexes_peer_app_token = 0x3333;
+    client.reconnect.subscribed_book_server_token = 0x1111;
     client.with_subscription_registry_mut(|registry| {
         registry.orderbook_subs.insert("BTCUSDT".to_string());
     });
@@ -835,8 +851,8 @@ fn queued_orderbook_subscribe_blocks_pre_response_reconnect_like_delphi_sendandw
     client.authorized = true;
     client.server_token = 0x2222;
     client.peer_app_token = 0x3333;
-    client.tracked_indexes_peer_app_token = 0x3333;
-    client.subscribed_book_server_token = 0x1111;
+    client.reconnect.tracked_indexes_peer_app_token = 0x3333;
+    client.reconnect.subscribed_book_server_token = 0x1111;
 
     client.subscribe_orderbook("BTCUSDT");
     assert_eq!(
@@ -844,6 +860,7 @@ fn queued_orderbook_subscribe_blocks_pre_response_reconnect_like_delphi_sendandw
         vec![EngineMethod::SubscribeOrderBook.to_byte()]
     );
     let requested_at = client
+        .reconnect
         .last_orderbook_subscribe_request_ms
         .load(Ordering::Relaxed);
     assert!(requested_at >= 0);
@@ -875,7 +892,7 @@ fn first_successful_orderbook_subscribe_sets_initial_book_server_token_like_delp
     client.auth_status = AuthStatus::AuthDone;
     client.authorized = true;
     client.server_token = 0x2222;
-    client.subscribed_book_server_token = 0;
+    client.reconnect.subscribed_book_server_token = 0;
 
     let response_payload =
         build_engine_response_payload(0xABCD, EngineMethod::SubscribeOrderBook, &[]);
@@ -891,7 +908,7 @@ fn first_successful_orderbook_subscribe_sets_initial_book_server_token_like_delp
         );
     }
 
-    assert_eq!(client.subscribed_book_server_token, 0x2222);
+    assert_eq!(client.reconnect.subscribed_book_server_token, 0x2222);
 }
 
 #[test]
@@ -901,10 +918,10 @@ fn malformed_get_markets_indexes_response_does_not_reopen_stream_gate() {
     client.auth_status = AuthStatus::AuthDone;
     client.authorized = true;
     client.peer_app_token = 0x2000;
-    client.tracked_indexes_peer_app_token = 0x1000;
-    client.indexes_fetch_in_flight = true;
-    client.update_markets_after_indexes = true;
-    client.restore_orderbooks_after_indexes = true;
+    client.reconnect.tracked_indexes_peer_app_token = 0x1000;
+    client.reconnect.indexes_fetch_in_flight = true;
+    client.reconnect.update_markets_after_indexes = true;
+    client.reconnect.restore_orderbooks_after_indexes = true;
     client.with_subscription_registry_mut(|registry| {
         registry.orderbook_subs.insert("BTCUSDT".to_string());
     });
@@ -930,7 +947,7 @@ fn malformed_get_markets_indexes_response_does_not_reopen_stream_gate() {
     }
 
     assert!(
-        !client.indexes_fetch_in_flight,
+        !client.reconnect.indexes_fetch_in_flight,
         "malformed response still finishes this in-flight attempt"
     );
     assert!(
@@ -948,11 +965,11 @@ fn malformed_get_markets_indexes_response_does_not_reopen_stream_gate() {
         "orderbook restore must wait for valid indexes payload"
     );
     assert!(
-        client.update_markets_after_indexes,
+        client.reconnect.update_markets_after_indexes,
         "retry after a later valid indexes response must still refresh markets"
     );
     assert!(
-        client.restore_orderbooks_after_indexes,
+        client.reconnect.restore_orderbooks_after_indexes,
         "retry after a later valid indexes response must still replay orderbooks"
     );
 
@@ -982,7 +999,7 @@ fn unknown_indexed_market_price_requests_markets_list_like_delphi_new_market_fou
     client.auth_status = AuthStatus::AuthDone;
     client.authorized = true;
     client.peer_app_token = 0x2000;
-    client.tracked_indexes_peer_app_token = 0x2000;
+    client.reconnect.tracked_indexes_peer_app_token = 0x2000;
 
     let mut dispatcher = EventDispatcher::new();
     dispatcher.markets.apply_markets_list(MarketsListResponse {
@@ -1142,7 +1159,10 @@ fn trades_reconnect_retries_every_five_seconds_until_stream_token_is_seen() {
             &mut sink,
         );
     }
-    let first_subscribe_due = client.pending_trades_resubscribe_after_ms.unwrap();
+    let first_subscribe_due = client
+        .reconnect
+        .pending_trades_resubscribe_after_ms
+        .unwrap();
     client.tick_trades_reconnect_sequence(first_subscribe_due, 0);
     let first_subscribe_sent = drain_send_items(&client);
     assert_eq!(
@@ -1164,7 +1184,7 @@ fn trades_reconnect_retries_every_five_seconds_until_stream_token_is_seen() {
             &mut sink,
         );
     }
-    let refreshed_at = client.last_trades_reconnect_check_ms;
+    let refreshed_at = client.reconnect.last_trades_reconnect_check_ms;
     client.tick_trades_reconnect_sequence(refreshed_at + TRADES_RECONNECT_THROTTLE_MS - 1, 0);
     assert!(
         drain_send_items(&client).is_empty(),
@@ -1210,7 +1230,7 @@ fn successful_subscribe_all_trades_response_refreshes_reconnect_gate_like_delphi
     let mut client = dummy_client();
     client.set_domain_ready(true);
     client.server_token = 0x2222;
-    client.last_trades_reconnect_check_ms = -TRADES_RECONNECT_THROTTLE_MS;
+    client.reconnect.last_trades_reconnect_check_ms = -TRADES_RECONNECT_THROTTLE_MS;
     client.with_subscription_registry_mut(|registry| {
         registry.trades_sub = Some(TradesSubscription { want_mm: true });
     });
@@ -1229,7 +1249,7 @@ fn successful_subscribe_all_trades_response_refreshes_reconnect_gate_like_delphi
         );
     }
 
-    let refreshed_at = client.last_trades_reconnect_check_ms;
+    let refreshed_at = client.reconnect.last_trades_reconnect_check_ms;
     assert!(
         refreshed_at >= 0,
         "Delphi SubscribeAllTrades success updates LastReconnectCheck"
@@ -1254,7 +1274,7 @@ fn queued_subscribe_all_trades_request_blocks_pre_response_reconnect_like_delphi
     let mut client = dummy_client();
     client.set_domain_ready(true);
     client.server_token = 0x2222;
-    client.last_trades_reconnect_check_ms = -TRADES_RECONNECT_THROTTLE_MS;
+    client.reconnect.last_trades_reconnect_check_ms = -TRADES_RECONNECT_THROTTLE_MS;
 
     client.subscribe_all_trades(true);
     assert_eq!(
@@ -1263,6 +1283,7 @@ fn queued_subscribe_all_trades_request_blocks_pre_response_reconnect_like_delphi
     );
 
     let requested_at = client
+        .reconnect
         .last_trades_subscribe_request_ms
         .load(Ordering::Relaxed);
     assert!(

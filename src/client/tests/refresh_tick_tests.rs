@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 
 fn dummy_cfg(refresh: RefreshConfig) -> ClientConfig {
     ClientConfig {
@@ -47,17 +47,17 @@ fn run_loop_does_not_refresh_between_auth_done_and_domain_init() {
     client.auth_status = AuthStatus::AuthDone;
 
     let mut dispatcher = crate::events::EventDispatcher::new();
-    let initial_markets_ms = client.last_update_markets_ms;
-    let initial_tags_ms = client.last_check_tags_ms;
+    let initial_markets_ms = client.refresh_clocks.last_update_markets_ms;
+    let initial_tags_ms = client.refresh_clocks.last_check_tags_ms;
 
     client.run_dispatcher_steps_for_test(1, &mut dispatcher);
 
     assert_eq!(
-        client.last_update_markets_ms, initial_markets_ms,
+        client.refresh_clocks.last_update_markets_ms, initial_markets_ms,
         "AuthDone before run_init_sequence must not start UpdateMarketsList refresh"
     );
     assert_eq!(
-        client.last_check_tags_ms, initial_tags_ms,
+        client.refresh_clocks.last_check_tags_ms, initial_tags_ms,
         "AuthDone before run_init_sequence must not start CheckBinanceTags refresh"
     );
     assert!(
@@ -69,11 +69,11 @@ fn run_loop_does_not_refresh_between_auth_done_and_domain_init() {
     client.run_dispatcher_steps_for_test(1, &mut dispatcher);
 
     assert_ne!(
-        client.last_update_markets_ms, initial_markets_ms,
+        client.refresh_clocks.last_update_markets_ms, initial_markets_ms,
         "after domain init the same refresh config should become active"
     );
     assert_ne!(
-        client.last_check_tags_ms, initial_tags_ms,
+        client.refresh_clocks.last_check_tags_ms, initial_tags_ms,
         "after domain init the same refresh config should become active"
     );
 }
@@ -88,13 +88,16 @@ fn default_refresh_starts_after_domain_init() {
     client.testing_set_domain_ready(true);
 
     let mut dispatcher = crate::events::EventDispatcher::new();
-    let initial_markets_ms = client.last_update_markets_ms;
-    let initial_tags_ms = client.last_check_tags_ms;
+    let initial_markets_ms = client.refresh_clocks.last_update_markets_ms;
+    let initial_tags_ms = client.refresh_clocks.last_check_tags_ms;
 
     client.run_dispatcher_steps_for_test(1, &mut dispatcher);
 
-    assert_ne!(client.last_update_markets_ms, initial_markets_ms);
-    assert_ne!(client.last_check_tags_ms, initial_tags_ms);
+    assert_ne!(
+        client.refresh_clocks.last_update_markets_ms,
+        initial_markets_ms
+    );
+    assert_ne!(client.refresh_clocks.last_check_tags_ms, initial_tags_ms);
 }
 
 #[test]
@@ -103,11 +106,11 @@ fn tick_sends_first_time_immediately() {
         update_markets_every: Some(Duration::from_millis(100)),
         check_tags_every: None,
     }));
-    let before = client.last_update_markets_ms;
+    let before = client.refresh_clocks.last_update_markets_ms;
     assert_eq!(before, i64::MIN / 2);
     writer(&mut client).tick_periodic_refresh(0);
     assert_eq!(
-        client.last_update_markets_ms, 0,
+        client.refresh_clocks.last_update_markets_ms, 0,
         "the first tick must record timestamp 0"
     );
 }
@@ -118,17 +121,17 @@ fn tick_respects_interval() {
         update_markets_every: Some(Duration::from_millis(100)),
         check_tags_every: None,
     }));
-    client.last_update_markets_ms = 50;
+    client.refresh_clocks.last_update_markets_ms = 50;
 
     writer(&mut client).tick_periodic_refresh(100);
     assert_eq!(
-        client.last_update_markets_ms, 50,
+        client.refresh_clocks.last_update_markets_ms, 50,
         "interval not elapsed — last_update_markets_ms does not change"
     );
 
     writer(&mut client).tick_periodic_refresh(150);
     assert_eq!(
-        client.last_update_markets_ms, 150,
+        client.refresh_clocks.last_update_markets_ms, 150,
         "100ms elapsed — the send happened"
     );
 }
@@ -139,15 +142,15 @@ fn tick_does_nothing_when_both_disabled() {
         update_markets_every: None,
         check_tags_every: None,
     }));
-    let was_markets = client.last_update_markets_ms;
-    let was_tags = client.last_check_tags_ms;
+    let was_markets = client.refresh_clocks.last_update_markets_ms;
+    let was_tags = client.refresh_clocks.last_check_tags_ms;
     writer(&mut client).tick_periodic_refresh(1_000_000);
     assert_eq!(
-        client.last_update_markets_ms, was_markets,
+        client.refresh_clocks.last_update_markets_ms, was_markets,
         "update_markets disabled — last_update_markets_ms does not change"
     );
     assert_eq!(
-        client.last_check_tags_ms, was_tags,
+        client.refresh_clocks.last_check_tags_ms, was_tags,
         "check_tags disabled — last_check_tags_ms does not change"
     );
 }
@@ -159,14 +162,14 @@ fn tick_check_tags_independent_from_update_markets() {
         check_tags_every: Some(Duration::from_millis(200)),
     }));
     client.set_domain_ready(true);
-    let was_markets = client.last_update_markets_ms;
+    let was_markets = client.refresh_clocks.last_update_markets_ms;
     writer(&mut client).tick_periodic_refresh(1_000_000);
     assert_eq!(
-        client.last_update_markets_ms, was_markets,
+        client.refresh_clocks.last_update_markets_ms, was_markets,
         "update_markets disabled — leave it alone"
     );
     assert_eq!(
-        client.last_check_tags_ms, 1_000_000,
+        client.refresh_clocks.last_check_tags_ms, 1_000_000,
         "check_tags enabled — touch it"
     );
 }
@@ -178,11 +181,14 @@ fn first_check_tags_tick_initializes_hour_without_burst() {
         check_tags_every: Some(Duration::from_secs(60)),
     }));
     client.set_domain_ready(true);
-    assert_eq!(client.check_tags_hour_slot, i64::MIN);
+    assert_eq!(client.refresh_clocks.check_tags_hour_slot, i64::MIN);
 
     writer(&mut client).tick_periodic_refresh_at(0, 42);
-    assert_eq!(client.check_tags_hour_slot, 42);
-    assert_eq!(client.check_tags_burst_sent, CHECK_TAGS_BURST_COUNT);
+    assert_eq!(client.refresh_clocks.check_tags_hour_slot, 42);
+    assert_eq!(
+        client.refresh_clocks.check_tags_burst_sent,
+        CHECK_TAGS_BURST_COUNT
+    );
     assert_eq!(
         drain_api_methods(&client),
         vec![EngineMethod::CheckBinanceTags.to_byte()],
@@ -202,16 +208,16 @@ fn tick_both_intervals_independent() {
         check_tags_every: Some(Duration::from_millis(500)),
     }));
     client.set_domain_ready(true);
-    client.last_update_markets_ms = 0;
-    client.last_check_tags_ms = 0;
+    client.refresh_clocks.last_update_markets_ms = 0;
+    client.refresh_clocks.last_check_tags_ms = 0;
 
     writer(&mut client).tick_periodic_refresh(150);
-    assert_eq!(client.last_update_markets_ms, 150);
-    assert_eq!(client.last_check_tags_ms, 0);
+    assert_eq!(client.refresh_clocks.last_update_markets_ms, 150);
+    assert_eq!(client.refresh_clocks.last_check_tags_ms, 0);
 
     writer(&mut client).tick_periodic_refresh(600);
-    assert_eq!(client.last_update_markets_ms, 600);
-    assert_eq!(client.last_check_tags_ms, 600);
+    assert_eq!(client.refresh_clocks.last_update_markets_ms, 600);
+    assert_eq!(client.refresh_clocks.last_check_tags_ms, 600);
 }
 
 #[test]
@@ -221,13 +227,13 @@ fn tick_stale_peer_app_token_sends_indexes_before_update_markets() {
         check_tags_every: Some(Duration::from_millis(100)),
     }));
     client.set_domain_ready(true);
-    client.domain_restore = DomainRestoreIntent {
+    client.subscriptions.domain_restore = DomainRestoreIntent {
         fetch_indexes: true,
     };
     client.peer_app_token = 0x2222;
-    client.tracked_indexes_peer_app_token = 0x1111;
-    client.last_update_markets_ms = 0;
-    client.last_check_tags_ms = 0;
+    client.reconnect.tracked_indexes_peer_app_token = 0x1111;
+    client.refresh_clocks.last_update_markets_ms = 0;
+    client.refresh_clocks.last_check_tags_ms = 0;
 
     writer(&mut client).tick_periodic_refresh_at(150, 42);
 
@@ -245,7 +251,7 @@ fn tick_stale_peer_app_token_sends_indexes_before_update_markets() {
         "token tag refresh is independent from server-index mapping"
     );
     assert_eq!(
-        client.last_update_markets_ms, 0,
+        client.refresh_clocks.last_update_markets_ms, 0,
         "skipped price refresh must not consume its periodic interval"
     );
 }
@@ -257,9 +263,9 @@ fn check_tags_hourly_burst_sends_four_requests_with_spacing() {
         check_tags_every: Some(Duration::from_secs(60)),
     }));
     client.set_domain_ready(true);
-    client.check_tags_hour_slot = 10;
-    client.last_check_tags_ms = 1_000;
-    client.check_tags_burst_sent = CHECK_TAGS_BURST_COUNT;
+    client.refresh_clocks.check_tags_hour_slot = 10;
+    client.refresh_clocks.last_check_tags_ms = 1_000;
+    client.refresh_clocks.check_tags_burst_sent = CHECK_TAGS_BURST_COUNT;
     drain_api_methods(&client);
 
     writer(&mut client).tick_periodic_refresh_at(10_000, 11);
@@ -267,7 +273,7 @@ fn check_tags_hourly_burst_sends_four_requests_with_spacing() {
         drain_api_methods(&client),
         vec![EngineMethod::CheckBinanceTags.to_byte()],
     );
-    assert_eq!(client.check_tags_burst_sent, 1);
+    assert_eq!(client.refresh_clocks.check_tags_burst_sent, 1);
 
     writer(&mut client).tick_periodic_refresh_at(10_100, 11);
     assert!(
@@ -286,7 +292,10 @@ fn check_tags_hourly_burst_sends_four_requests_with_spacing() {
             EngineMethod::CheckBinanceTags.to_byte(),
         ],
     );
-    assert_eq!(client.check_tags_burst_sent, CHECK_TAGS_BURST_COUNT);
+    assert_eq!(
+        client.refresh_clocks.check_tags_burst_sent,
+        CHECK_TAGS_BURST_COUNT
+    );
 
     writer(&mut client).tick_periodic_refresh_at(10_800, 11);
     assert!(

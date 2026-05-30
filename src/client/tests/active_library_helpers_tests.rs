@@ -171,20 +171,20 @@ fn bind_failure_tracking_resets_after_successful_bind() {
 #[test]
 fn indexes_fetch_timeout_does_nothing_when_not_in_flight() {
     let mut client = Client::new(dummy_cfg());
-    client.indexes_fetch_in_flight = false;
-    client.indexes_fetch_started_ms = 0;
+    client.reconnect.indexes_fetch_in_flight = false;
+    client.reconnect.indexes_fetch_started_ms = 0;
     writer(&mut client).check_indexes_fetch_timeout(100_000_000);
-    assert!(!client.indexes_fetch_in_flight);
+    assert!(!client.reconnect.indexes_fetch_in_flight);
 }
 
 #[test]
 fn indexes_fetch_timeout_preserves_in_flight_within_window() {
     let mut client = Client::new(dummy_cfg());
-    client.indexes_fetch_in_flight = true;
-    client.indexes_fetch_started_ms = 0;
+    client.reconnect.indexes_fetch_in_flight = true;
+    client.reconnect.indexes_fetch_started_ms = 0;
     writer(&mut client).check_indexes_fetch_timeout(5_000);
     assert!(
-        client.indexes_fetch_in_flight,
+        client.reconnect.indexes_fetch_in_flight,
         "within the timeout — the flag is preserved"
     );
 }
@@ -192,13 +192,13 @@ fn indexes_fetch_timeout_preserves_in_flight_within_window() {
 #[test]
 fn indexes_fetch_timeout_clears_in_flight_after_window() {
     let mut client = Client::new(dummy_cfg());
-    client.indexes_fetch_in_flight = true;
-    client.indexes_fetch_started_ms = 0;
+    client.reconnect.indexes_fetch_in_flight = true;
+    client.reconnect.indexes_fetch_started_ms = 0;
     client.peer_app_token = 0;
-    client.tracked_indexes_peer_app_token = 0;
+    client.reconnect.tracked_indexes_peer_app_token = 0;
     writer(&mut client).check_indexes_fetch_timeout(13_000);
     assert!(
-        !client.indexes_fetch_in_flight,
+        !client.reconnect.indexes_fetch_in_flight,
         "after the timeout without a peer_app_token mismatch — the flag is cleared"
     );
 }
@@ -206,18 +206,18 @@ fn indexes_fetch_timeout_clears_in_flight_after_window() {
 #[test]
 fn indexes_fetch_timeout_does_not_retry_without_init_intent() {
     let mut client = Client::new(dummy_cfg());
-    client.indexes_fetch_in_flight = true;
-    client.indexes_fetch_started_ms = 0;
+    client.reconnect.indexes_fetch_in_flight = true;
+    client.reconnect.indexes_fetch_started_ms = 0;
     client.peer_app_token = 0xABC;
-    client.tracked_indexes_peer_app_token = 0xDEF;
+    client.reconnect.tracked_indexes_peer_app_token = 0xDEF;
     client.set_domain_ready(true);
     writer(&mut client).check_indexes_fetch_timeout(13_000);
     assert!(
-        !client.indexes_fetch_in_flight,
+        !client.reconnect.indexes_fetch_in_flight,
         "timeout cleanup only clears the marker"
     );
     assert_eq!(
-        client.indexes_fetch_started_ms, 0,
+        client.reconnect.indexes_fetch_started_ms, 0,
         "no re-send means started timestamp is unchanged"
     );
     let (sliced, high, low) = client.take_send_queues_for_test();
@@ -227,17 +227,17 @@ fn indexes_fetch_timeout_does_not_retry_without_init_intent() {
 #[test]
 fn indexes_fetch_timeout_retries_after_init_intent() {
     let mut client = Client::new(dummy_cfg());
-    client.indexes_fetch_in_flight = true;
-    client.indexes_fetch_started_ms = 0;
+    client.reconnect.indexes_fetch_in_flight = true;
+    client.reconnect.indexes_fetch_started_ms = 0;
     client.peer_app_token = 0xABC;
-    client.tracked_indexes_peer_app_token = 0xDEF;
+    client.reconnect.tracked_indexes_peer_app_token = 0xDEF;
     client.set_domain_ready(true);
-    client.domain_restore.fetch_indexes = true;
+    client.subscriptions.domain_restore.fetch_indexes = true;
 
     writer(&mut client).check_indexes_fetch_timeout(13_000);
 
-    assert!(client.indexes_fetch_in_flight);
-    assert_eq!(client.indexes_fetch_started_ms, 13_000);
+    assert!(client.reconnect.indexes_fetch_in_flight);
+    assert_eq!(client.reconnect.indexes_fetch_started_ms, 13_000);
     let (sliced, _, _) = client.take_send_queues_for_test();
     assert_eq!(
         sliced.len(),
@@ -254,13 +254,13 @@ fn indexes_fetch_timeout_retries_after_init_intent() {
 #[test]
 fn indexes_fetch_timeout_zero_peer_token_does_not_re_send() {
     let mut client = Client::new(dummy_cfg());
-    client.indexes_fetch_in_flight = true;
-    client.indexes_fetch_started_ms = 0;
+    client.reconnect.indexes_fetch_in_flight = true;
+    client.reconnect.indexes_fetch_started_ms = 0;
     client.peer_app_token = 0;
-    client.tracked_indexes_peer_app_token = 0xABC;
+    client.reconnect.tracked_indexes_peer_app_token = 0xABC;
     writer(&mut client).check_indexes_fetch_timeout(13_000);
     assert!(
-        !client.indexes_fetch_in_flight,
+        !client.reconnect.indexes_fetch_in_flight,
         "peer_app_token=0 (not connected) → no re-send, flag cleared"
     );
 }

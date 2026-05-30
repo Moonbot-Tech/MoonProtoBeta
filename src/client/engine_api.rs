@@ -12,13 +12,15 @@ impl Client {
     fn mark_engine_request_queued_at(&self, request_payload: &[u8], now_ms: i64) {
         match engine_request_method(request_payload) {
             Some(EngineMethod::SubscribeAllTrades) => {
-                self.last_trades_subscribe_request_ms
+                self.reconnect
+                    .last_trades_subscribe_request_ms
                     .store(now_ms, Ordering::Relaxed);
             }
             Some(EngineMethod::SubscribeOrderBook) => {
-                self.last_orderbook_subscribe_request_ms
+                self.reconnect
+                    .last_orderbook_subscribe_request_ms
                     .store(now_ms, Ordering::Relaxed);
-                self.last_orderbook_subscribe_request_uid.store(
+                self.reconnect.last_orderbook_subscribe_request_uid.store(
                     engine_request_uid(request_payload).unwrap_or(NO_PENDING_ENGINE_REQUEST_UID),
                     Ordering::Relaxed,
                 );
@@ -66,7 +68,7 @@ impl Client {
             let (_tx, rx) = mpsc::channel();
             return rx;
         };
-        if !self.domain_ready
+        if !self.subscriptions.domain_ready
             && !outgoing_allowed_before_domain_ready(Command::API.to_byte(), request_payload)
         {
             log::warn!(target: "moonproto::client",
@@ -76,7 +78,7 @@ impl Client {
             let (_tx, rx) = mpsc::channel();
             return rx;
         }
-        let rx = self.api_pending.register(uid);
+        let rx = self.pending_api.api_pending.register(uid);
         self.send_api_request(request_payload);
         rx
     }
@@ -101,7 +103,7 @@ impl Client {
             Ok(resp) => Ok(resp),
             Err(err) => {
                 if let Some(uid) = uid {
-                    self.api_pending.remove(uid);
+                    self.pending_api.api_pending.remove(uid);
                 }
                 Err(err)
             }
@@ -127,7 +129,7 @@ impl Client {
         // Replacing an existing slot is allowed: the old sender is dropped and
         // its receiver observes Disconnected, which is the correct double-call
         // behavior for this diagnostic helper.
-        self.pending_candles.insert(uid, partial);
+        self.pending_api.pending_candles.insert(uid, partial);
         self.send_api_request(&raw);
         (uid, rx)
     }
@@ -157,7 +159,7 @@ impl Client {
                 Ok(merged)
             }
             Err(err) => {
-                self.pending_candles.remove(&uid);
+                self.pending_api.pending_candles.remove(&uid);
                 Err(err)
             }
         }

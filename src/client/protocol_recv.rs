@@ -408,10 +408,13 @@ impl ProtocolCore<'_> {
         sliced_stats: Option<ReaderSlicedStats>,
         mode: &mut RunMode<'_>,
     ) {
-        let api_pending_consumed =
-            Client::dispatch_api_pending_inline(self.client.api_pending.as_ref(), cmd, &payload);
+        let api_pending_consumed = Client::dispatch_api_pending_inline(
+            self.client.pending_api.api_pending.as_ref(),
+            cmd,
+            &payload,
+        );
         let candles_chunk_consumed = Client::dispatch_candles_chunk_inline(
-            &mut self.client.pending_candles,
+            &mut self.client.pending_api.pending_candles,
             cmd,
             &payload,
             timestamp_ms,

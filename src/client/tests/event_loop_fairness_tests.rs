@@ -113,7 +113,7 @@ fn pre_init_async_api_does_not_register_pending_for_gated_methods() {
 
     let rx = client.send_api_request_async(&subscribe);
 
-    assert_eq!(client.api_pending.pending_count(), 0);
+    assert_eq!(client.pending_api.api_pending.pending_count(), 0);
     assert!(rx.recv_timeout(Duration::from_millis(1)).is_err());
     let (sliced, high, low) = client.take_send_queues_for_test();
     assert!(sliced.is_empty());

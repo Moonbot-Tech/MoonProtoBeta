@@ -87,7 +87,9 @@ impl Client {
         if !self.lifecycle.app_queue_alive.load(Ordering::Relaxed) {
             return Err(SubscribeError::Disconnected);
         }
-        if !self.domain_ready && !outgoing_allowed_before_domain_ready(item.cmd, &item.data) {
+        if !self.subscriptions.domain_ready
+            && !outgoing_allowed_before_domain_ready(item.cmd, &item.data)
+        {
             return Err(SubscribeError::DomainNotReady);
         }
         self.send_lock.lock().unwrap().push_send_cmd_int(item);
@@ -114,7 +116,7 @@ impl Client {
         &self,
         f: impl FnOnce(&SubscriptionRegistry) -> R,
     ) -> R {
-        let registry = self.subscription_registry.lock().unwrap();
+        let registry = self.subscriptions.subscription_registry.lock().unwrap();
         f(&registry)
     }
 
@@ -123,7 +125,7 @@ impl Client {
         &self,
         f: impl FnOnce(&mut SubscriptionRegistry) -> R,
     ) -> R {
-        let mut registry = self.subscription_registry.lock().unwrap();
+        let mut registry = self.subscriptions.subscription_registry.lock().unwrap();
         let result = f(&mut registry);
         self.refresh_subscription_summary(&registry);
         result
@@ -131,8 +133,8 @@ impl Client {
 
     pub(crate) fn refresh_subscription_summary(&self, registry: &SubscriptionRegistry) {
         refresh_subscription_summary(
-            &self.subscription_summary,
-            &self.subscription_trades_scope,
+            &self.subscriptions.subscription_summary,
+            &self.subscriptions.subscription_trades_scope,
             registry,
         );
     }

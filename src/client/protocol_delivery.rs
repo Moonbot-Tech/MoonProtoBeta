@@ -57,7 +57,7 @@ impl ProtocolCore<'_> {
     ) {
         let command = Command::from_byte(cmd);
         if is_domain_push_command(command)
-            && !self.client.domain_ready
+            && !self.client.subscriptions.domain_ready
             && !incoming_allowed_before_domain_ready(command, &payload)
         {
             if trace_io_enabled() {
@@ -75,7 +75,7 @@ impl ProtocolCore<'_> {
             return;
         }
         let pre_init_latched_domain = is_domain_push_command(command)
-            && !self.client.domain_ready
+            && !self.client.subscriptions.domain_ready
             && incoming_allowed_before_domain_ready(command, &payload);
         if pre_init_latched_domain {
             match mode {

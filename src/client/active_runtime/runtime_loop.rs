@@ -18,7 +18,7 @@ pub(super) fn runtime_loop(
     connect: ConnectConfig,
     ready_tx: Option<mpsc::Sender<Result<(), ConnectError>>>,
 ) {
-    let api_pending = Arc::clone(&client.api_pending);
+    let api_pending = Arc::clone(&client.pending_api.api_pending);
     let mut pending = RuntimePending::default();
     let mut startup = Some(RuntimeInitMachine::new(connect, &mut dispatcher));
     let startup_started_at = Instant::now();

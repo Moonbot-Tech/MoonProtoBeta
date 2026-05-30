@@ -36,20 +36,22 @@ impl Client {
         ClientSender {
             shared: Arc::new(ClientSenderShared {
                 app_queue_alive: Arc::clone(&self.lifecycle.app_queue_alive),
-                domain_ready: Arc::clone(&self.domain_ready_flag),
+                domain_ready: Arc::clone(&self.subscriptions.domain_ready_flag),
                 send_lock: Arc::clone(&self.send_lock),
-                subscription_registry: Arc::clone(&self.subscription_registry),
-                subscription_summary: Arc::clone(&self.subscription_summary),
-                subscription_trades_scope: Arc::clone(&self.subscription_trades_scope),
-                server_update_sent: Arc::clone(&self.server_update_sent),
+                subscription_registry: Arc::clone(&self.subscriptions.subscription_registry),
+                subscription_summary: Arc::clone(&self.subscriptions.subscription_summary),
+                subscription_trades_scope: Arc::clone(
+                    &self.subscriptions.subscription_trades_scope,
+                ),
+                server_update_sent: Arc::clone(&self.refresh_clocks.server_update_sent),
                 last_trades_subscribe_request_ms: Arc::clone(
-                    &self.last_trades_subscribe_request_ms,
+                    &self.reconnect.last_trades_subscribe_request_ms,
                 ),
                 last_orderbook_subscribe_request_ms: Arc::clone(
-                    &self.last_orderbook_subscribe_request_ms,
+                    &self.reconnect.last_orderbook_subscribe_request_ms,
                 ),
                 last_orderbook_subscribe_request_uid: Arc::clone(
-                    &self.last_orderbook_subscribe_request_uid,
+                    &self.reconnect.last_orderbook_subscribe_request_uid,
                 ),
             }),
             start: self._start,
@@ -168,7 +170,7 @@ impl Client {
     }
 
     pub(crate) fn apply_mm_orders_subscribe_intent(&mut self, subscribe: bool) {
-        let mut registry = self.subscription_registry.lock().unwrap();
+        let mut registry = self.subscriptions.subscription_registry.lock().unwrap();
         registry.mm_orders_sub = Some(subscribe);
         self.refresh_subscription_summary(&registry);
     }
@@ -187,18 +189,18 @@ impl Client {
     }
 
     pub(crate) fn domain_restore_needs_indexes(&self) -> bool {
-        self.domain_restore.fetch_indexes
-            || self.subscription_summary.trades_subscribed()
-            || self.subscription_summary.has_orderbook_subs()
+        self.subscriptions.domain_restore.fetch_indexes
+            || self.subscriptions.subscription_summary.trades_subscribed()
+            || self.subscriptions.subscription_summary.has_orderbook_subs()
     }
 
     pub(crate) fn send_markets_indexes_restore_request(&mut self, now_ms: i64) {
-        self.update_markets_after_indexes = true;
-        if self.indexes_fetch_in_flight {
+        self.reconnect.update_markets_after_indexes = true;
+        if self.reconnect.indexes_fetch_in_flight {
             return;
         }
-        self.indexes_fetch_in_flight = true;
-        self.indexes_fetch_started_ms = now_ms;
+        self.reconnect.indexes_fetch_in_flight = true;
+        self.reconnect.indexes_fetch_started_ms = now_ms;
         self.send_api_request(&crate::commands::engine_request::get_markets_indexes());
     }
 
@@ -207,15 +209,15 @@ impl Client {
     /// This is deliberately gated by `domain_ready`: before the single init pass `Fine`
     /// remains transport-only and must not emit Engine API traffic.
     pub(crate) fn restore_domain_after_reconnect(&mut self) {
-        if !self.domain_ready {
+        if !self.subscriptions.domain_ready {
             return;
         }
 
         let indexes_stale = self.peer_app_token != 0 && !self.market_indexes_current_for_peer();
         let orderbooks_need_fresh_indexes =
-            self.subscription_summary.has_orderbook_subs() && indexes_stale;
+            self.subscriptions.subscription_summary.has_orderbook_subs() && indexes_stale;
         if orderbooks_need_fresh_indexes {
-            self.restore_orderbooks_after_indexes = true;
+            self.reconnect.restore_orderbooks_after_indexes = true;
         }
 
         if indexes_stale && self.domain_restore_needs_indexes() {
@@ -243,7 +245,7 @@ impl Client {
         delay_trades: bool,
     ) {
         let (trades_sub, mm_orders_sub, orderbook_subs) = {
-            let registry = self.subscription_registry.lock().unwrap();
+            let registry = self.subscriptions.subscription_registry.lock().unwrap();
             (
                 registry.trades_sub,
                 registry.mm_orders_sub,
@@ -277,13 +279,13 @@ impl Client {
     }
 
     fn registry_trades_want_mm(&self) -> Option<bool> {
-        let registry = self.subscription_registry.lock().unwrap();
+        let registry = self.subscriptions.subscription_registry.lock().unwrap();
         let sub = registry.trades_sub?;
         Some(sub.want_mm)
     }
 
     fn registry_trades_mm_orders_intent(&self) -> Option<bool> {
-        let registry = self.subscription_registry.lock().unwrap();
+        let registry = self.subscriptions.subscription_registry.lock().unwrap();
         registry.mm_orders_sub
     }
 
@@ -291,23 +293,24 @@ impl Client {
         if self.registry_trades_want_mm().is_none() {
             return;
         }
-        self.last_trades_reconnect_check_ms = now_ms;
+        self.reconnect.last_trades_reconnect_check_ms = now_ms;
         let payload = crate::commands::engine_request::unsubscribe_all_trades();
         let request_uid = engine_request_uid(&payload).unwrap_or(NO_PENDING_ENGINE_REQUEST_UID);
         self.send_api_request_at(&payload, now_ms);
-        self.pending_trades_unsubscribe = Some(PendingTradesUnsubscribe {
+        self.reconnect.pending_trades_unsubscribe = Some(PendingTradesUnsubscribe {
             request_uid,
             sent_ms: now_ms,
         });
-        self.pending_trades_resubscribe_after_ms = None;
+        self.reconnect.pending_trades_resubscribe_after_ms = None;
     }
 
     pub(crate) fn tick_trades_reconnect_sequence(&mut self, now_ms: i64, trades_server_token: u64) {
-        if !self.domain_ready {
+        if !self.subscriptions.domain_ready {
             return;
         }
 
         let last_subscribe_request_ms = self
+            .reconnect
             .last_trades_subscribe_request_ms
             .load(Ordering::Relaxed);
         if last_subscribe_request_ms != NEVER_TIME_MS
@@ -317,19 +320,19 @@ impl Client {
             return;
         }
 
-        if let Some(pending) = self.pending_trades_unsubscribe {
+        if let Some(pending) = self.reconnect.pending_trades_unsubscribe {
             if (now_ms - pending.sent_ms).abs() < crate::api_pending::DEFAULT_PENDING_TIMEOUT_MS {
                 return;
             }
-            self.pending_trades_unsubscribe = None;
-            self.pending_trades_resubscribe_after_ms =
+            self.reconnect.pending_trades_unsubscribe = None;
+            self.reconnect.pending_trades_resubscribe_after_ms =
                 Some(now_ms + TRADES_RECONNECT_RESUBSCRIBE_DELAY_MS);
             return;
         }
 
-        if let Some(due_ms) = self.pending_trades_resubscribe_after_ms {
+        if let Some(due_ms) = self.reconnect.pending_trades_resubscribe_after_ms {
             if now_ms >= due_ms {
-                self.pending_trades_resubscribe_after_ms = None;
+                self.reconnect.pending_trades_resubscribe_after_ms = None;
                 if let Some(want_mm) = self.registry_trades_want_mm() {
                     self.send_api_request_at(
                         &crate::commands::engine_request::subscribe_all_trades(want_mm),
@@ -351,32 +354,38 @@ impl Client {
         if self.server_token == trades_server_token {
             return;
         }
-        if (now_ms - self.last_trades_reconnect_check_ms).abs() < TRADES_RECONNECT_THROTTLE_MS {
+        if (now_ms - self.reconnect.last_trades_reconnect_check_ms).abs()
+            < TRADES_RECONNECT_THROTTLE_MS
+        {
             return;
         }
         self.start_trades_reconnect_sequence(now_ms);
     }
 
     pub(crate) fn close_trades_unsubscribe_wait_if_matches(&mut self, request_uid: u64) {
-        let Some(pending) = self.pending_trades_unsubscribe else {
+        let Some(pending) = self.reconnect.pending_trades_unsubscribe else {
             return;
         };
         if pending.request_uid != request_uid {
             return;
         }
-        self.pending_trades_unsubscribe = None;
-        self.pending_trades_resubscribe_after_ms =
+        self.reconnect.pending_trades_unsubscribe = None;
+        self.reconnect.pending_trades_resubscribe_after_ms =
             Some(self.now_ms() + TRADES_RECONNECT_RESUBSCRIBE_DELAY_MS);
     }
 
     pub(crate) fn tick_orderbook_reconnect_sequence(&mut self, now_ms: i64) -> bool {
-        if !self.domain_ready || self.server_token == 0 || !self.market_indexes_current_for_peer() {
+        if !self.subscriptions.domain_ready
+            || self.server_token == 0
+            || !self.market_indexes_current_for_peer()
+        {
             return false;
         }
-        if self.server_token == self.subscribed_book_server_token {
+        if self.server_token == self.reconnect.subscribed_book_server_token {
             return false;
         }
         let last_subscribe_request_ms = self
+            .reconnect
             .last_orderbook_subscribe_request_ms
             .load(Ordering::Relaxed);
         if last_subscribe_request_ms != NEVER_TIME_MS
@@ -385,11 +394,13 @@ impl Client {
         {
             return false;
         }
-        if (now_ms - self.last_book_reconnect_check_ms).abs() < ORDERBOOK_RECONNECT_THROTTLE_MS {
+        if (now_ms - self.reconnect.last_book_reconnect_check_ms).abs()
+            < ORDERBOOK_RECONNECT_THROTTLE_MS
+        {
             return false;
         }
         let orderbook_subs = {
-            let registry = self.subscription_registry.lock().unwrap();
+            let registry = self.subscriptions.subscription_registry.lock().unwrap();
             registry.orderbook_subs.iter().cloned().collect::<Vec<_>>()
         };
         if orderbook_subs.is_empty() {
@@ -404,10 +415,10 @@ impl Client {
         orderbook_subs: Vec<String>,
         now_ms: i64,
     ) -> bool {
-        self.last_book_reconnect_check_ms = now_ms;
+        self.reconnect.last_book_reconnect_check_ms = now_ms;
         match self.send_orderbook_subscribe_batch(orderbook_subs, now_ms) {
             Some(uid) => {
-                self.pending_orderbook_resubscribe_uid = Some(uid);
+                self.reconnect.pending_orderbook_resubscribe_uid = Some(uid);
                 true
             }
             None => false,
@@ -431,20 +442,23 @@ impl Client {
 
     pub(crate) fn close_orderbook_subscribe_wait_if_matches(&self, request_uid: u64) {
         if self
+            .reconnect
             .last_orderbook_subscribe_request_uid
             .load(Ordering::Relaxed)
             == request_uid
         {
-            self.last_orderbook_subscribe_request_ms
+            self.reconnect
+                .last_orderbook_subscribe_request_ms
                 .store(NEVER_TIME_MS, Ordering::Relaxed);
-            self.last_orderbook_subscribe_request_uid
+            self.reconnect
+                .last_orderbook_subscribe_request_uid
                 .store(NO_PENDING_ENGINE_REQUEST_UID, Ordering::Relaxed);
         }
     }
 
     pub(crate) fn restore_orderbook_subscriptions_from_registry(&mut self) {
         let orderbook_subs = {
-            let registry = self.subscription_registry.lock().unwrap();
+            let registry = self.subscriptions.subscription_registry.lock().unwrap();
             registry.orderbook_subs.iter().cloned().collect::<Vec<_>>()
         };
         self.restore_orderbook_subscriptions_as_reconnect_batch(orderbook_subs, self.now_ms());
@@ -456,12 +470,12 @@ impl Client {
     /// `send_post_init_resync` already sends the current MM-orders flag, so this
     /// helper sends only stream subscriptions: all-trades and orderbooks.
     pub(crate) fn send_registry_subscriptions_after_init(&mut self) {
-        if !self.domain_ready {
+        if !self.subscriptions.domain_ready {
             return;
         }
 
         let (trades_sub, orderbook_subs) = {
-            let registry = self.subscription_registry.lock().unwrap();
+            let registry = self.subscriptions.subscription_registry.lock().unwrap();
             (
                 registry.trades_sub,
                 registry.orderbook_subs.iter().cloned().collect::<Vec<_>>(),
@@ -473,7 +487,7 @@ impl Client {
             self.send_api_request(&crate::commands::engine_request::subscribe_all_trades(
                 want_mm,
             ));
-            let mut registry = self.subscription_registry.lock().unwrap();
+            let mut registry = self.subscriptions.subscription_registry.lock().unwrap();
             registry.mm_orders_sub = Some(want_mm);
         }
 

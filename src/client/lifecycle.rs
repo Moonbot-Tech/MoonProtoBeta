@@ -66,16 +66,22 @@ impl Client {
     /// lower-level APIs: the next Init pass consumes the flag and runs
     /// the Delphi BaseCheck retry path.
     pub fn mark_server_update_sent(&self) {
-        self.server_update_sent.store(true, Ordering::Relaxed);
+        self.refresh_clocks
+            .server_update_sent
+            .store(true, Ordering::Relaxed);
     }
 
     /// Whether a Delphi-style server update marker is pending.
     pub fn server_update_sent(&self) -> bool {
-        self.server_update_sent.load(Ordering::Relaxed)
+        self.refresh_clocks
+            .server_update_sent
+            .load(Ordering::Relaxed)
     }
 
     pub(super) fn take_server_update_sent(&self) -> bool {
-        self.server_update_sent.swap(false, Ordering::Relaxed)
+        self.refresh_clocks
+            .server_update_sent
+            .swap(false, Ordering::Relaxed)
     }
 
     /// Internal hook: invokes the callback on a state transition.

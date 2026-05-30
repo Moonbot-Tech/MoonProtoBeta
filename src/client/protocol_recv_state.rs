@@ -55,8 +55,8 @@ impl ProtocolCore<'_> {
         let prev_app_token = self.client.peer_app_token;
         self.client.peer_app_token = hello.app_token;
         if prev_app_token != 0 && prev_app_token != hello.app_token {
-            self.client.indexes_fetch_in_flight = false;
-            self.client.tracked_indexes_peer_app_token = 0;
+            self.client.reconnect.indexes_fetch_in_flight = false;
+            self.client.reconnect.tracked_indexes_peer_app_token = 0;
             self.client.fire_lifecycle(LifecycleEvent::ServerRestart);
         }
 
@@ -86,7 +86,7 @@ impl ProtocolCore<'_> {
 
     pub(crate) fn apply_fine_auth_done(&mut self) {
         let restore_after_reconnect =
-            self.client.domain_ready && self.client.lifecycle.was_ever_connected;
+            self.client.subscriptions.domain_ready && self.client.lifecycle.was_ever_connected;
         self.client.need_connect = false;
         self.client.auth_status = AuthStatus::AuthDone;
         self.client.authorized = true;

@@ -750,7 +750,7 @@ impl RuntimeInitMachine {
                     }
                     self.result.markets_response_bytes = resp.data.len();
                     fire_init_step(client, "GetMarketsList", self.init_started_at);
-                    client.tracked_indexes_peer_app_token = client.peer_app_token;
+                    client.reconnect.tracked_indexes_peer_app_token = client.peer_app_token;
                     self.phase = RuntimeInitPhase::SendUpdateMarketsList;
                     changed = true;
                     continue;
@@ -790,7 +790,7 @@ impl RuntimeInitMachine {
                     }
                     self.result.update_markets_response_bytes = resp.data.len();
                     fire_init_step(client, "UpdateMarketsList", self.init_started_at);
-                    client.domain_restore = DomainRestoreIntent {
+                    client.subscriptions.domain_restore = DomainRestoreIntent {
                         fetch_indexes: true,
                     };
                     client.set_domain_ready(true);
@@ -968,7 +968,7 @@ fn poll_engine_init_step(
         Err(mpsc::TryRecvError::Empty) => {
             if Instant::now() >= pending.deadline {
                 if let Some(uid) = pending.request_uid {
-                    client.api_pending.remove(uid);
+                    client.pending_api.api_pending.remove(uid);
                 }
                 PendingEnginePoll::Timeout
             } else {
@@ -1518,7 +1518,7 @@ pub(crate) fn run_init_sequence(
     // `FLastServerAppToken := PeerAppToken`. A separate `GetMarketsIndexes`
     // request is not part of `TCryptoPumpTool.InitInt`; it is only the stale
     // token/reconnect repair path inside `TMoonProtoEngine.UpdateMarketsList`.
-    client.tracked_indexes_peer_app_token = client.peer_app_token;
+    client.reconnect.tracked_indexes_peer_app_token = client.peer_app_token;
 
     // === 4. UpdateMarketsList === critical: Delphi InitInt does exactly
     // `GetMarketsList and UpdateMarketsList`; if the token later becomes stale,
@@ -1535,7 +1535,7 @@ pub(crate) fn run_init_sequence(
     result.update_markets_response_bytes = resp.data.len();
     fire_init_step(client, "UpdateMarketsList", init_started_at);
 
-    client.domain_restore = DomainRestoreIntent {
+    client.subscriptions.domain_restore = DomainRestoreIntent {
         fetch_indexes: true,
     };
     client.set_domain_ready(true);
@@ -1603,7 +1603,12 @@ pub(crate) fn send_post_init_resync(
         client.strat_schema_request();
     }
     client.ui_settings_request();
-    let registry_mm_orders = client.subscription_registry.lock().unwrap().mm_orders_sub;
+    let registry_mm_orders = client
+        .subscriptions
+        .subscription_registry
+        .lock()
+        .unwrap()
+        .mm_orders_sub;
     let mm_orders = cfg
         .mm_orders_subscribe
         .or(registry_mm_orders)

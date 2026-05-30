@@ -43,18 +43,18 @@ impl Client {
         // GetMarketsIndexes response (any one — even unsuccessful, so it never
         // hangs forever).
         if resp.method == EngineMethod::GetMarketsIndexes {
-            self.indexes_fetch_in_flight = false;
+            self.reconnect.indexes_fetch_in_flight = false;
             let indexes_payload_ok = resp.success
                 && crate::commands::market::parse_markets_indexes_response(&resp.data).is_some();
             if indexes_payload_ok {
                 // Remember that indexes have been received for the current PeerAppToken.
-                self.tracked_indexes_peer_app_token = self.peer_app_token;
-                if self.update_markets_after_indexes {
-                    self.update_markets_after_indexes = false;
+                self.reconnect.tracked_indexes_peer_app_token = self.peer_app_token;
+                if self.reconnect.update_markets_after_indexes {
+                    self.reconnect.update_markets_after_indexes = false;
                     self.send_api_request(&crate::commands::engine_request::update_markets_list());
                 }
-                if self.restore_orderbooks_after_indexes {
-                    self.restore_orderbooks_after_indexes = false;
+                if self.reconnect.restore_orderbooks_after_indexes {
+                    self.reconnect.restore_orderbooks_after_indexes = false;
                     self.restore_orderbook_subscriptions_from_registry();
                 }
             }
@@ -66,13 +66,15 @@ impl Client {
         // only from the initial state, like Delphi `FSubscribedBookServerToken = 0`.
         if resp.method == EngineMethod::SubscribeOrderBook {
             let is_reconnect_batch =
-                self.pending_orderbook_resubscribe_uid == Some(resp.request_uid);
-            if resp.success && (self.subscribed_book_server_token == 0 || is_reconnect_batch) {
-                self.subscribed_book_server_token = self.server_token;
+                self.reconnect.pending_orderbook_resubscribe_uid == Some(resp.request_uid);
+            if resp.success
+                && (self.reconnect.subscribed_book_server_token == 0 || is_reconnect_batch)
+            {
+                self.reconnect.subscribed_book_server_token = self.server_token;
             }
             self.close_orderbook_subscribe_wait_if_matches(resp.request_uid);
             if is_reconnect_batch {
-                self.pending_orderbook_resubscribe_uid = None;
+                self.reconnect.pending_orderbook_resubscribe_uid = None;
             }
         }
 
@@ -82,10 +84,11 @@ impl Client {
         // this 5s gate prevents immediate unsubscribe/resubscribe churn.
         if resp.method == EngineMethod::SubscribeAllTrades && resp.success {
             let now_ms = self.now_ms();
-            self.last_trades_reconnect_check_ms = now_ms;
+            self.reconnect.last_trades_reconnect_check_ms = now_ms;
         }
         if resp.method == EngineMethod::SubscribeAllTrades {
-            self.last_trades_subscribe_request_ms
+            self.reconnect
+                .last_trades_subscribe_request_ms
                 .store(NEVER_TIME_MS, Ordering::Relaxed);
         }
         if resp.method == EngineMethod::UnsubscribeAllTrades {
@@ -181,7 +184,11 @@ impl Client {
             let now_ms = self.now_ms();
             if meta.method == EngineMethod::RequestCandlesData {
                 if let Some(resp) = parse_engine_response(&payload) {
-                    if Self::handle_candles_chunk_in_map(&mut self.pending_candles, &resp, now_ms) {
+                    if Self::handle_candles_chunk_in_map(
+                        &mut self.pending_api.pending_candles,
+                        &resp,
+                        now_ms,
+                    ) {
                         // The chunk was consumed by the aggregator. Forward to
                         // on_data only if the consumer does NOT use the async API
                         // (in that case the merged result is not ready yet — let
@@ -215,8 +222,8 @@ impl Client {
             self.apply_engine_response_client_bookkeeping(&resp);
 
             // 2. Pending registry (ordinary async API).
-            let pending_consumed =
-                api_pending_consumed_by_reader || self.api_pending.dispatch(resp).is_none();
+            let pending_consumed = api_pending_consumed_by_reader
+                || self.pending_api.api_pending.dispatch(resp).is_none();
             if !pending_consumed || sink.is_buffer() {
                 // If no specific receiver was waiting for the response — it is an
                 // ordinary API event. If one was waiting but we are in Dispatcher

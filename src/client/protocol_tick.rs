@@ -88,7 +88,9 @@ impl ProtocolCore<'_> {
         // F6/F7: periodic refresh prices + tags (optional, via ClientConfig.refresh).
         // Send only if auth_status == AuthDone (the server accepts the request only in
         // this phase; before it the request would be wasted).
-        if matches!(self.client.auth_status, AuthStatus::AuthDone) && self.client.domain_ready {
+        if matches!(self.client.auth_status, AuthStatus::AuthDone)
+            && self.client.subscriptions.domain_ready
+        {
             self.tick_periodic_refresh(cur_tm);
         }
     }
@@ -103,51 +105,54 @@ impl ProtocolCore<'_> {
         let hour_slot = if self.client.cfg.refresh.check_tags_every.is_some() {
             current_utc_hour_slot()
         } else {
-            self.client.check_tags_hour_slot
+            self.client.refresh_clocks.check_tags_hour_slot
         };
         self.tick_periodic_refresh_at(cur_tm, hour_slot);
     }
 
     pub(crate) fn tick_periodic_refresh_at(&mut self, cur_tm: i64, hour_slot: i64) {
-        let market_indexes_stale = self.client.domain_ready
+        let market_indexes_stale = self.client.subscriptions.domain_ready
             && self.client.domain_restore_needs_indexes()
             && self.client.peer_app_token != 0
             && !self.client.market_indexes_current_for_peer();
 
         if market_indexes_stale {
-            if !self.client.indexes_fetch_in_flight {
+            if !self.client.reconnect.indexes_fetch_in_flight {
                 self.client.send_markets_indexes_restore_request(cur_tm);
             }
         } else if let Some(interval) = self.client.cfg.refresh.update_markets_every {
             let interval_ms = interval.as_millis() as i64;
-            if (cur_tm - self.client.last_update_markets_ms) >= interval_ms {
+            if (cur_tm - self.client.refresh_clocks.last_update_markets_ms) >= interval_ms {
                 self.client
                     .send_api_request(&crate::commands::engine_request::update_markets_list());
-                self.client.last_update_markets_ms = cur_tm;
+                self.client.refresh_clocks.last_update_markets_ms = cur_tm;
             }
         }
 
         if let Some(interval) = self.client.cfg.refresh.check_tags_every {
-            if self.client.check_tags_hour_slot == i64::MIN {
-                self.client.check_tags_hour_slot = hour_slot;
-            } else if hour_slot != self.client.check_tags_hour_slot {
-                self.client.check_tags_hour_slot = hour_slot;
-                self.client.check_tags_burst_sent = 0;
-                self.client.last_check_tags_burst_ms = i64::MIN / 2;
+            if self.client.refresh_clocks.check_tags_hour_slot == i64::MIN {
+                self.client.refresh_clocks.check_tags_hour_slot = hour_slot;
+            } else if hour_slot != self.client.refresh_clocks.check_tags_hour_slot {
+                self.client.refresh_clocks.check_tags_hour_slot = hour_slot;
+                self.client.refresh_clocks.check_tags_burst_sent = 0;
+                self.client.refresh_clocks.last_check_tags_burst_ms = i64::MIN / 2;
             }
 
             let interval_ms = interval.as_millis() as i64;
-            let burst_due = self.client.check_tags_burst_sent < CHECK_TAGS_BURST_COUNT
-                && (cur_tm - self.client.last_check_tags_burst_ms) >= CHECK_TAGS_BURST_SPACING_MS;
-            let interval_due = (cur_tm - self.client.last_check_tags_ms) >= interval_ms;
+            let burst_due = self.client.refresh_clocks.check_tags_burst_sent
+                < CHECK_TAGS_BURST_COUNT
+                && (cur_tm - self.client.refresh_clocks.last_check_tags_burst_ms)
+                    >= CHECK_TAGS_BURST_SPACING_MS;
+            let interval_due =
+                (cur_tm - self.client.refresh_clocks.last_check_tags_ms) >= interval_ms;
 
             if burst_due || interval_due {
                 self.client
                     .send_api_request(&crate::commands::engine_request::check_binance_tags());
-                self.client.last_check_tags_ms = cur_tm;
-                if self.client.check_tags_burst_sent < CHECK_TAGS_BURST_COUNT {
-                    self.client.check_tags_burst_sent += 1;
-                    self.client.last_check_tags_burst_ms = cur_tm;
+                self.client.refresh_clocks.last_check_tags_ms = cur_tm;
+                if self.client.refresh_clocks.check_tags_burst_sent < CHECK_TAGS_BURST_COUNT {
+                    self.client.refresh_clocks.check_tags_burst_sent += 1;
+                    self.client.refresh_clocks.last_check_tags_burst_ms = cur_tm;
                 }
             }
         }
@@ -160,11 +165,11 @@ impl ProtocolCore<'_> {
     /// established by the single init pass.
     pub(crate) fn check_indexes_fetch_timeout(&mut self, now_ms: i64) {
         const INDEXES_FETCH_TIMEOUT_MS: i64 = 12_000;
-        if self.client.indexes_fetch_in_flight
-            && now_ms - self.client.indexes_fetch_started_ms > INDEXES_FETCH_TIMEOUT_MS
+        if self.client.reconnect.indexes_fetch_in_flight
+            && now_ms - self.client.reconnect.indexes_fetch_started_ms > INDEXES_FETCH_TIMEOUT_MS
         {
-            self.client.indexes_fetch_in_flight = false;
-            if self.client.domain_ready
+            self.client.reconnect.indexes_fetch_in_flight = false;
+            if self.client.subscriptions.domain_ready
                 && self.client.domain_restore_needs_indexes()
                 && self.client.peer_app_token != 0
                 && !self.client.market_indexes_current_for_peer()
@@ -179,10 +184,10 @@ impl ProtocolCore<'_> {
     /// from the tail of `ProcessTradesStream`, and Rust mirrors that in
     /// `EventDispatcher::dispatch_into_active_actions`.
     pub(crate) fn periodic_trades_reconnect_tick(&mut self, cur_tm: i64, mode: &mut RunMode<'_>) {
-        if cur_tm - self.client.last_trades_tick_ms < 100 {
+        if cur_tm - self.client.reconnect.last_trades_tick_ms < 100 {
             return;
         }
-        self.client.last_trades_tick_ms = cur_tm;
+        self.client.reconnect.last_trades_tick_ms = cur_tm;
         let trades_server_token = match mode {
             RunMode::Dispatcher { dispatcher, .. } => dispatcher.trades_server_token(),
             #[cfg(test)]

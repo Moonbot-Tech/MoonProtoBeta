@@ -277,7 +277,7 @@ fn init_base_auth_failure_uses_delphi_retry_branch() {
 fn pending_api_response_still_reaches_dispatcher_state() {
     let mut client = Client::new(dummy_cfg());
     let request_uid = 0x1122_3344_5566_7788;
-    let rx = client.api_pending.register(request_uid);
+    let rx = client.pending_api.api_pending.register(request_uid);
 
     let names = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
     let response_data = build_markets_indexes_response(&names);
@@ -324,11 +324,11 @@ fn pending_api_response_still_reaches_dispatcher_state() {
 fn pending_heavy_markets_response_is_applied_by_pending_owner_not_inline_dispatch() {
     let mut client = Client::new(dummy_cfg());
     let request_uid = 0x1020_3040_5060_7080;
-    let rx = client.api_pending.register(request_uid);
+    let rx = client.pending_api.api_pending.register(request_uid);
     let payload = build_engine_response_payload(request_uid, EngineMethod::GetMarketsList, &[]);
 
     let consumed = Client::dispatch_api_pending_inline(
-        client.api_pending.as_ref(),
+        client.pending_api.api_pending.as_ref(),
         Command::API.to_byte(),
         &payload,
     );
@@ -356,7 +356,7 @@ fn data_read_api_response_reaches_pending_receiver_before_run_loop() {
     client.authorized = true;
     client.auth_status = AuthStatus::AuthDone;
     let request_uid = 0x7766_5544_3322_1100;
-    let rx = client.api_pending.register(request_uid);
+    let rx = client.pending_api.api_pending.register(request_uid);
     let response_payload = build_engine_response_payload(request_uid, EngineMethod::AuthCheck, &[]);
     // AuthCheck is not an UnencryptedMethod, so the server sends it Crypted; feed
     // the crypted command path (S1 part 2 drops a plaintext AuthCheck as a spoof).
@@ -394,7 +394,7 @@ fn crypted_app_packets_before_auth_do_not_advance_slider_or_pending_api() {
 
     let stale_domain = build_server_crypted_payload(&decode_key, 5000, Command::UI, &[0, 0, 0]);
     let request_uid = 0x1111_2222_3333_4444;
-    let rx = client.api_pending.register(request_uid);
+    let rx = client.pending_api.api_pending.register(request_uid);
     let response_payload = build_engine_response_payload(request_uid, EngineMethod::BaseCheck, &[]);
     let encrypted_response =
         build_server_crypted_payload(&decode_key, 1, Command::API, &response_payload);
@@ -795,7 +795,7 @@ fn data_read_candles_chunks_complete_receiver_from_background_parse_worker() {
         .expect("second chunk should complete candles receiver after background parse");
     assert_eq!(merged.uid, uid);
     assert!(merged.markets.is_empty());
-    assert!(client.pending_candles.is_empty());
+    assert!(client.pending_api.pending_candles.is_empty());
 }
 
 #[test]
@@ -854,7 +854,7 @@ fn reader_consumed_candles_chunk_is_not_delivered_to_callback_or_dispatcher() {
 fn pending_api_response_is_not_duplicated_to_callback_sink() {
     let mut client = Client::new(dummy_cfg());
     let request_uid = 7;
-    let rx = client.api_pending.register(request_uid);
+    let rx = client.pending_api.api_pending.register(request_uid);
     let payload = build_engine_response_payload(request_uid, EngineMethod::BaseCheck, &[]);
 
     let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -927,7 +927,7 @@ fn malformed_api_request_async_returns_closed_receiver_without_pending_slot() {
 
     let rx = client.send_api_request_async(&[2, 3, 0]);
 
-    assert_eq!(client.api_pending.pending_count(), 0);
+    assert_eq!(client.pending_api.api_pending.pending_count(), 0);
     assert!(matches!(
         rx.try_recv(),
         Err(mpsc::TryRecvError::Disconnected)
@@ -946,7 +946,7 @@ fn request_candles_data_timeout_removes_pending_slot() {
         .expect_err("zero timeout should expire before any chunk arrives");
 
     assert!(matches!(err, mpsc::RecvTimeoutError::Timeout));
-    assert!(client.pending_candles.is_empty());
+    assert!(client.pending_api.pending_candles.is_empty());
 }
 
 #[test]
@@ -1018,7 +1018,7 @@ fn wait_for_receiver_in_owned_runtime_queues_events_seen_while_waiting() {
     let decode_key = install_server_decode_session(&mut client, 0x0123_4567_89AB_CDEF);
 
     let request_uid = 0x55AA;
-    let rx = client.api_pending.register(request_uid);
+    let rx = client.pending_api.api_pending.register(request_uid);
     let response_payload = build_engine_response_payload(request_uid, EngineMethod::AuthCheck, &[]);
     // AuthCheck is sent Crypted by the server (not an UnencryptedMethod); feed the
     // crypted command so S1 part 2 does not drop it as a plaintext spoof.

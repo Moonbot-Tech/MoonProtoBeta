@@ -63,6 +63,7 @@ mod protocol_recv_state;
 mod protocol_send;
 mod protocol_sliced_send;
 mod protocol_tick;
+mod refresh_clocks;
 mod runtime;
 mod runtime_active_actions;
 mod runtime_dispatcher;
@@ -135,14 +136,15 @@ pub(crate) use init::{run_base_check_delphi, send_post_init_resync, CriticalInit
 use lifecycle::ClientLifecycle;
 use metrics::{ClientMetrics, ProtocolMetrics};
 use protocol_core::ProtocolCore;
+use refresh_clocks::{PendingApi, RefreshClocks};
 #[cfg(test)]
 pub(crate) use send_queue::SendQueues;
 pub(crate) use send_queue::{initial_retry_left, SendItem, SendLockState};
 pub(crate) use sender::ClientSenderShared;
 use socket::{set_dont_fragment_for_socket, set_socket_buffers, ClientTransport};
 pub(crate) use subscriptions::{
-    refresh_subscription_summary, DomainRestoreIntent, PendingTradesUnsubscribe,
-    SubscriptionRegistry, SubscriptionRegistrySummary,
+    refresh_subscription_summary, DomainRestoreIntent, PendingTradesUnsubscribe, ReconnectRestore,
+    SubscriptionRegistry, SubscriptionRegistrySummary, Subscriptions,
 };
 pub(crate) use transport_state::{
     DataReadState, ReaderSlicedStats, RecvState, SentSliced, SlicedAck,
@@ -330,119 +332,27 @@ pub struct Client {
     recv: RecvState,
     ping_count: u32,
 
-    /// Registry of pending Engine API requests.
-    /// On receiving a `Command::API` packet, `dispatch` delivers the response
-    /// to the registered receiver if the UID is found.
-    api_pending: Arc<ApiPending>,
+    /// In-flight Engine API response collectors: the pending-request registry
+    /// (`api_pending`) and the internal chunked full-candles snapshot collectors
+    /// (`pending_candles`). `api_pending` is cloned into the runtime loop. See
+    /// [`PendingApi`].
+    pending_api: PendingApi,
 
-    /// Delphi `cfg.MoonProtoConfig.ServerUpdateSent`: set by UI commands that
-    /// can make the server restart/change routing; consumed by BaseCheck init.
-    server_update_sent: Arc<AtomicBool>,
     /// Previous auth_status (for detecting transitions).
     prev_auth_status: AuthStatus,
 
-    /// **Active library — subscription registry**: what the app asked to subscribe.
-    /// The transport handshake does not send this registry before Init. After Init,
-    /// reconnect restores the registry itself via the current keys / market mapping.
-    pub(crate) subscription_registry: Arc<Mutex<SubscriptionRegistry>>,
-    subscription_summary: Arc<SubscriptionRegistrySummary>,
-    subscription_trades_scope:
-        Arc<parking_lot::RwLock<Option<Arc<crate::state::TradeStorageScope>>>>,
+    /// **Active library — subscription cluster**: the subscription registry +
+    /// atomic summary mirror + trades-scope filter, the Delphi `InitDone` domain
+    /// gate (`domain_ready` + its `Arc<AtomicBool>` mirror for `ClientSender`),
+    /// and the saved single-Init restore intent. See [`Subscriptions`].
+    subscriptions: Subscriptions,
 
-    /// Shared mirror of [`Self::domain_ready`] for [`ClientSender`].
-    ///
-    /// Typed/high-level domain APIs use this gate to record pre-init intent
-    /// without putting domain wire commands into send queues before the single
-    /// Init pass opens the Delphi `InitDone` gate.
-    domain_ready_flag: Arc<AtomicBool>,
-
-    /// Saved intent of the first and only init pass. Needed for post-reconnect
-    /// restore without a second Init.
-    domain_restore: DomainRestoreIntent,
-
-    /// Internal full-candles snapshot collectors by `request_uid`. Filled by
-    /// the automatic Active Lib snapshot request and cleared when the
-    /// aggregator completes or times out.
-    ///
-    /// Application code does not see this packet-shaped layer; it gets retained
-    /// candles through snapshots/events.
-    pending_candles: HashMap<u64, PartialCandles>,
-
-    /// The previous PeerAppToken that was registered with `MarketsState.indexes_synchronized = true`.
-    /// Used in handshake/Ping processing to detect a server restart:
-    /// if incoming `peer_app_token != tracked_peer_app_token` — mark the indexes stale.
-    /// 0 = no successful synchronization yet (init state).
-    tracked_indexes_peer_app_token: u64,
-
-    /// `true` if the init/API layer already sent a markets indexes request and is waiting for the response.
-    /// Guards against a storm of repeated explicit requests before a response arrives.
-    indexes_fetch_in_flight: bool,
-
-    /// On reconnect restore: as soon as a fresh `GetMarketsIndexes` arrives
-    /// successfully, immediately request `UpdateMarketsList`. This reproduces the
-    /// Delphi meaning of `TMoonProtoEngine.UpdateMarketsList`: on a new `PeerAppToken`
-    /// it first synchronizes indexes, then refreshes prices/funding.
-    update_markets_after_indexes: bool,
-
-    /// On reconnect restore: deferred replay of the orderbook registry until a fresh
-    /// `GetMarketsIndexes`. Delphi `CheckBookTopics` returns early while
-    /// `FLastServerAppToken <> PeerAppToken`; orderbook subscriptions cannot be replayed
-    /// before the new server app session's indexes are synchronized.
-    restore_orderbooks_after_indexes: bool,
-
-    /// Delphi `TMoonProtoEngine.LastReconnectCheck` for AllTrades reconnect.
-    /// `NeedReconnectAllTrades` spends this throttle before it runs the
-    /// unsubscribe/sleep/subscribe sequence again.
-    last_trades_reconnect_check_ms: i64,
-
-    /// Last queued `emk_SubscribeAllTrades` request, including requests queued
-    /// through `ClientSender`. Delphi `SubscribeAllTrades` blocks inside
-    /// `SendAndWait` for `FTimeout=12000`, so `NeedReconnectAllTrades` cannot
-    /// run while that request is in flight. Rust queues it asynchronously,
-    /// therefore this timestamp is part of the machine-effect gate.
-    last_trades_subscribe_request_ms: Arc<AtomicI64>,
-
-    /// Delphi `TMoonProtoEngine.FSubscribedBookServerToken`: current
-    /// `ServerToken` confirmed by a successful full `BookSubbed` batch subscribe.
-    subscribed_book_server_token: u64,
-
-    /// Delphi `TMoonProtoEngine.LastBookReconnectCheck`: 5s throttle for
-    /// `NeedResubscribeOrderBooks`.
-    last_book_reconnect_check_ms: i64,
-
-    /// Last queued `emk_SubscribeOrderBook` request. Delphi
-    /// `DoSubscribeOrderBooks` blocks in `SendAndWait` for `FTimeout=12000`;
-    /// Rust queues orderbook subscribes asynchronously, so reconnect retry must
-    /// not issue a second batch until the Delphi-equivalent wait window ends or
-    /// a response closes it.
-    last_orderbook_subscribe_request_ms: Arc<AtomicI64>,
-    last_orderbook_subscribe_request_uid: Arc<AtomicU64>,
-
-    /// UID of the last full-registry `emk_SubscribeOrderBook` replay. A success
-    /// for this UID, unlike a normal one-market subscribe, is allowed to advance
-    /// `subscribed_book_server_token`.
-    pending_orderbook_resubscribe_uid: Option<u64>,
-
-    /// Delayed `DoSubscribeAllTrades(false)` after Delphi `Sleep(100)` in
-    /// `BMarketHistoryWorker.Execute` reconnect branch.
-    ///
-    /// The sleep starts only after `UnSubscribeAllTrades` has completed its
-    /// Delphi `SendAndWait` equivalent. Sending Subscribe after a naked 100ms
-    /// timer is wrong on UDP: a retried Unsubscribe can arrive after Subscribe
-    /// and leave the server-side client unsubscribed.
-    pending_trades_unsubscribe: Option<PendingTradesUnsubscribe>,
-    pending_trades_resubscribe_after_ms: Option<i64>,
-
-    /// When (`now_ms`) the last `api_get_markets_indexes` was sent. Used for
-    /// timeout protection: the UDP response may have been lost — after `INDEXES_FETCH_TIMEOUT_MS`
-    /// we reset `indexes_fetch_in_flight = false`. The timeout handler itself does not
-    /// resend the request: a new send is allowed only from the init/API layer.
-    indexes_fetch_started_ms: i64,
-
-    /// When `trades_state.tick()` was last called from the active main loop.
-    /// Throttle ~100ms — matches the periodicity of Delphi
-    /// `MoonProtoEngine.pas:1483 CheckMissingTradesPackets`.
-    last_trades_tick_ms: i64,
+    /// **Active library — post-reconnect restore bookkeeping**: markets-indexes
+    /// restore state (tracked peer token + in-flight fetch guard + deferred
+    /// update-markets/orderbook flags), all-trades reconnect clocks/requests, and
+    /// orderbook reconnect clocks/requests. The three `Arc<Atomic*>` request
+    /// clocks inside are also cloned into `ClientSender`. See [`ReconnectRestore`].
+    reconnect: ReconnectRestore,
 
     // Bind-failure tracking (`bind_failure_streak`, `first_bind_failure_ms`,
     // `last_bind_failed_event_ms`) — emits `LifecycleEvent::BindFailed`, audit
@@ -452,29 +362,16 @@ pub struct Client {
     /// `TMoonProtoTymeSyncer` for the process instead of a worker per client.
     _ntp_process_guard: Option<crate::ntp::ProcessNtpGuard>,
 
-    /// F6/F7: timestamps of the last periodic refresh commands. `i64::MIN/2` =
-    /// "never" -> the first tick fires immediately after Connected (if the matching
-    /// interval is set in `cfg.refresh`). After that — every
-    /// `update_markets_every` / `check_tags_every`.
-    last_update_markets_ms: i64,
-    last_check_tags_ms: i64,
-    /// Delphi `BHeavyApiWorker` issues up to 4 quick `CheckBinanceTags` after
-    /// the hour changes. These fields hold the current wall-clock hour slot and burst progress.
-    check_tags_hour_slot: i64,
-    check_tags_burst_sent: u8,
-    last_check_tags_burst_ms: i64,
+    /// **Periodic refresh clocks**: the F6/F7 update-markets / check-tags timers
+    /// and burst state, plus the Delphi `ServerUpdateSent` marker
+    /// (`server_update_sent`, cloned into `ClientSender`). See [`RefreshClocks`].
+    refresh_clocks: RefreshClocks,
 
     /// Server/account identity learned during Init (`emk_BaseCheck` /
     /// `emk_AuthCheck`): `server_info`, the per-packet `Arc<str>` base-currency
     /// cache, and the `auth_info` per-account payload. See
     /// [`SessionIdentity`] and the accessors in `session_api.rs`.
     identity: SessionIdentity,
-
-    /// Delphi `InitDone`: transport auth is already complete, but domain pushes
-    /// (`Order`/`Strat`/`Balance`/`Trades*`/`OrderBook`/`UI`) can only be applied
-    /// after the full init bootstrap. Before that, `dispatch_into_active`
-    /// drops these channels, like `TMoonProtoNetClient.ClientNewData`.
-    domain_ready: bool,
 
     /// **Per-Client ServerTimeDelta handle** — shareable via `Arc::clone`.
     ///
@@ -524,16 +421,16 @@ impl Client {
     }
 
     fn has_trades_subscription_intent(&self) -> bool {
-        self.subscription_summary.trades_subscribed()
+        self.subscriptions.subscription_summary.trades_subscribed()
     }
 
     pub(crate) fn trades_storage_scope_intent(
         &self,
     ) -> Option<Arc<crate::state::TradeStorageScope>> {
-        if !self.subscription_summary.trades_subscribed() {
+        if !self.subscriptions.subscription_summary.trades_subscribed() {
             return None;
         }
-        self.subscription_trades_scope.read().clone()
+        self.subscriptions.subscription_trades_scope.read().clone()
     }
 
     /// Create a client session from [`ClientConfig`].
@@ -642,39 +539,22 @@ impl Client {
             copy_sliced_acks: Vec::new(),
             recv: RecvState::new(),
             ping_count: 0,
-            api_pending: ApiPending::new_arc(),
-            server_update_sent: Arc::new(AtomicBool::new(false)),
+            pending_api: PendingApi::new(),
             prev_auth_status: AuthStatus::Base,
-            subscription_registry: Arc::new(Mutex::new(SubscriptionRegistry::default())),
-            subscription_summary,
-            subscription_trades_scope,
-            domain_ready_flag,
-            domain_restore: DomainRestoreIntent::default(),
-            pending_candles: HashMap::new(),
-            tracked_indexes_peer_app_token: 0,
-            indexes_fetch_in_flight: false,
-            update_markets_after_indexes: false,
-            restore_orderbooks_after_indexes: false,
-            last_trades_reconnect_check_ms: NEVER_TIME_MS,
-            last_trades_subscribe_request_ms,
-            subscribed_book_server_token: 0,
-            last_book_reconnect_check_ms: NEVER_TIME_MS,
-            last_orderbook_subscribe_request_ms,
-            last_orderbook_subscribe_request_uid,
-            pending_orderbook_resubscribe_uid: None,
-            pending_trades_unsubscribe: None,
-            pending_trades_resubscribe_after_ms: None,
-            indexes_fetch_started_ms: 0,
-            last_trades_tick_ms: i64::MIN / 2,
+            subscriptions: Subscriptions::new(
+                subscription_summary,
+                subscription_trades_scope,
+                domain_ready_flag,
+            ),
+            reconnect: ReconnectRestore::new(
+                last_trades_subscribe_request_ms,
+                last_orderbook_subscribe_request_ms,
+                last_orderbook_subscribe_request_uid,
+            ),
             _ntp_process_guard: ntp_process_guard,
             server_time_delta_handle: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             identity: SessionIdentity::new(),
-            domain_ready: false,
-            last_update_markets_ms: i64::MIN / 2,
-            last_check_tags_ms: i64::MIN / 2,
-            check_tags_hour_slot: i64::MIN,
-            check_tags_burst_sent: CHECK_TAGS_BURST_COUNT,
-            last_check_tags_burst_ms: i64::MIN / 2,
+            refresh_clocks: RefreshClocks::new(Arc::new(AtomicBool::new(false))),
         }
     }
 
@@ -688,17 +568,19 @@ impl Client {
 
     #[cfg(test)]
     pub(crate) fn testing_set_subscribed_book_server_token(&mut self, token: u64) {
-        self.subscribed_book_server_token = token;
+        self.reconnect.subscribed_book_server_token = token;
     }
 
     fn set_domain_ready(&mut self, ready: bool) {
-        self.domain_ready = ready;
-        self.domain_ready_flag.store(ready, Ordering::Relaxed);
+        self.subscriptions.domain_ready = ready;
+        self.subscriptions
+            .domain_ready_flag
+            .store(ready, Ordering::Relaxed);
     }
 
     #[inline]
     fn domain_ready_for_typed_send(&self) -> bool {
-        self.domain_ready
+        self.subscriptions.domain_ready
     }
 
     #[cfg(test)]
@@ -709,7 +591,7 @@ impl Client {
     #[cfg(test)]
     pub(crate) fn testing_set_peer_app_tokens(&mut self, peer: u64, tracked: u64) {
         self.peer_app_token = peer;
-        self.tracked_indexes_peer_app_token = tracked;
+        self.reconnect.tracked_indexes_peer_app_token = tracked;
     }
 }
 

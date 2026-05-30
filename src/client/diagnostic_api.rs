@@ -56,7 +56,7 @@ impl Client {
     }
     /// Returns true after the MoonBot-compatible domain init has completed.
     pub fn is_domain_ready(&self) -> bool {
-        self.domain_ready
+        self.subscriptions.domain_ready
     }
     /// Current low-level transport authorization state.
     pub fn auth_status(&self) -> AuthStatus {
@@ -156,7 +156,7 @@ impl Client {
     }
 
     pub(crate) fn subscribed_book_server_token(&self) -> u64 {
-        self.subscribed_book_server_token
+        self.reconnect.subscribed_book_server_token
     }
 
     /// `PeerAppToken` — generated when the server process starts. Changes on a server
@@ -167,7 +167,8 @@ impl Client {
     }
 
     pub(crate) fn market_indexes_current_for_peer(&self) -> bool {
-        self.peer_app_token != 0 && self.peer_app_token == self.tracked_indexes_peer_app_token
+        self.peer_app_token != 0
+            && self.peer_app_token == self.reconnect.tracked_indexes_peer_app_token
     }
 
     // ====================================================================

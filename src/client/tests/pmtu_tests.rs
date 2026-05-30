@@ -84,7 +84,7 @@ fn full_reset_preserves_sending_and_api_slots_like_delphi_reset() {
     let mut client = Client::new(dummy_cfg());
     client.sending.push(sent_sliced_with_lengths(&[8], 0));
     client.pending_h.push(pending_h_item(42));
-    let _rx = client.api_pending.register(0x4455);
+    let _rx = client.pending_api.api_pending.register(0x4455);
 
     client.crypt_msg_counter.store(77, Ordering::Relaxed);
     client.metrics.total_sent.store(1234, Ordering::Relaxed);
@@ -108,7 +108,7 @@ fn full_reset_preserves_sending_and_api_slots_like_delphi_reset() {
         "Delphi Reset does not clear pending H commands"
     );
     assert_eq!(
-        client.api_pending.pending_count(),
+        client.pending_api.api_pending.pending_count(),
         1,
         "API waiters are not part of Delphi TMoonProtoClient.Reset"
     );
