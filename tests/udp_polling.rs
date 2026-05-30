@@ -1,3 +1,10 @@
+//! Cross-platform UDP readiness contract for the runtime loop.
+//!
+//! The active runtime relies on "poll says readable -> drain UDP until
+//! WouldBlock -> rearm". This test keeps that OS-level assumption separate from
+//! live MoonProto behavior, so a platform polling regression does not get
+//! misdiagnosed as a server/protocol failure.
+
 use polling::{Event, Events, Poller};
 use std::io;
 use std::net::UdpSocket;

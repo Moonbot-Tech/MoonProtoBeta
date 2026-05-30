@@ -166,6 +166,9 @@ and `client.balances().transfer_asset(...)`.
 
 ## Tests
 
+See `tests/README.md` for the test-layer map: public live pipeline tests,
+internal protocol/state guards, and platform polling.
+
 Deterministic tests:
 
 ```powershell
