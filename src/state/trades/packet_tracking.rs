@@ -139,12 +139,8 @@ impl TradesState {
     /// bookkeeping before the row-reading loop, so the Rust dispatcher can do
     /// the same and apply decoded sections directly without building an owned
     /// packet for public callbacks.
-    pub(crate) fn on_packet_header(
-        &mut self,
-        packet_num: u16,
-        now_ms: i64,
-    ) -> Vec<TradesPacketEffect> {
-        let mut events = Vec::new();
+    pub(crate) fn on_packet_header(&mut self, packet_num: u16, now_ms: i64) -> TradesPacketEffects {
+        let mut events = TradesPacketEffects::new();
 
         // === First packet OR long pause → reset ===
         let pause_detected = self.trades_started
@@ -217,10 +213,7 @@ impl TradesState {
                 end: new_gap_end,
             });
         }
-        if !events
-            .iter()
-            .any(|ev| matches!(ev, TradesPacketEffect::GapDetected { .. }))
-        {
+        if !events.has_gap_detected() {
             // Check the size. Gap too large or buckets overflowed.
             if gap_size > MAX_RECVD_SIZE || self.used_buckets >= MAX_GAP_BUCKETS {
                 // Delphi MoonProtoEngine.pas:1649-1658: on overflow it resets buckets,
@@ -264,8 +257,8 @@ impl TradesState {
     }
 
     /// Packet-number branch of `ProcessTradesStream(TrackPackets=False)`.
-    pub(crate) fn on_packet_resend_header(&mut self, packet_num: u16) -> Vec<TradesPacketEffect> {
-        let mut events = Vec::new();
+    pub(crate) fn on_packet_resend_header(&mut self, packet_num: u16) -> TradesPacketEffects {
+        let mut events = TradesPacketEffects::new();
         if let Some(idx) = self.find_bucket_for_packet(packet_num, false, 0, 0) {
             let b = &mut self.buckets[idx];
             let recvd_idx = packet_num.wrapping_sub(b.start_num) as usize;

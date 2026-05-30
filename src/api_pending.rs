@@ -207,19 +207,13 @@ impl ApiPending {
         }
     }
 
-    /// Remove expired pending slots. Throttled unless `force` is set.
-    #[cfg(test)]
-    fn cleanup_expired(&self, force: bool) -> usize {
-        let now = Instant::now();
-        let mut state = self.lock_state();
-        Self::sweep_expired_locked(&mut state, now, force)
-    }
-
     /// Number of active waits.
     #[cfg(test)]
     pub(crate) fn pending_count(&self) -> usize {
-        let _ = self.cleanup_expired(true);
-        self.lock_state().map.len()
+        let now = Instant::now();
+        let mut state = self.lock_state();
+        Self::sweep_expired_locked(&mut state, now, true);
+        state.map.len()
     }
 
     /// Clear all waits (e.g. on reconnect).

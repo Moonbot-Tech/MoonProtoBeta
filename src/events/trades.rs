@@ -340,13 +340,13 @@ impl EventDispatcher {
     fn collect_known_trades_events(
         &mut self,
         decoded: &DecodedTradesPacket<'_>,
-        effects: Vec<TradesPacketEffect>,
+        effects: crate::state::TradesPacketEffects,
         now_ms: i64,
         history_now_time_days: Option<f64>,
         out: &mut Vec<Event>,
     ) {
         let mut applied_sections = false;
-        for effect in effects {
+        for effect in effects.iter() {
             if matches!(&effect, TradesPacketEffect::Apply) && !applied_sections {
                 self.apply_known_trades_sections(decoded, Some(now_ms), history_now_time_days, out);
                 applied_sections = true;

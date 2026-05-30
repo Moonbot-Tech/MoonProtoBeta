@@ -50,7 +50,7 @@ mod types;
 use self::gap_bucket::{is_packet_in_range, GapBucket};
 pub use self::resend_response::{iter_trades_resend_response, TradesResendResponsePackets};
 pub use self::types::TradesEvent;
-pub(crate) use self::types::TradesPacketEffect;
+pub(crate) use self::types::{TradesPacketEffect, TradesPacketEffects};
 
 const MAX_GAP_BUCKETS: usize = 50;
 const DEFAULT_RECVD_SIZE: usize = 100;
@@ -61,16 +61,14 @@ const MAX_RETRY_COUNT: u8 = 3;
 /// Delphi: `TRADES_PAUSE_TIMEOUT = 30 / 86400` (30 seconds).
 const TRADES_PAUSE_TIMEOUT_MS: i64 = 30_000;
 
-fn materialize_packet_effects(
-    effects: Vec<TradesPacketEffect>,
-    pkt: TradesPacket,
-) -> Vec<TradesEvent> {
+fn materialize_packet_effects(effects: TradesPacketEffects, pkt: TradesPacket) -> Vec<TradesEvent> {
     let packet_num = pkt.packet_num;
     let base_time = pkt.base_time;
-    effects
-        .into_iter()
-        .map(|effect| effect.into_event(packet_num, base_time))
-        .collect()
+    let mut events = Vec::with_capacity(effects.len());
+    for effect in effects.iter() {
+        events.push(effect.into_event(packet_num, base_time));
+    }
+    events
 }
 
 /// TradesStream sequence/gap recovery state.

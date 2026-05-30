@@ -43,7 +43,7 @@ pub enum TradesEvent {
 /// then continues reading the stream rows. Keeping this separate lets the
 /// dispatcher iterate decoded sections in wire order and emit only a lightweight
 /// applied signal after Active Lib state/storage has been updated.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TradesPacketEffect {
     Apply,
     GapDetected {
@@ -58,6 +58,53 @@ pub(crate) enum TradesPacketEffect {
         packet_num: u16,
         bucket_seq_range: (u16, u16),
     },
+}
+
+/// Small stack buffer for the few bookkeeping effects one trades packet can
+/// produce before row application.
+///
+/// This keeps the high-rate trades stream on the latency-oriented path: the
+/// wire rows stay 10-byte compact records and packet-number bookkeeping does
+/// not allocate a heap `Vec` just to say "apply" or "gap filled + apply".
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TradesPacketEffects {
+    items: [Option<TradesPacketEffect>; 4],
+    len: usize,
+}
+
+impl TradesPacketEffects {
+    pub(crate) fn new() -> Self {
+        Self {
+            items: [None; 4],
+            len: 0,
+        }
+    }
+
+    pub(crate) fn push(&mut self, effect: TradesPacketEffect) {
+        debug_assert!(
+            self.len < self.items.len(),
+            "TradesPacketEffects capacity must cover all packet branches"
+        );
+        if self.len < self.items.len() {
+            self.items[self.len] = Some(effect);
+            self.len += 1;
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+
+    pub(crate) fn has_gap_detected(&self) -> bool {
+        self.items[..self.len]
+            .iter()
+            .flatten()
+            .any(|effect| matches!(effect, TradesPacketEffect::GapDetected { .. }))
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = TradesPacketEffect> + '_ {
+        self.items[..self.len].iter().flatten().copied()
+    }
 }
 
 impl TradesPacketEffect {
