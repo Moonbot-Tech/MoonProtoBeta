@@ -143,7 +143,8 @@ mod tests {
     }
 
     #[test]
-    fn large_forward_jump_slides_window_like_delphi() {
+    // parity: MoonBot MoonProtoIntStruct.pas:TMoonProtoSlider.CheckRevd
+    fn large_forward_jump_slides_window() {
         let mut s = Slider::new();
         let num = (1u64 << 40) + 7;
 

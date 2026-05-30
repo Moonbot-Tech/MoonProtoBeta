@@ -75,7 +75,8 @@ mod parse_engine_response_tests {
     }
 
     #[test]
-    fn parse_preserves_unknown_method_ordinal_like_delphi() {
+    // parity: MoonBot MoonProtoEngineStruct.pas:TEngineResponse.CreateFromStream
+    fn parse_preserves_unknown_method_ordinal() {
         let payload = build_wire_response(
             0xDEAD,
             0xBEEF,
@@ -112,7 +113,8 @@ mod parse_engine_response_tests {
     }
 
     #[test]
-    fn response_helper_writes_error_msg_like_delphi_string() {
+    // parity: MoonBot MoonProtoEngineStruct.pas:TEngineResponse.CreateFromStream
+    fn response_helper_writes_error_msg() {
         let payload = build_wire_response(
             1,
             42,
@@ -313,7 +315,8 @@ mod parse_engine_response_tests {
     }
 
     #[test]
-    fn parse_returns_none_when_error_msg_body_is_truncated_like_delphi_readbuffer() {
+    // parity: MoonBot MoonProtoEngineStruct.pas:TEngineResponse.CreateFromStream
+    fn parse_returns_none_when_error_msg_body_is_truncated() {
         let mut payload = build_wire_response(0, 100, EngineMethod::AuthCheck, false, 401, "", &[]);
         let error_msg_len_pos = 11 + 8 + 1 + 1 + 4;
         payload.truncate(error_msg_len_pos);
@@ -324,7 +327,8 @@ mod parse_engine_response_tests {
     }
 
     #[test]
-    fn parse_zero_tails_missing_compression_flag_like_delphi_stream_read() {
+    // parity: MoonBot MoonProtoEngineStruct.pas:TEngineResponse.CreateFromStream
+    fn parse_zero_tails_missing_compression_flag() {
         let mut payload = build_wire_response(0, 100, EngineMethod::BaseCheck, true, 0, "", &[]);
         payload.truncate(11 + 8 + 1 + 1 + 4 + 2);
 
@@ -335,7 +339,8 @@ mod parse_engine_response_tests {
     }
 
     #[test]
-    fn parse_zero_tails_missing_data_size_like_delphi_stream_read() {
+    // parity: MoonBot MoonProtoEngineStruct.pas:TEngineResponse.CreateFromStream
+    fn parse_zero_tails_missing_data_size() {
         let mut payload = build_wire_response(0, 100, EngineMethod::BaseCheck, true, 0, "", &[]);
         payload.truncate(11 + 8 + 1 + 1 + 4 + 2 + 1);
 
@@ -345,7 +350,8 @@ mod parse_engine_response_tests {
     }
 
     #[test]
-    fn parse_keeps_available_uncompressed_data_when_declared_body_is_short_like_delphi_copyfrom() {
+    // parity: MoonBot MoonProtoEngineStruct.pas:TEngineResponse.CreateFromStream
+    fn parse_keeps_available_uncompressed_data_when_declared_body_is_short() {
         let mut payload = build_wire_response(
             0,
             100,
@@ -452,7 +458,8 @@ mod base_check_tests {
     }
 
     #[test]
-    fn base_check_helper_writes_strings_like_delphi() {
+    // parity: MoonBot MoonProtoEngineServer.pas:TEngineWorker.ProcessRequest (emk_BaseCheck)
+    fn base_check_helper_writes_strings() {
         let original = ServerInfo {
             bot_id: Some(123456789),
             server_name: Some("S".repeat(65_537)),
@@ -683,7 +690,8 @@ mod auth_check_tests {
     }
 
     #[test]
-    fn auth_check_dex_count_keeps_declared_zero_tail_records_like_delphi_loop() {
+    // parity: MoonBot MoonProtoEngineServer.pas:TEngineWorker.ProcessRequest (emk_AuthCheck)
+    fn auth_check_dex_count_keeps_declared_zero_tail_records() {
         let mut data = Vec::new();
         data.extend_from_slice(&(0i64).to_le_bytes());
         data.extend_from_slice(&(0u16).to_le_bytes());

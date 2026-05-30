@@ -171,7 +171,8 @@ fn trigger_manage_roundtrip() {
 }
 
 #[test]
-fn ui_word_count_parsers_keep_declared_count_with_zero_tail_like_delphi_stream() {
+// parity: MoonBot MoonProtoUIStruct.pas (TStratStartStopCommandV2/TEmuTradesCommand/TTriggerManageCommand CreateFromStream)
+fn ui_word_count_parsers_keep_declared_count_with_zero_tail() {
     let mut raw = header_bytes(CMD_STRAT_START_STOP_V2, 42);
     raw.push(1);
     raw.extend_from_slice(&2u16.to_le_bytes());
@@ -255,7 +256,8 @@ fn ui_word_count_parsers_keep_declared_count_with_zero_tail_like_delphi_stream()
 }
 
 #[test]
-fn ui_fixed_scalar_commands_use_zero_tail_like_delphi_stream_read() {
+// parity: MoonBot MoonProtoUIStruct.pas (fixed-scalar UI command CreateFromStream)
+fn ui_fixed_scalar_commands_use_zero_tail() {
     match UICommand::parse(&header_bytes(CMD_STRAT_START_STOP, 1)).unwrap() {
         UICommand::StratStartStop(s) => assert!(!s.is_start),
         _ => panic!("wrong variant"),
@@ -318,7 +320,8 @@ fn ui_fixed_scalar_commands_use_zero_tail_like_delphi_stream_read() {
 }
 
 #[test]
-fn word_count_builders_write_only_declared_wrapped_count_like_delphi() {
+// parity: MoonBot MoonProtoUIStruct.pas:TStratStartStopCommandV2.CreateFromStream
+fn word_count_builders_write_only_declared_wrapped_count() {
     let items: Vec<_> = (0..65_537u64)
         .map(|i| StratCheckedItem {
             strategy_id: i + 100,
@@ -635,7 +638,8 @@ fn client_settings_v1_prefix_with_temp_bl_count(count: i32) -> Vec<u8> {
 }
 
 #[test]
-fn client_settings_accepts_tail_after_blacklist_string_like_delphi_stream_read() {
+// parity: MoonBot MoonProtoUIStruct.pas:TClientSettingsCommand.CreateFromStream
+fn client_settings_accepts_tail_after_blacklist_string() {
     let mut raw = Vec::new();
     raw.push(CMD_CLIENT_SETTINGS);
     raw.extend_from_slice(&1u16.to_le_bytes());
@@ -663,7 +667,8 @@ fn client_settings_accepts_tail_after_blacklist_string_like_delphi_stream_read()
 }
 
 #[test]
-fn client_settings_temp_bl_time_zero_tails_after_valid_string_like_delphi_read() {
+// parity: MoonBot MoonProtoUIStruct.pas:TClientSettingsCommand.CreateFromStream
+fn client_settings_temp_bl_time_zero_tails_after_valid_string() {
     let mut raw = client_settings_v1_prefix_with_temp_bl_count(1);
     write_string(&mut raw, "");
 
@@ -677,7 +682,8 @@ fn client_settings_temp_bl_time_zero_tails_after_valid_string_like_delphi_read()
 }
 
 #[test]
-fn client_settings_soft_tail_preserves_existing_i32_high_bytes_like_delphi_read() {
+// parity: MoonBot MoonProtoUIStruct.pas:TClientSettingsCommand.CreateFromStream
+fn client_settings_soft_tail_preserves_existing_i32_high_bytes() {
     let mut raw = client_settings_v1_prefix_with_temp_bl_count(0);
     raw.push(0); // UseManualStrategy
     raw.extend_from_slice(&0u64.to_le_bytes());
@@ -718,7 +724,8 @@ fn client_settings_rejects_negative_temp_bl_count_like_corrupt_stream() {
 }
 
 #[test]
-fn version_gate_returns_skipped_like_delphi_registry() {
+// parity: MoonBot MoonProtoBaseStruct.pas:TCommandRegistry.FromStream
+fn version_gate_returns_skipped() {
     let mut payload = vec![CMD_CLIENT_SETTINGS, 99, 0];
     payload.extend_from_slice(&77u64.to_le_bytes());
     match UICommand::parse(&payload).unwrap() {

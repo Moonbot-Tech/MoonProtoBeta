@@ -113,7 +113,8 @@ fn registry_resolves_stream_sections_by_configured_server_index() {
 }
 
 #[test]
-fn registry_reconfigure_preserves_existing_store_like_delphi_market_cow() {
+// parity: MoonBot MoonProtoEngine.pas:GetMarketsList (reuses existing TMarket on re-list)
+fn registry_reconfigure_preserves_existing_store() {
     let mut registry = MarketHistoryRegistry::new(MarketHistoryConfig {
         futures_trades_capacity: 2,
         spot_trades_capacity: 0,
@@ -584,7 +585,8 @@ fn retained_trades_update_current_candle_and_derived_volumes() {
 }
 
 #[test]
-fn combined_long_deltas_do_not_drop_below_one_hour_like_delphi() {
+// parity: MoonBot MarketsU.pas:TMarket.RecalcPumpQ
+fn combined_long_deltas_do_not_drop_below_one_hour() {
     let trade = DerivedDeltaSnapshot {
         one_hour: 12.0,
         ..DerivedDeltaSnapshot::default()
@@ -683,7 +685,8 @@ fn candle_long_delta_windows_match_delphi_trunc_hour_buckets() {
 }
 
 #[test]
-fn candle_windows_exclude_exact_old_boundary_like_delphi() {
+// parity: MoonBot MarketsU.pas:TMarket.RecalcPumpQ (h<= bucket windows)
+fn candle_windows_exclude_exact_old_boundary() {
     let now = 45_000.0;
     let mut store = MarketHistoryStore::new(MarketHistoryConfig {
         futures_trades_capacity: 0,

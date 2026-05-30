@@ -24,7 +24,8 @@ fn ready_client() -> Client {
 }
 
 #[test]
-fn client_retry_left_clamps_zero_like_delphi() {
+// parity: MoonBot MoonProtoIntStruct.pas:TMoonProtoDataToSend.Create
+fn client_retry_left_clamps_zero() {
     let client = ready_client();
 
     client.send_cmd_keyed(

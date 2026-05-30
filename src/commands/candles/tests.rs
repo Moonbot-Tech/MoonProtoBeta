@@ -135,7 +135,8 @@ fn coin_card_candles_response_matches_delphi_read_tails() {
 }
 
 #[test]
-fn coin_card_candles_response_zero_fills_missing_records_like_delphi_array_read() {
+// parity: MoonBot MoonProtoEngine.pas:TMoonProtoEngine.getDeepHistory
+fn coin_card_candles_response_zero_fills_missing_records() {
     let first = DeepPrice {
         open: 100.0,
         close: 105.0,
@@ -369,7 +370,8 @@ fn request_candles_data_partial_parser_keeps_current_market_when_wall_tail_is_sh
 }
 
 #[test]
-fn request_candles_data_test_writer_wraps_utf16_len_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessApiCommand (emk_RequestCandlesData)
+fn request_candles_data_writer_wraps_utf16_len() {
     let mut plain = Vec::new();
     plain.extend_from_slice(&0i32.to_le_bytes());
     plain.push(2);

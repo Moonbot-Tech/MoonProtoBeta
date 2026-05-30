@@ -43,7 +43,8 @@ fn stop_settings_wire_layout_matches_delphi_record() {
 }
 
 #[test]
-fn order_compact_adjust_time_skips_zero_dates_like_delphi() {
+// parity: MoonBot MarketsU.pas:TOrderCompact.AdjustTime
+fn order_compact_adjust_time_skips_zero_dates() {
     let mut order = OrderCompact {
         open_time: 0.0,
         close_time: 0.5,
@@ -139,7 +140,8 @@ fn order_compact_uses_private_wire_struct() {
 }
 
 #[test]
-fn order_update_data_adjust_time_skips_zero_dates_like_delphi() {
+// parity: MoonBot MarketsU.pas:TOrderUpdateData.AdjustTime
+fn order_update_data_adjust_time_skips_zero_dates() {
     let mut missing_time = OrderUpdateData {
         open_time: 0.0,
         ..OrderUpdateData::default()
@@ -230,7 +232,8 @@ fn minimal_market_payload(cmd_id: u8) -> Vec<u8> {
 }
 
 #[test]
-fn market_header_short_declared_string_rejects_like_delphi_readbuffer() {
+// parity: MoonBot MoonProtoTradeStruct.pas:TBaseMarketCommand.CreateFromStream
+fn market_header_short_declared_string_rejects() {
     let mut raw = Vec::new();
     write_base_command_header(&mut raw, 23, 0xAA);
     raw.push(1);
@@ -245,7 +248,8 @@ fn market_header_short_declared_string_rejects_like_delphi_readbuffer() {
 }
 
 #[test]
-fn trade_market_fixed_tails_accept_empty_after_string_like_delphi_stream_read() {
+// parity: MoonBot MoonProtoTradeStruct.pas:TBaseMarketCommand.CreateFromStream
+fn trade_market_fixed_tails_accept_empty_after_string() {
     for cmd_id in [3, 11, 12, 13, 14, 15, 16, 17, 25, 26, 27, 28, 30] {
         let raw = minimal_market_payload(cmd_id);
         assert!(
@@ -256,7 +260,8 @@ fn trade_market_fixed_tails_accept_empty_after_string_like_delphi_stream_read() 
 }
 
 #[test]
-fn trade_epoch_fixed_tails_accept_empty_after_string_like_delphi_stream_read() {
+// parity: MoonBot MoonProtoTradeStruct.pas:TTradeEpochCommand.CreateFromStream
+fn trade_epoch_fixed_tails_accept_empty_after_string() {
     for cmd_id in [2, 4, 5, 6, 7, 10, 18, 19, 20, 21, 29] {
         let raw = minimal_market_payload(cmd_id);
         assert!(
@@ -267,7 +272,8 @@ fn trade_epoch_fixed_tails_accept_empty_after_string_like_delphi_stream_read() {
 }
 
 #[test]
-fn order_status_zero_tails_partial_order_record_like_delphi_stream_read() {
+// parity: MoonBot MoonProtoTradeStruct.pas:TOrderStatus.CreateFromStream
+fn order_status_zero_tails_partial_order_record() {
     let mut raw = minimal_market_payload(4);
     raw.extend_from_slice(&0xBEEFu16.to_le_bytes());
     raw.push(OrderWorkerStatus::BuySet.to_byte());
@@ -290,7 +296,8 @@ fn order_status_zero_tails_partial_order_record_like_delphi_stream_read() {
 }
 
 #[test]
-fn all_statuses_rejects_nested_non_order_status_cmd_id_like_delphi_dispatch() {
+// parity: MoonBot MoonProtoTradeStruct.pas:TAllStatuses.CreateFromStream
+fn all_statuses_rejects_nested_non_order_status_cmd_id() {
     let mut raw = Vec::new();
     write_base_command_header(&mut raw, 8, 0xAA);
     raw.extend_from_slice(&1i32.to_le_bytes());
@@ -303,7 +310,8 @@ fn all_statuses_rejects_nested_non_order_status_cmd_id_like_delphi_dispatch() {
 }
 
 #[test]
-fn all_statuses_negative_count_is_empty_snapshot_like_delphi_loop() {
+// parity: MoonBot MoonProtoTradeStruct.pas:TAllStatuses.CreateFromStream
+fn all_statuses_negative_count_is_empty_snapshot() {
     let mut raw = Vec::new();
     write_base_command_header(&mut raw, 8, 0xAA);
     raw.extend_from_slice(&(-1i32).to_le_bytes());
@@ -315,7 +323,8 @@ fn all_statuses_negative_count_is_empty_snapshot_like_delphi_loop() {
 }
 
 #[test]
-fn all_statuses_keeps_present_items_when_count_overstates_remaining_like_delphi_loop() {
+// parity: MoonBot MoonProtoTradeStruct.pas:TAllStatuses.CreateFromStream
+fn all_statuses_keeps_present_items_when_count_overstates_remaining() {
     let mut raw = Vec::new();
     write_base_command_header(&mut raw, 8, 0xAA);
     raw.extend_from_slice(&2i32.to_le_bytes());
@@ -331,7 +340,8 @@ fn all_statuses_keeps_present_items_when_count_overstates_remaining_like_delphi_
 }
 
 #[test]
-fn bulk_replace_notify_keeps_declared_count_with_zero_tail_like_delphi_stream_read() {
+// parity: MoonBot MoonProtoTradeStruct.pas:TBulkReplaceNotify.CreateFromStream
+fn bulk_replace_notify_keeps_declared_count_with_zero_tail() {
     let mut raw = Vec::new();
     write_base_command_header(&mut raw, 28, 0xAA);
     raw.push(1);
@@ -350,7 +360,8 @@ fn bulk_replace_notify_keeps_declared_count_with_zero_tail_like_delphi_stream_re
 }
 
 #[test]
-fn set_immune_keeps_declared_count_with_zero_tail_like_delphi_stream_read() {
+// parity: MoonBot MoonProtoTradeStruct.pas:TSetImmuneCommand.CreateFromStream
+fn set_immune_keeps_declared_count_with_zero_tail() {
     let mut raw = Vec::new();
     write_base_command_header(&mut raw, 22, 0xAA);
     raw.push(2);
@@ -388,7 +399,8 @@ fn market_header_invalid_utf8_uses_delphi_question_mark_fallback() {
 }
 
 #[test]
-fn trade_epoch_header_preserves_unknown_status_ordinal_like_delphi() {
+// parity: MoonBot MoonProtoTradeStruct.pas:TTradeEpochCommand.CreateFromStream
+fn trade_epoch_header_preserves_unknown_status_ordinal() {
     let mut raw = Vec::new();
     write_base_command_header(&mut raw, 18, 77);
     raw.push(1);
@@ -410,7 +422,8 @@ fn trade_epoch_header_preserves_unknown_status_ordinal_like_delphi() {
 }
 
 #[test]
-fn order_type_fields_preserve_unknown_ordinals_like_delphi() {
+// parity: MoonBot MoonProtoTradeStruct.pas (TBulkReplaceNotify/TOrderTracePoint CreateFromStream)
+fn order_type_fields_preserve_unknown_ordinals() {
     let mut bulk = Vec::new();
     write_base_command_header(&mut bulk, 28, 77);
     bulk.push(1);
@@ -452,7 +465,8 @@ fn order_type_fields_preserve_unknown_ordinals_like_delphi() {
 }
 
 #[test]
-fn move_all_commands_preserve_unknown_ordinals_like_delphi() {
+// parity: MoonBot MoonProtoTradeStruct.pas (TMoveAllSellsCommand/TMoveAllBuysCommand CreateFromStream)
+fn move_all_commands_preserve_unknown_ordinals() {
     let mut sells = Vec::new();
     write_base_command_header(&mut sells, 13, 77);
     sells.push(1);

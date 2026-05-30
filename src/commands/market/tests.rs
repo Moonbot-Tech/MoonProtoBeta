@@ -94,7 +94,8 @@ fn market_roundtrip_v1() {
 }
 
 #[test]
-fn market_v1_defaults_futures_type_to_empty_like_delphi_create_base() {
+// parity: MoonBot MoonProtoSerialization.pas:ReadMarketFromStream (TMarket.CreateBase default)
+fn market_v1_defaults_futures_type_to_empty() {
     let mut m = sample_market("BTC", true);
     m.futures_type = BaseCurrency::UNKNOWN;
     let mut buf = Vec::new();
@@ -174,7 +175,8 @@ fn market_writer_removes_delphi_local_funding_shift() {
 }
 
 #[test]
-fn market_write_str_writes_only_declared_wrapped_len_like_delphi() {
+// parity: MoonBot MoonProtoEngineStruct.pas:TEngineStreamCommand.WriteStr
+fn market_write_str_writes_only_declared_wrapped_len() {
     let s = "M".repeat(65_537);
     let mut buf = Vec::new();
     write_str(&mut buf, &s);
@@ -187,7 +189,8 @@ fn market_write_str_writes_only_declared_wrapped_len_like_delphi() {
 }
 
 #[test]
-fn market_count_reader_does_not_precheck_remaining_like_delphi() {
+// parity: MoonBot MoonProtoEngineStruct.pas:TEngineStreamCommand.ReadInt
+fn market_count_reader_does_not_precheck_remaining() {
     let bytes = 2i32.to_le_bytes();
     let mut r = EngineStreamReader::new(&bytes);
 
@@ -198,7 +201,8 @@ fn market_count_reader_does_not_precheck_remaining_like_delphi() {
 }
 
 #[test]
-fn engine_stream_scalars_zero_tail_like_delphi_read_helpers() {
+// parity: MoonBot MoonProtoEngineStruct.pas:TEngineStreamCommand (ReadWord/ReadInt/ReadBool)
+fn engine_stream_scalars_zero_tail() {
     let mut r = EngineStreamReader::new(&[0x34, 0x12, 0x78]);
 
     assert_eq!(r.read_word(), Some(0x1234));
@@ -208,7 +212,8 @@ fn engine_stream_scalars_zero_tail_like_delphi_read_helpers() {
 }
 
 #[test]
-fn market_reader_zero_tails_short_fixed_tail_after_valid_strings_like_delphi() {
+// parity: MoonBot MoonProtoSerialization.pas:ReadMarketFromStream
+fn market_reader_zero_tails_short_fixed_tail_after_valid_strings() {
     let mut buf = Vec::new();
     for s in [
         "BNBTC", "BTC", "BTC", "USDT", "Bitcoin", "BTC", "BTCUSDT", "", "TRADING", "",
@@ -230,7 +235,8 @@ fn market_reader_zero_tails_short_fixed_tail_after_valid_strings_like_delphi() {
 }
 
 #[test]
-fn market_prices_row_zero_tails_short_fixed_payload_like_delphi() {
+// parity: MoonBot MoonProtoSerialization.pas:ReadMarketPricesFromStream
+fn market_prices_row_zero_tails_short_fixed_payload() {
     let mut buf = Vec::new();
     buf.push(1); // send_funding
     buf.extend_from_slice(&1i32.to_le_bytes()); // one market price row

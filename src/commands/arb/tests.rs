@@ -26,7 +26,8 @@ fn empty_payload() {
 }
 
 #[test]
-fn negative_len_is_empty_like_delphi() {
+// parity: MoonBot MoonProtoBalanceStruct.pas:TArbPricesCommand.CreateFromStream
+fn negative_len_is_empty() {
     let mut raw = Vec::new();
     raw.push(ARB_PRICES_CMD_ID);
     raw.extend_from_slice(&CURRENT_PROTO_CMD_VER.to_le_bytes());

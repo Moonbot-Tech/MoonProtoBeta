@@ -52,7 +52,8 @@ fn incremental_sets_globals_only_when_changed_but_always_recalcs_pnl() {
 }
 
 #[test]
-fn exact_balance_command_cmd2_is_ignored_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:TMoonProtoEngine.ProcessBalanceCommand
+fn exact_balance_command_cmd2_is_ignored() {
     let mut s = BalancesState::new();
     s.apply_global(&upd(3, 1, false), 7.0);
     s.apply_global(&upd(2, 2, true), 999.0); // cmd 2: not applied

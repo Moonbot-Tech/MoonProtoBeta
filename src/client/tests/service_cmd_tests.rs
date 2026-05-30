@@ -226,7 +226,8 @@ fn sliced_is_not_err_emu_service() {
 }
 
 #[test]
-fn err_emu_halves_service_drop_rate_like_delphi() {
+// parity: MoonBot MoonProtoUDPClient.pas:TMoonProtoUDPClient.UDPRead (MoonProtoErrEmu)
+fn err_emu_halves_service_drop_rate() {
     assert_eq!(
         err_emu_drop_rate_for_cmd(50, Command::Fine.to_byte()),
         25,

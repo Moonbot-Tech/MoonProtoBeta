@@ -118,7 +118,8 @@ fn completed_datagram_is_returned_only_once_before_caller_removes_it() {
 }
 
 #[test]
-fn duplicate_after_completed_datagram_gets_full_ack_like_delphi_post_removal() {
+// parity: MoonBot MoonProtoIntStruct.pas:TMoonProtoClient.OnNewSliced
+fn duplicate_after_completed_datagram_gets_full_ack() {
     let mut recv = SlicingReceiver::new();
     recv.set_last_online(10000);
 
@@ -188,7 +189,8 @@ fn non_duplicate_block_after_completed_datagram_does_not_mutate_receiver() {
 }
 
 #[test]
-fn completed_datagram_without_block_zero_is_delivered_as_none_cmd_like_delphi() {
+// parity: MoonBot MoonProtoIntStruct.pas:TMoonProtoClient.OnNewSliced
+fn completed_datagram_without_block_zero_is_delivered_as_none_cmd() {
     let mut recv = SlicingReceiver::new();
     recv.set_last_online(10000);
 
@@ -261,7 +263,8 @@ fn accepts_full_256_block_datagram() {
 }
 
 #[test]
-fn block_num_above_max_is_received_like_delphi() {
+// parity: MoonBot MoonProtoIntStruct.pas:TMoonProtoClient.OnNewSliced
+fn block_num_above_max_is_received() {
     let mut recv = SlicingReceiver::new();
     recv.set_last_online(10000);
 
@@ -343,7 +346,8 @@ fn incoming_sliced_datagrams_are_not_capped() {
 }
 
 #[test]
-fn clear_old_refreshes_duplicate_window_like_delphi() {
+// parity: MoonBot MoonProtoIntStruct.pas:TMoonProtoClient.ClearOldReceiving
+fn clear_old_refreshes_duplicate_window() {
     let mut recv = SlicingReceiver::new();
     recv.set_last_online(10000);
 
@@ -366,7 +370,8 @@ fn clear_old_refreshes_duplicate_window_like_delphi() {
 }
 
 #[test]
-fn do_cleanup_runs_on_reader_packet_cadence_like_delphi() {
+// parity: MoonBot MoonProtoIntStruct.pas:TMoonProtoClient.DoCleanUp
+fn do_cleanup_runs_on_reader_packet_cadence() {
     let mut recv = SlicingReceiver::new();
     recv.set_last_online(10000);
     recv.do_cleanup();

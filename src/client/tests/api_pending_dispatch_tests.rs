@@ -872,7 +872,8 @@ fn pending_api_response_is_not_duplicated_to_callback_sink() {
 }
 
 #[test]
-fn failed_compressed_payload_is_delivered_with_real_cmd_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:ClientNewData
+fn failed_compressed_payload_is_delivered_with_real_cmd() {
     let mut client = Client::new(dummy_cfg());
     let compressed_garbage = vec![4, 0, 1, 0, 0, 0, 0x0F, 0];
     let mut payloads = Vec::new();

@@ -185,7 +185,8 @@ mod tests {
     }
 
     #[test]
-    fn engine_method_unknown_preserves_raw_ordinal_like_delphi() {
+    // parity: MoonBot MoonProtoEngineStruct.pas:TEngineResponse.CreateFromStream
+    fn engine_method_unknown_preserves_raw_ordinal() {
         // Delphi `ms.Read(Method, SizeOf(Method))` keeps the raw enum byte.
         let method = EngineMethod::from_byte(99);
         assert_eq!(method.to_byte(), 99);

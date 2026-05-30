@@ -80,7 +80,8 @@ fn writer(client: &mut Client) -> ProtocolCore<'_> {
 }
 
 #[test]
-fn full_reset_preserves_sending_and_api_slots_like_delphi_reset() {
+// parity: MoonBot MoonProtoIntStruct.pas:TMoonProtoClient.Reset
+fn full_reset_preserves_sending_and_api_slots() {
     let mut client = Client::new(dummy_cfg());
     client.sending.push(sent_sliced_with_lengths(&[8], 0));
     client.pending_h.push(pending_h_item(42));
@@ -343,7 +344,8 @@ fn ping_ack_reader_core_is_not_reapplied_by_main_ping_branch() {
 }
 
 #[test]
-fn sliced_u_key_cleanup_does_not_drop_pending_h_like_delphi() {
+// parity: MoonBot MoonProtoIntStruct.pas:TMoonProtoClient.DeleteSendingByKey
+fn sliced_u_key_cleanup_does_not_drop_pending_h() {
     let mut client = Client::new(dummy_cfg());
     let key = UniqueKey::order_move(42);
 
@@ -414,7 +416,8 @@ fn sliced_u_key_cleanup_does_not_drop_pending_h_like_delphi() {
 }
 
 #[test]
-fn high_u_key_cleanup_runs_after_regular_ack_like_delphi() {
+// parity: MoonBot MoonProtoIntStruct.pas:TMoonProtoClient.ApplyRegularHLAck
+fn high_u_key_cleanup_runs_after_regular_ack() {
     let mut client = Client::new(dummy_cfg());
     let key = UniqueKey::order_move(42);
 
@@ -464,7 +467,8 @@ fn high_u_key_cleanup_runs_after_regular_ack_like_delphi() {
 }
 
 #[test]
-fn create_sliced_object_queues_without_immediate_send_like_delphi() {
+// parity: MoonBot MoonProtoIntStruct.pas:TMoonProtoClient.CreateSlicedObject
+fn create_sliced_object_queues_without_immediate_send() {
     let mut client = Client::new(dummy_cfg());
     let item = SendItem {
         data: vec![0x11, 0x22, 0x33],
@@ -490,7 +494,8 @@ fn create_sliced_object_queues_without_immediate_send_like_delphi() {
 }
 
 #[test]
-fn sliced_size_check_uses_compressed_size_like_delphi() {
+// parity: MoonBot MoonProtoIntStruct.pas:TMoonProtoClient.CreateSlicedObject
+fn sliced_size_check_uses_compressed_size() {
     let mut client = Client::new(dummy_cfg());
     let item = SendItem {
         data: (0..130_000).map(|i| (i % 4) as u8).collect(),
@@ -518,7 +523,8 @@ fn sliced_size_check_uses_compressed_size_like_delphi() {
 }
 
 #[test]
-fn encrypted_empty_sliced_is_dropped_before_crypt_like_delphi() {
+// parity: MoonBot MoonProtoIntStruct.pas:TMoonProtoClient.CreateSlicedObject
+fn encrypted_empty_sliced_is_dropped_before_crypt() {
     let mut client = Client::new(dummy_cfg());
     client.encode_cipher = Some(crypto::cipher_from_key(&[0; 16]));
     let item = SendItem {
@@ -568,7 +574,8 @@ fn encrypted_low_batch_size_uses_wire_size_after_crypt() {
 }
 
 #[test]
-fn do_send_mp_data_sends_current_item_direct_when_buffer_is_smaller_like_delphi() {
+// parity: MoonBot MoonProtoCommon.pas:TMoonProtoBaseNet.DoSendMPData
+fn do_send_mp_data_sends_oversized_item_direct() {
     let server_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
     server_sock
         .set_read_timeout(Some(Duration::from_secs(1)))
@@ -633,7 +640,8 @@ fn do_send_mp_data_sends_current_item_direct_when_buffer_is_smaller_like_delphi(
 }
 
 #[test]
-fn low_priority_items_are_split_around_sliced_retry_like_delphi() {
+// parity: MoonBot MoonProtoCommon.pas:TMoonProtoBaseNet.CheckSeningData
+fn low_priority_items_are_split_around_sliced_retry() {
     let server_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
     server_sock
         .set_read_timeout(Some(Duration::from_secs(1)))
@@ -753,7 +761,8 @@ fn encrypted_high_send_preserves_outer_compressed_flag() {
 }
 
 #[test]
-fn sliced_retry_client_limit_is_rounded_like_delphi() {
+// parity: MoonBot MoonProtoCommon.pas:TMoonProtoBaseNet.CheckSeningData
+fn sliced_retry_client_limit_is_rounded() {
     let mut client = Client::new(dummy_cfg());
     client.round_trip_delay = 100;
     client.trip_delay_k = 1.1;
@@ -797,7 +806,8 @@ fn sliced_retry_start_budget_sends_delphi_full_slice_counts() {
 }
 
 #[test]
-fn sliced_retry_used_limit_threshold_is_rounded_like_delphi() {
+// parity: MoonBot MoonProtoCommon.pas:TMoonProtoBaseNet.CheckSeningData
+fn sliced_retry_used_limit_threshold_is_rounded() {
     let mut client = Client::new(dummy_cfg());
     client.round_trip_delay = 100;
     client.trip_delay_k = 1.1;
@@ -868,7 +878,8 @@ fn sliced_retry_uses_startup_floor_until_ping_reports_rtt() {
 }
 
 #[test]
-fn sliced_retry_updates_trip_delay_k_before_path_delay_like_delphi() {
+// parity: MoonBot MoonProtoCommon.pas:TMoonProtoBaseNet.CheckSeningData
+fn sliced_retry_updates_trip_delay_k_before_path_delay() {
     let mut client = Client::new(dummy_cfg());
     client.round_trip_delay = 1000;
     client.trip_delay_k = 1.1;
@@ -889,7 +900,8 @@ fn sliced_retry_updates_trip_delay_k_before_path_delay_like_delphi() {
 }
 
 #[test]
-fn sliced_retry_clock_ignores_acked_blocks_like_delphi_apply_ack_removes_them() {
+// parity: MoonBot MoonProtoIntStruct.pas:TMoonProtoSlicedData.ApplyACK
+fn sliced_retry_clock_ignores_acked_blocks() {
     let mut client = Client::new(dummy_cfg());
     client.round_trip_delay = 100;
     client.trip_delay_k = 1.1;
@@ -956,7 +968,8 @@ fn sliced_retry_clock_ignores_acked_blocks_like_delphi_apply_ack_removes_them() 
 }
 
 #[test]
-fn sliced_ack_applies_only_first_matching_datagram_like_delphi() {
+// parity: MoonBot MoonProtoCommon.pas:TMoonProtoBaseNet.CheckSeningData
+fn sliced_ack_applies_only_first_matching_datagram() {
     let mut client = Client::new(dummy_cfg());
 
     let mut first = sent_sliced_with_lengths(&[10], 100);
@@ -988,7 +1001,8 @@ fn sliced_ack_applies_only_first_matching_datagram_like_delphi() {
 }
 
 #[test]
-fn sliced_ack_reader_queues_writer_applies_like_delphi() {
+// parity: MoonBot MoonProtoCommon.pas:TMoonProtoBaseNet.OnNewSlicedACK
+fn sliced_ack_reader_queues_writer_applies() {
     let mut client = Client::new(dummy_cfg());
     client.sending.push(sent_sliced_with_lengths(&[10], 100));
 
@@ -1017,7 +1031,8 @@ fn sliced_ack_reader_queues_writer_applies_like_delphi() {
 }
 
 #[test]
-fn writer_tick_copies_ack_queues_then_check_sening_data_like_delphi() {
+// parity: MoonBot MoonProtoCommon.pas:TMoonProtoBaseNet.CheckSeningData
+fn writer_tick_copies_ack_queues_then_check_sening_data() {
     let mut client = Client::new(dummy_cfg());
     client.sending.push(sent_sliced_with_lengths(&[10], 100));
     client.pending_h.push(pending_h_item(42));
@@ -1060,7 +1075,8 @@ fn writer_tick_copies_ack_queues_then_check_sening_data_like_delphi() {
 }
 
 #[test]
-fn send_lock_snapshot_copies_send_acks_and_tmp_slider_atomically_like_delphi() {
+// parity: MoonBot MoonProtoCommon.pas:TMoonProtoBaseNet.GetCopyAcks
+fn send_lock_snapshot_copies_send_acks_and_tmp_slider_atomically() {
     let mut client = Client::new(dummy_cfg());
     let send_item = SendItem {
         data: vec![0x44],

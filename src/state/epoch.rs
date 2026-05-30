@@ -63,7 +63,8 @@ mod tests {
     }
 
     #[test]
-    fn backward_more_than_100_is_accepted_like_delphi() {
+    // parity: MoonBot MoonProtoFunc.pas:EpochIsOK
+    fn backward_more_than_100_is_accepted() {
         assert!(epoch_is_ok(30_000, 29_899));
         assert!(epoch_is_ok(200, 65500));
     }

@@ -22,7 +22,8 @@ fn last_price_point_roundtrips_through_seq_ring() {
 }
 
 #[test]
-fn trades_packet_time_shift_is_fixed_by_first_row_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:ProcessTradesStream (per-packet TimeShift)
+fn trades_packet_time_shift_is_fixed_by_first_row() {
     let base_time = 45_000.0;
     let now_time = base_time + 3.0 / 24.0 + 10.0 / SECONDS_PER_DAY;
     let mut shift = TradesPacketTimeShift::new();
@@ -176,7 +177,8 @@ fn hl_address_color_matches_delphi_xor_scale() {
 }
 
 #[test]
-fn compacts_trades_to_mini_candles_like_delphi_resize() {
+// parity: MoonBot MarketsU.pas:TMarket.ResizeOrdersHistory (UseTradesCompression)
+fn compacts_trades_to_mini_candles() {
     let t0 = 45_000.0;
     let rows = [
         TradeHistoryRow {

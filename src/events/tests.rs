@@ -197,7 +197,8 @@ fn all_statuses_payload(uid: u64, orders: &[OrderStatus]) -> Vec<u8> {
 }
 
 #[test]
-fn dispatcher_parses_old_client_settings_with_cfg_fallback_like_delphi() {
+// parity: MoonBot MoonProtoUIStruct.pas:TClientSettingsCommand.CreateFromStream
+fn dispatcher_parses_old_client_settings_with_cfg_fallback() {
     let mut dispatcher = EventDispatcher::new();
     dispatcher.set_client_settings_fallback(ClientSettingsCommand {
         sign_orders: false,
@@ -232,7 +233,8 @@ fn dispatcher_parses_old_client_settings_with_cfg_fallback_like_delphi() {
 }
 
 #[test]
-fn dispatcher_skips_future_version_ui_command_like_delphi_registry() {
+// parity: MoonBot MoonProtoBaseStruct.pas:TCommandRegistry.FromStream
+fn dispatcher_skips_future_version_ui_command() {
     let mut dispatcher = EventDispatcher::new();
     let mut payload = vec![1u8]; // TClientSettingsCommand cmd_id.
     payload.extend_from_slice(&(CURRENT_PROTO_CMD_VER + 1).to_le_bytes());
@@ -249,7 +251,8 @@ fn dispatcher_skips_future_version_ui_command_like_delphi_registry() {
 }
 
 #[test]
-fn dispatcher_skips_unknown_ui_command_id_like_delphi_base_ui_command() {
+// parity: MoonBot MoonProtoBaseStruct.pas:TCommandRegistry.FromStream (unknown CmdId)
+fn dispatcher_skips_unknown_ui_command_id() {
     let mut dispatcher = EventDispatcher::new();
     let mut payload = vec![250u8]; // no registered TBaseUICommand descendant.
     payload.extend_from_slice(&CURRENT_PROTO_CMD_VER.to_le_bytes());
@@ -469,7 +472,8 @@ fn markets_list_v1_payload_without_futures_type(market: &Market) -> Vec<u8> {
 }
 
 #[test]
-fn api_get_markets_list_uses_response_ver_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:GetMarketsList
+fn api_get_markets_list_uses_response_ver() {
     let mut dispatcher = EventDispatcher::new();
     let market = event_market("OLDV1");
     let data = markets_list_v1_payload_without_futures_type(&market);
@@ -687,7 +691,8 @@ fn dispatcher_all_statuses_uses_process_command_order_item_loop() {
 }
 
 #[test]
-fn dispatcher_skips_future_version_order_command_like_delphi_registry() {
+// parity: MoonBot MoonProtoBaseStruct.pas:TCommandRegistry.FromStream
+fn dispatcher_skips_future_version_order_command() {
     let mut d = EventDispatcher::new();
     seed_event_markets(&mut d, &["BTCUSDT"]);
     let mut out = Vec::new();
@@ -722,7 +727,8 @@ fn dispatcher_skips_future_version_order_command_like_delphi_registry() {
 }
 
 #[test]
-fn dispatcher_skips_unknown_order_cmd_id_like_delphi_base_trade() {
+// parity: MoonBot MoonProtoBaseStruct.pas:TCommandRegistry.FromStream (unknown CmdId)
+fn dispatcher_skips_unknown_order_cmd_id() {
     let mut d = EventDispatcher::new();
     seed_event_markets(&mut d, &["BTCUSDT"]);
     let mut out = Vec::new();
@@ -857,7 +863,8 @@ fn dispatcher_keeps_sell_done_order_for_delphi_final_trace_grace() {
 }
 
 #[test]
-fn dispatcher_drops_new_order_status_for_unknown_market_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
+fn dispatcher_drops_new_order_status_for_unknown_market() {
     let mut d = EventDispatcher::new();
     let mut out = Vec::new();
     let uid = 0x77;
@@ -879,7 +886,8 @@ fn dispatcher_drops_new_order_status_for_unknown_market_like_delphi() {
 }
 
 #[test]
-fn dispatcher_drops_unknown_from_cache_status_without_event_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
+fn dispatcher_drops_unknown_from_cache_status_without_event() {
     let mut d = EventDispatcher::new();
     seed_event_markets(&mut d, &["BTCUSDT"]);
     let mut out = Vec::new();
@@ -894,7 +902,8 @@ fn dispatcher_drops_unknown_from_cache_status_without_event_like_delphi() {
 }
 
 #[test]
-fn dispatcher_drops_client_originated_order_command_without_event_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
+fn dispatcher_drops_client_originated_order_command_without_event() {
     let mut d = EventDispatcher::new();
     seed_event_markets(&mut d, &["BTCUSDT"]);
     let mut out = Vec::new();
@@ -931,7 +940,8 @@ fn dispatcher_drops_client_originated_order_command_without_event_like_delphi() 
 }
 
 #[test]
-fn dispatcher_drops_skipped_order_updates_without_event_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
+fn dispatcher_drops_skipped_order_updates_without_event() {
     let mut d = EventDispatcher::new();
     seed_event_markets(&mut d, &["BTCUSDT"]);
     let mut out = Vec::new();
@@ -1052,7 +1062,8 @@ fn dispatcher_drops_skipped_order_updates_without_event_like_delphi() {
 }
 
 #[test]
-fn dispatcher_tick_orders_clears_bulk_replace_timeout_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder (ReplaceSentTime lifecycle)
+fn dispatcher_tick_orders_clears_bulk_replace_timeout() {
     let mut d = EventDispatcher::new();
     seed_event_markets(&mut d, &["BTCUSDT"]);
     let mut out = Vec::new();
@@ -1100,7 +1111,8 @@ fn dispatcher_tick_orders_clears_bulk_replace_timeout_like_delphi() {
 }
 
 #[test]
-fn dispatcher_tick_orders_repeats_pending_cancel_like_delphi_worker_loop() {
+// parity: MoonBot MarketsU.pas:BOrderWorker (pending-cancel job loop)
+fn dispatcher_tick_orders_repeats_pending_cancel() {
     let mut d = EventDispatcher::new();
     seed_event_markets(&mut d, &["BTCUSDT"]);
     let mut out = Vec::new();
@@ -1155,7 +1167,8 @@ fn dispatcher_routes_strat_to_strats_state() {
 }
 
 #[test]
-fn dispatcher_skips_future_version_strat_command_like_delphi_registry() {
+// parity: MoonBot MoonProtoBaseStruct.pas:TCommandRegistry.FromStream
+fn dispatcher_skips_future_version_strat_command() {
     let mut d = EventDispatcher::new();
     let mut payload = vec![2, 99, 0];
     payload.extend_from_slice(&77u64.to_le_bytes());
@@ -1167,7 +1180,8 @@ fn dispatcher_skips_future_version_strat_command_like_delphi_registry() {
 }
 
 #[test]
-fn dispatcher_skips_unknown_strat_command_id_like_delphi_base_command() {
+// parity: MoonBot MoonProtoBaseStruct.pas:TCommandRegistry.FromStream (unknown CmdId)
+fn dispatcher_skips_unknown_strat_command_id() {
     let mut d = EventDispatcher::new();
     let mut payload = vec![250];
     payload.extend_from_slice(&CURRENT_PROTO_CMD_VER.to_le_bytes());
@@ -1180,7 +1194,8 @@ fn dispatcher_skips_unknown_strat_command_id_like_delphi_base_command() {
 }
 
 #[test]
-fn dispatcher_skips_inapplicable_incoming_strat_commands_like_delphi_client() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessStratCommand
+fn dispatcher_skips_inapplicable_incoming_strat_commands() {
     let mut d = EventDispatcher::new();
 
     let schema_request = build_schema_request(7);
@@ -1214,7 +1229,8 @@ fn dispatcher_unknown_channel_returns_raw() {
 }
 
 #[test]
-fn dispatcher_unknown_raw_command_preserves_header_ordinal_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ClientNewData
+fn dispatcher_unknown_raw_command_preserves_header_ordinal() {
     let mut d = EventDispatcher::new();
     let raw_cmd = Command::from_byte(99);
     let events = d.dispatch(raw_cmd, b"hello", 1000);
@@ -1291,7 +1307,8 @@ fn dispatcher_routes_arb_to_typed_event() {
 }
 
 #[test]
-fn dispatcher_applies_arb_price_to_live_market_like_delphi_tmarket() {
+// parity: MoonBot MoonProtoEngine.pas:ParseArbPayloadCompact
+fn dispatcher_applies_arb_price_to_live_market() {
     let mut d = EventDispatcher::new();
     seed_event_markets(&mut d, &["BTCUSDT"]);
     d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
@@ -1327,7 +1344,8 @@ fn dispatcher_applies_arb_price_to_live_market_like_delphi_tmarket() {
 }
 
 #[test]
-fn dispatcher_applies_arb_isolation_commit_to_live_market_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:ParseArbPayloadCompact (isolation commit pass)
+fn dispatcher_applies_arb_isolation_commit_to_live_market() {
     let mut d = EventDispatcher::new();
     seed_event_markets(&mut d, &["BTCUSDT"]);
     d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
@@ -1365,7 +1383,8 @@ fn dispatcher_applies_arb_isolation_commit_to_live_market_like_delphi() {
 }
 
 #[test]
-fn dispatcher_filters_unknown_arb_price_blocks_like_delphi_find_by_server_index() {
+// parity: MoonBot MoonProtoEngine.pas:TProtoMarketIndex.FindByServerIndex
+fn dispatcher_filters_unknown_arb_price_blocks() {
     let mut d = EventDispatcher::new();
     seed_event_markets(&mut d, &["BTCUSDT"]);
     d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
@@ -1398,7 +1417,8 @@ fn dispatcher_filters_unknown_arb_price_blocks_like_delphi_find_by_server_index(
 }
 
 #[test]
-fn dispatcher_filters_unknown_arb_isolation_entries_like_delphi_find_by_server_index() {
+// parity: MoonBot MoonProtoEngine.pas:TProtoMarketIndex.FindByServerIndex
+fn dispatcher_filters_unknown_arb_isolation_entries() {
     let mut d = EventDispatcher::new();
     seed_event_markets(&mut d, &["BTCUSDT"]);
     d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
@@ -1430,7 +1450,8 @@ fn dispatcher_filters_unknown_arb_isolation_entries_like_delphi_find_by_server_i
 }
 
 #[test]
-fn dispatcher_ignores_balance_base_request_and_unknown_like_delphi_registry() {
+// parity: MoonBot MoonProtoEngine.pas:TMoonProtoEngine.ProcessBalanceCommand
+fn dispatcher_ignores_balance_base_request_and_unknown() {
     let mut d = EventDispatcher::new();
 
     let full = balance_payload(3, 10, 1, 1.0);
@@ -1491,7 +1512,8 @@ fn dispatcher_ignores_balance_base_request_and_unknown_like_delphi_registry() {
 }
 
 #[test]
-fn dispatcher_skips_future_version_balance_command_like_delphi_registry() {
+// parity: MoonBot MoonProtoBaseStruct.pas:TCommandRegistry.FromStream
+fn dispatcher_skips_future_version_balance_command() {
     let mut d = EventDispatcher::new();
 
     let full = balance_payload(3, 10, 1, 1.0);
@@ -1535,7 +1557,8 @@ fn dispatcher_filters_balance_items_through_markets_state() {
 }
 
 #[test]
-fn dispatcher_full_balance_creates_default_for_all_known_markets_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:TMoonProtoEngine.OnBalanceSnapshot
+fn dispatcher_full_balance_creates_default_for_all_known_markets() {
     let mut d = EventDispatcher::new();
     d.markets.apply_markets_list(MarketsListResponse {
         markets: vec![event_market("BTCUSDT"), event_market("ETHUSDT")],
@@ -1564,7 +1587,8 @@ fn dispatcher_full_balance_creates_default_for_all_known_markets_like_delphi() {
 }
 
 #[test]
-fn dispatcher_balance_updates_live_market_fields_like_delphi_tmarket() {
+// parity: MoonBot MoonProtoEngine.pas:TMoonProtoEngine.ApplyBalanceItem
+fn dispatcher_balance_updates_live_market_fields() {
     let mut d = EventDispatcher::new();
     seed_event_markets(&mut d, &["BTCUSDT"]);
 
@@ -1588,7 +1612,8 @@ fn dispatcher_balance_updates_live_market_fields_like_delphi_tmarket() {
 }
 
 #[test]
-fn dispatcher_full_balance_resets_missing_live_market_but_preserves_hash_epoch_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:TMoonProtoEngine.OnBalanceSnapshot
+fn dispatcher_full_balance_resets_missing_live_market_but_preserves_hash_epoch() {
     let mut d = EventDispatcher::new();
     seed_event_markets(&mut d, &["BTCUSDT", "ETHUSDT"]);
 
@@ -1614,7 +1639,8 @@ fn dispatcher_full_balance_resets_missing_live_market_but_preserves_hash_epoch_l
 }
 
 #[test]
-fn dispatcher_balance_incremental_epoch_gate_uses_live_market_epoch_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:TMoonProtoEngine.OnBalanceIncrement
+fn dispatcher_balance_incremental_epoch_gate_uses_live_market_epoch() {
     let mut d = EventDispatcher::new();
     seed_event_markets(&mut d, &["BTCUSDT"]);
 
@@ -1748,7 +1774,8 @@ fn dispatcher_blocks_trades_until_indexes_sync() {
 }
 
 #[test]
-fn dispatcher_blocks_trades_resend_until_indexes_sync_like_delphi_process_trades_stream() {
+// parity: MoonBot MoonProtoEngine.pas:TMoonProtoEngine.ProcessTradesStream
+fn dispatcher_blocks_trades_resend_until_indexes_sync() {
     let mut d = EventDispatcher::new();
     let inner = trades_payload_with_market_sections(777, &[0]);
     let payload = trades_resend_response_payload(&inner);
@@ -1760,7 +1787,8 @@ fn dispatcher_blocks_trades_resend_until_indexes_sync_like_delphi_process_trades
 }
 
 #[test]
-fn dispatcher_filters_unknown_trades_sections_like_delphi_find_by_server_index() {
+// parity: MoonBot MoonProtoEngine.pas:TProtoMarketIndex.FindByServerIndex
+fn dispatcher_filters_unknown_trades_sections() {
     let mut d = EventDispatcher::new();
     seed_event_markets(&mut d, &["BTCUSDT"]);
     d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
@@ -1786,7 +1814,8 @@ fn dispatcher_filters_unknown_trades_sections_like_delphi_find_by_server_index()
 }
 
 #[test]
-fn dispatcher_filters_unknown_trades_resend_sections_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:TMoonProtoEngine.ProcessTradesResendBatch
+fn dispatcher_filters_unknown_trades_resend_sections() {
     let mut d = EventDispatcher::new();
     seed_event_markets(&mut d, &["BTCUSDT"]);
     d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
@@ -1810,7 +1839,8 @@ fn dispatcher_filters_unknown_trades_resend_sections_like_delphi() {
 }
 
 #[test]
-fn dispatcher_applies_futures_trades_to_market_tail_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:TMoonProtoEngine.ProcessTradesStream
+fn dispatcher_applies_futures_trades_to_market_tail() {
     let mut d = EventDispatcher::new();
     seed_event_markets(&mut d, &["BTCUSDT"]);
     d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
@@ -2317,7 +2347,8 @@ fn active_dispatch_queues_all_retained_stream_section_kinds_into_history_worker(
 }
 
 #[test]
-fn active_dispatch_emits_typed_watcher_fills_like_delphi_process_watcher_fills_detect() {
+// parity: MoonBot EngineBase.pas:TMarketEngine.ProcessWatcherFillsDetect
+fn active_dispatch_emits_typed_watcher_fills() {
     let mut d = EventDispatcher::new();
     seed_event_markets(&mut d, &["BTCUSDT"]);
     d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
@@ -2405,7 +2436,8 @@ fn active_dispatch_emits_typed_watcher_fills_like_delphi_process_watcher_fills_d
 }
 
 #[test]
-fn active_dispatch_queues_update_markets_last_price_into_history_worker_like_delphi_addfrom() {
+// parity: MoonBot MarketsU.pas:TMarket.AddFrom (LastPrice history backfill)
+fn active_dispatch_queues_update_markets_last_price_into_history_worker() {
     let worker = crate::state::MarketHistoryWorker::spawn(crate::state::MarketHistoryConfig {
         futures_trades_capacity: 0,
         spot_trades_capacity: 0,
@@ -2532,7 +2564,8 @@ fn enabling_trade_storage_backfills_current_last_price_history() {
 }
 
 #[test]
-fn dispatcher_spot_trades_do_not_overwrite_futures_tail_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:TMoonProtoEngine.ProcessTradesStream
+fn dispatcher_spot_trades_do_not_overwrite_futures_tail() {
     let mut d = EventDispatcher::new();
     seed_event_markets(&mut d, &["BTCUSDT"]);
     d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
@@ -2757,7 +2790,8 @@ fn dispatch_into_active_consumes_orderbook_full_request_event() {
 }
 
 #[test]
-fn orderbook_apply_updates_market_chart_price_step_like_delphi_glass_updated() {
+// parity: MoonBot MoonProtoEngine.pas:TMoonProtoEngine.ProcessOrderBookPacket
+fn orderbook_apply_updates_market_chart_price_step() {
     let mut d = EventDispatcher::new();
     seed_event_markets(&mut d, &["BTCUSDT"]);
     let mut out = Vec::new();
@@ -3120,7 +3154,8 @@ fn trades_resend_response_payload(inner: &[u8]) -> Vec<u8> {
 }
 
 #[test]
-fn active_markets_list_refresh_is_throttled_like_delphi_new_market_found() {
+// parity: MoonBot MoonProtoEngine.pas:GetMarketsList (NewMarketFound)
+fn active_markets_list_refresh_is_throttled() {
     let client = crate::client::Client::new(dummy_client_cfg());
     let mut dispatcher = EventDispatcher::new();
     let mut out = Vec::new();
@@ -3188,7 +3223,8 @@ fn active_markets_list_refresh_is_throttled_like_delphi_new_market_found() {
 }
 
 #[test]
-fn active_new_market_notify_is_internal_and_bypasses_listing_refresh_throttle_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:GetMarketsList (NewMarketFound)
+fn active_new_market_notify_is_internal_and_bypasses_listing_refresh_throttle() {
     let mut client = crate::client::Client::new(dummy_client_cfg());
     client.testing_set_domain_ready(true);
     let mut dispatcher = EventDispatcher::new();
@@ -3307,7 +3343,8 @@ fn active_get_markets_list_emits_new_markets_added_after_actual_insert() {
 }
 
 #[test]
-fn active_trades_resend_check_runs_after_valid_trades_packet_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:TMoonProtoEngine.CheckMissingTradesPackets
+fn active_trades_resend_check_runs_after_valid_trades_packet() {
     let mut d = EventDispatcher::new();
     d.markets.indexes_synchronized = true;
     let mut client = crate::client::Client::new(dummy_client_cfg());
@@ -3717,7 +3754,8 @@ fn raw_strat_snapshot_payload(uid: u64, server_epoch: u64, full: bool, data: &[u
 }
 
 #[test]
-fn valid_strategy_snapshot_advances_server_epoch_after_decode_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessStratCommand
+fn valid_strategy_snapshot_advances_server_epoch_after_decode() {
     let mut d = EventDispatcher::new();
     d.strats.last_server_epoch = 7;
 
@@ -3748,7 +3786,8 @@ fn valid_strategy_snapshot_advances_server_epoch_after_decode_like_delphi() {
 }
 
 #[test]
-fn invalid_strategy_snapshot_does_not_advance_server_epoch_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessStratCommand
+fn invalid_strategy_snapshot_does_not_advance_server_epoch() {
     let mut d = EventDispatcher::new();
     d.strats.last_server_epoch = 7;
 
@@ -3939,7 +3978,8 @@ fn snapshot_requested_defers_non_empty_local_strategies_until_schema() {
 }
 
 #[test]
-fn snapshot_reply_uses_local_epoch_not_remote_server_epoch_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessStratCommand
+fn snapshot_reply_uses_local_epoch_not_remote_server_epoch() {
     let mut d = EventDispatcher::new();
     d.strats.last_server_epoch = 7;
 

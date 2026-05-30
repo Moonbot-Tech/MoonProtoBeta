@@ -130,7 +130,8 @@ mod tests {
     use super::Command;
 
     #[test]
-    fn command_from_byte_preserves_unknown_raw_ordinal_like_delphi() {
+    // parity: MoonBot MoonProtoDataStruct.pas:TMoonProtoCommand
+    fn command_from_byte_preserves_unknown_raw_ordinal() {
         let cmd = Command::from_byte(99);
         assert_eq!(cmd.to_byte(), 99);
         assert_eq!(cmd.name(), "Unknown");

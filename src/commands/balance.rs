@@ -278,7 +278,8 @@ mod tests {
     }
 
     #[test]
-    fn balance_parser_rejects_when_count_reaches_missing_next_item_string_like_delphi_readbuffer() {
+    // parity: MoonBot MoonProtoBalanceStruct.pas:TBalanceItem.ReadFromStream
+    fn balance_parser_rejects_truncated_next_item() {
         let item = zero_flags_item("BTCUSDT", 99);
         let payload = full_balance_payload_with_count(2, &item);
 
@@ -286,7 +287,8 @@ mod tests {
     }
 
     #[test]
-    fn balance_parser_zero_tails_short_fixed_fields_like_delphi_stream_read() {
+    // parity: MoonBot MoonProtoBalanceStruct.pas:TBalanceItem.ReadFromStream
+    fn balance_parser_zero_tails_short_fixed_fields() {
         let mut item = Vec::new();
         super::super::registry::write_string(&mut item, "BTCUSDT");
         // Short BalanceHash keeps present low bytes; Flags are absent and stay zero.
@@ -317,7 +319,8 @@ mod tests {
     }
 
     #[test]
-    fn balance_parser_negative_count_has_no_items_like_delphi_count_guard() {
+    // parity: MoonBot MoonProtoBalanceStruct.pas:TBalanceCommand.CreateFromStream (Count guard)
+    fn balance_parser_negative_count_has_no_items() {
         let payload = full_balance_payload_with_count(-1, &[]);
 
         let parsed = parse_balance(3, &payload).unwrap();

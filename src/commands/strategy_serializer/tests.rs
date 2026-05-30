@@ -375,7 +375,8 @@ fn all_primitive_types_roundtrip() {
 }
 
 #[test]
-fn writer_wraps_name_path_and_string_lengths_like_delphi() {
+// parity: MoonBot StrategySerializer.pas:TStrategySerializer.WriteStrategy
+fn writer_wraps_name_path_and_string_lengths() {
     let long_name = "N".repeat(257);
     let long_path = "P".repeat(257);
     let long_value = "V".repeat(65_537);
@@ -479,7 +480,8 @@ fn unknown_type_id_skipped_8_bytes() {
 }
 
 #[test]
-fn known_field_type_mismatch_is_skipped_like_delphi_read_field() {
+// parity: MoonBot StrategySerializer.pas:TStrategySerializer.LoadStrategyFromCompact
+fn known_field_type_mismatch_is_skipped() {
     let mut plain = Vec::new();
     // NameDict: OrderSize expects TID_DOUBLE, Comment expects TID_STRING.
     plain.extend_from_slice(&2u16.to_le_bytes());
@@ -525,7 +527,8 @@ fn known_field_type_mismatch_is_skipped_like_delphi_read_field() {
 }
 
 #[test]
-fn string_field_value_zero_fills_short_body_like_delphi_read_field() {
+// parity: MoonBot StrategySerializer.pas:TStrategySerializer.LoadStrategyFromCompact
+fn string_field_value_zero_fills_short_body() {
     let mut plain = Vec::new();
     // NameDict: one string field.
     plain.extend_from_slice(&1u16.to_le_bytes());
@@ -559,7 +562,8 @@ fn string_field_value_zero_fills_short_body_like_delphi_read_field() {
 }
 
 #[test]
-fn scalar_field_value_zero_fills_short_body_like_delphi_stream_read() {
+// parity: MoonBot StrategySerializer.pas:TStrategySerializer.LoadStrategyFromCompact
+fn scalar_field_value_zero_fills_short_body() {
     let mut plain = Vec::new();
     // NameDict: one Int32 field.
     plain.extend_from_slice(&1u16.to_le_bytes());
@@ -589,65 +593,67 @@ fn scalar_field_value_zero_fills_short_body_like_delphi_stream_read() {
 }
 
 #[test]
-fn known_field_type_mismatch_fixed_skip_consumes_short_tail_like_delphi() {
-    let mut plain = Vec::new();
-    // NameDict: OrderSize expects TID_DOUBLE.
-    plain.extend_from_slice(&1u16.to_le_bytes());
-    plain.push(9);
-    plain.extend_from_slice(b"OrderSize");
-    // PathDict
-    plain.extend_from_slice(&0u16.to_le_bytes());
-    // StratCount
-    plain.extend_from_slice(&1u16.to_le_bytes());
-    // Strategy header
-    plain.extend_from_slice(&1u64.to_le_bytes());
-    plain.extend_from_slice(&1i32.to_le_bytes());
-    plain.extend_from_slice(&0u64.to_le_bytes());
-    plain.push(0);
-    plain.push(0);
-    plain.extend_from_slice(&0u16.to_le_bytes());
-    // FieldCount=1
-    plain.extend_from_slice(&1u16.to_le_bytes());
-    // Field 0: OrderSize but wire type is Int64; only one byte of the
-    // skipped fixed-size value is present.
-    plain.extend_from_slice(&0u16.to_le_bytes());
-    plain.push(TID_INT64);
-    plain.push(0xAA);
+// parity: MoonBot StrategySerializer.pas:TStrategySerializer.LoadStrategyFromCompact
+fn known_field_type_mismatch_skip_consumes_short_value() {
+    // OrderSize is declared TID_DOUBLE in the schema, but the wire field carries a
+    // different (mismatched) type with a truncated value. Delphi skips the field
+    // and reaches stream end; the parsed strategy must have no fields.
+    struct Case {
+        label: &'static str,
+        // bytes that follow the FieldIdx (=0); these encode the mismatched wire
+        // field whose value tail/body is short.
+        field_bytes: Vec<u8>,
+    }
 
-    let schema = schema_for_fields(vec![schema_field("OrderSize", TID_DOUBLE, None, &[0])]);
-    let parsed = parse_strategy_batch_plain_with_schema(&plain, Some(&schema)).unwrap();
-    assert!(parsed.strategies[0].fields.is_empty());
-}
+    let cases = [
+        Case {
+            // wire type Int64; only one byte of the skipped fixed-size value present.
+            label: "fixed_skip_consumes_short_tail",
+            field_bytes: vec![TID_INT64, 0xAA],
+        },
+        Case {
+            // wire type String; Len is present (5), body is short (1 byte).
+            label: "string_skip_consumes_short_body",
+            field_bytes: {
+                let mut b = vec![TID_STRING];
+                b.extend_from_slice(&5u16.to_le_bytes());
+                b.push(b'x');
+                b
+            },
+        },
+    ];
 
-#[test]
-fn known_field_type_mismatch_string_skip_consumes_short_body_like_delphi() {
-    let mut plain = Vec::new();
-    // NameDict: OrderSize expects TID_DOUBLE.
-    plain.extend_from_slice(&1u16.to_le_bytes());
-    plain.push(9);
-    plain.extend_from_slice(b"OrderSize");
-    // PathDict
-    plain.extend_from_slice(&0u16.to_le_bytes());
-    // StratCount
-    plain.extend_from_slice(&1u16.to_le_bytes());
-    // Strategy header
-    plain.extend_from_slice(&1u64.to_le_bytes());
-    plain.extend_from_slice(&1i32.to_le_bytes());
-    plain.extend_from_slice(&0u64.to_le_bytes());
-    plain.push(0);
-    plain.push(0);
-    plain.extend_from_slice(&0u16.to_le_bytes());
-    // FieldCount=1
-    plain.extend_from_slice(&1u16.to_le_bytes());
-    // Field 0: OrderSize but wire type is String; Len is present, body is short.
-    plain.extend_from_slice(&0u16.to_le_bytes());
-    plain.push(TID_STRING);
-    plain.extend_from_slice(&5u16.to_le_bytes());
-    plain.push(b'x');
+    for case in cases {
+        let mut plain = Vec::new();
+        // NameDict: OrderSize expects TID_DOUBLE.
+        plain.extend_from_slice(&1u16.to_le_bytes());
+        plain.push(9);
+        plain.extend_from_slice(b"OrderSize");
+        // PathDict
+        plain.extend_from_slice(&0u16.to_le_bytes());
+        // StratCount
+        plain.extend_from_slice(&1u16.to_le_bytes());
+        // Strategy header
+        plain.extend_from_slice(&1u64.to_le_bytes());
+        plain.extend_from_slice(&1i32.to_le_bytes());
+        plain.extend_from_slice(&0u64.to_le_bytes());
+        plain.push(0);
+        plain.push(0);
+        plain.extend_from_slice(&0u16.to_le_bytes());
+        // FieldCount=1
+        plain.extend_from_slice(&1u16.to_le_bytes());
+        // Field 0: idx=0, then the mismatched/truncated wire field for this case.
+        plain.extend_from_slice(&0u16.to_le_bytes());
+        plain.extend_from_slice(&case.field_bytes);
 
-    let schema = schema_for_fields(vec![schema_field("OrderSize", TID_DOUBLE, None, &[0])]);
-    let parsed = parse_strategy_batch_plain_with_schema(&plain, Some(&schema)).unwrap();
-    assert!(parsed.strategies[0].fields.is_empty());
+        let schema = schema_for_fields(vec![schema_field("OrderSize", TID_DOUBLE, None, &[0])]);
+        let parsed = parse_strategy_batch_plain_with_schema(&plain, Some(&schema)).unwrap();
+        assert!(
+            parsed.strategies[0].fields.is_empty(),
+            "case {}: mismatched short field must be skipped, leaving no parsed fields",
+            case.label
+        );
+    }
 }
 
 #[test]

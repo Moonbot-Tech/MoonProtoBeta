@@ -18,7 +18,8 @@ fn make_pkt(market_idx: u16, book_kind: u8, seq: u16, is_full: bool) -> OrderBoo
 }
 
 #[test]
-fn eps_profile_changes_diff_quantity_filter_like_delphi_exchange_table() {
+// parity: MoonBot MoonProtoEngine.pas:ProcessOrderBookPacket (Unit1.pas eps table)
+fn eps_profile_changes_diff_quantity_filter() {
     let small_qty = 0.000000005_f32;
     let full = OrderBookUpdate {
         market_index: 30,
@@ -148,7 +149,8 @@ fn reset_caches_keep_books_matches_delphi_reset_orderbook_caches() {
 }
 
 #[test]
-fn first_diff_without_full_is_applied_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:ProcessOrderBookPacket
+fn first_diff_without_full_is_applied() {
     // Delphi MoonProtoEngine.pas:2066-2071:
     // If `last_applied_seq = 0` (nothing applied yet) — apply the first Diff
     // without waiting for a Full. Previously we dropped it + requested a Full.
@@ -331,7 +333,8 @@ fn separate_pairs_independent() {
 }
 
 #[test]
-fn book_seq_zero_overrides_stale_compare_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:ProcessOrderBookPacket
+fn book_seq_zero_overrides_stale_compare() {
     // The Delphi normal-mode condition checks `m.MoonProtoBookSeq = 0` before
     // the stale-drop. So with an initial seq=0 the packet 65535 is still
     // applied, even though CompareSeq(65535, 0) < 0.
@@ -346,7 +349,8 @@ fn book_seq_zero_overrides_stale_compare_like_delphi() {
 }
 
 #[test]
-fn duplicate_gap_packets_are_cached_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:ProcessOrderBookPacket
+fn duplicate_gap_packets_are_cached() {
     let mut ob = OrderBooks::new();
     let _ = ob.on_packet(make_pkt(10, 0, 1, true), 1000);
     let _ = ob.on_packet(make_pkt(10, 0, 3, false), 1010);
@@ -501,7 +505,8 @@ fn diff_updates_inserts_and_deletes_applied_levels() {
 }
 
 #[test]
-fn diff_uses_opposite_side_shrink_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:ProcessOrderBookPacket
+fn diff_uses_opposite_side_shrink() {
     let mut ob = OrderBooks::new();
     let _ = ob.on_packet(
         OrderBookUpdate {

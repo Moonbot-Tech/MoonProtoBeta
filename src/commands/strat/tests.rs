@@ -91,7 +91,8 @@ fn parse_sell_price_update() {
 }
 
 #[test]
-fn snapshot_short_fixed_tail_zero_tails_like_delphi_stream_read() {
+// parity: MoonBot MoonProtoStratStruct.pas:TStratSnapshot.CreateFromStream
+fn snapshot_short_fixed_tail_zero_tails() {
     let mut payload = vec![CMD_SNAPSHOT, 0x03, 0x00];
     payload.extend_from_slice(&42u64.to_le_bytes());
     payload.extend_from_slice(&0x34u16.to_le_bytes());
@@ -131,7 +132,8 @@ fn delete_short_strategy_id_zero_tails_but_truncated_folder_string_rejects() {
 }
 
 #[test]
-fn sell_price_update_short_fixed_tail_zero_tails_like_delphi_stream_read() {
+// parity: MoonBot MoonProtoStratStruct.pas:TStratSellPriceUpdate.CreateFromStream
+fn sell_price_update_short_fixed_tail_zero_tails() {
     let mut payload = vec![CMD_SELL_PRICE_UPDATE, 0x03, 0x00];
     payload.extend_from_slice(&1u64.to_le_bytes());
     payload.extend_from_slice(&0x7788u16.to_le_bytes());
@@ -170,7 +172,8 @@ fn parse_checked_sync_with_items() {
 }
 
 #[test]
-fn checked_items_read_declared_count_with_zero_tail_like_delphi_stream() {
+// parity: MoonBot MoonProtoStratStruct.pas:TStratCheckedSync.CreateFromStream
+fn checked_items_read_declared_count_with_zero_tail() {
     let mut payload = vec![CMD_CHECKED_SYNC, 0x03, 0x00];
     payload.extend_from_slice(&7u64.to_le_bytes());
     payload.extend_from_slice(&3u16.to_le_bytes());
@@ -217,7 +220,8 @@ fn checked_items_read_declared_count_with_zero_tail_like_delphi_stream() {
 }
 
 #[test]
-fn checked_word_count_builders_write_only_declared_wrapped_count_like_delphi() {
+// parity: MoonBot MoonProtoStratStruct.pas:TStratCheckedSync.CreateFromStream
+fn checked_word_count_builders_write_only_declared_wrapped_count() {
     let items: Vec<_> = (0..65_537u64)
         .map(|i| StratCheckedItem {
             strategy_id: i + 500,
@@ -248,7 +252,8 @@ fn checked_word_count_builders_write_only_declared_wrapped_count_like_delphi() {
 }
 
 #[test]
-fn parse_snapshot_declared_size_over_remaining_as_invalid_snapshot_like_delphi() {
+// parity: MoonBot MoonProtoStratStruct.pas:TStratSnapshot.CreateFromStream
+fn parse_snapshot_declared_size_over_remaining_as_invalid() {
     let mut payload = vec![CMD_SNAPSHOT, 0x03, 0x00];
     payload.extend_from_slice(&42u64.to_le_bytes());
     payload.extend_from_slice(&99u64.to_le_bytes());
@@ -337,7 +342,8 @@ fn parse_schema_with_data() {
 }
 
 #[test]
-fn parse_schema_size_over_remaining_becomes_empty_data_like_delphi_nil_data_guard() {
+// parity: MoonBot MoonProtoStratStruct.pas:TStratSchema.CreateFromStream
+fn parse_schema_size_over_remaining_becomes_empty_data() {
     let mut payload = vec![CMD_SCHEMA, 0x03, 0x00];
     payload.extend_from_slice(&1u64.to_le_bytes());
     payload.extend_from_slice(&4u32.to_le_bytes());
@@ -442,7 +448,8 @@ fn build_snapshot_normalizes_empty_raw_payload_to_empty_serializer() {
 }
 
 #[test]
-fn version_gate_returns_skipped_like_delphi_registry() {
+// parity: MoonBot MoonProtoBaseStruct.pas:TCommandRegistry.FromStream
+fn version_gate_returns_skipped() {
     // ver=99 > CURRENT_PROTO_CMD_VER=3 → Delphi registry FSkipped.
     let mut payload = vec![CMD_SNAPSHOT, 99, 0];
     payload.extend_from_slice(&77u64.to_le_bytes());

@@ -186,7 +186,8 @@ fn market_handle_reads_arb_slot_without_raw_map_access() {
 }
 
 #[test]
-fn apply_markets_list_payload_keeps_read_market_on_late_corr_parse_error_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:GetMarketsList
+fn apply_markets_list_payload_keeps_read_market_on_late_corr_parse_error() {
     let mut st = MarketsState::new();
     let market = mk_market("BTCUSDT", 0);
     let mut data = Vec::new();
@@ -210,7 +211,8 @@ fn apply_markets_list_payload_keeps_read_market_on_late_corr_parse_error_like_de
 }
 
 #[test]
-fn apply_markets_list_payload_batches_new_market_cow_like_delphi_main_list_build() {
+// parity: MoonBot MoonProtoEngine.pas:GetMarketsList
+fn apply_markets_list_payload_batches_new_market_cow() {
     let mut st = MarketsState::new();
     let mut data = Vec::new();
     data.extend_from_slice(&3i32.to_le_bytes());
@@ -255,7 +257,8 @@ fn markets_list_payload_timing_records_only_coarse_production_phases() {
 }
 
 #[test]
-fn apply_markets_list_preserves_absent_existing_markets_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:GetMarketsList
+fn apply_markets_list_preserves_absent_existing_markets() {
     let mut st = MarketsState::new();
     st.apply_markets_list(MarketsListResponse {
         markets: vec![mk_market("BTCUSDT", 0), mk_market("DOGEUSDT", 1)],
@@ -289,7 +292,8 @@ fn apply_markets_list_preserves_absent_existing_markets_like_delphi() {
 }
 
 #[test]
-fn apply_markets_list_does_not_add_new_market_without_new_market_found_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:GetMarketsList (NewMarketFound)
+fn apply_markets_list_does_not_add_new_market_without_new_market_found() {
     let mut st = MarketsState::new();
     st.apply_markets_list(MarketsListResponse {
         markets: vec![mk_market("BTCUSDT", 0)],
@@ -314,7 +318,8 @@ fn apply_markets_list_does_not_add_new_market_without_new_market_found_like_delp
 }
 
 #[test]
-fn apply_markets_list_adds_new_market_and_clears_new_market_found_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:GetMarketsList (NewMarketFound)
+fn apply_markets_list_adds_new_market_and_clears_new_market_found() {
     let mut st = MarketsState::new();
     st.apply_markets_list(MarketsListResponse {
         markets: vec![mk_market("BTCUSDT", 0)],
@@ -358,7 +363,8 @@ fn apply_markets_list_adds_new_market_and_clears_new_market_found_like_delphi() 
 }
 
 #[test]
-fn apply_markets_list_merges_existing_market_and_preserves_live_price_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:GetMarketsList
+fn apply_markets_list_merges_existing_market_and_preserves_live_price() {
     let mut st = MarketsState::new();
     let mut old = mk_market("BTCUSDT", 1);
     old.bn_max_value = 123.0;
@@ -414,7 +420,8 @@ fn apply_markets_list_merges_existing_market_and_preserves_live_price_like_delph
 }
 
 #[test]
-fn market_handle_survives_listing_cow_and_sees_in_place_updates_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:GetMarketsList (TMarket reuse on re-list)
+fn market_handle_survives_listing_cow_and_sees_in_place_updates() {
     let mut st = MarketsState::new();
     let mut old = mk_market("BTCUSDT", 1);
     old.bn_tick_size = 0.01;
@@ -535,7 +542,8 @@ fn apply_prices_updates_by_index() {
 }
 
 #[test]
-fn apply_prices_resets_mark_price_found_before_each_batch_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:UpdateMarketsList
+fn apply_prices_resets_mark_price_found_before_each_batch() {
     let mut st = MarketsState::new();
     st.apply_markets_list(MarketsListResponse {
         markets: vec![mk_market("BTC", 0), mk_market("ETH", 1)],
@@ -593,7 +601,8 @@ fn apply_prices_resets_mark_price_found_before_each_batch_like_delphi() {
 }
 
 #[test]
-fn direct_price_payload_clears_mark_found_on_empty_scalar_payload_like_delphi_read() {
+// parity: MoonBot MoonProtoEngine.pas:UpdateMarketsList
+fn direct_price_payload_clears_mark_found_on_empty_scalar_payload() {
     let mut st = MarketsState::new();
     st.apply_markets_list(MarketsListResponse {
         markets: vec![mk_market("BTC", 0), mk_market("ETH", 1)],
@@ -645,7 +654,8 @@ fn direct_price_payload_clears_mark_found_on_empty_scalar_payload_like_delphi_re
 }
 
 #[test]
-fn apply_prices_updates_last_price_and_min_lot_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:UpdateMarketsList
+fn apply_prices_updates_last_price_and_min_lot() {
     let mut market = mk_market("BTCUSDT", 0);
     market.bn_step_size = 0.01;
     market.bn_min_qty = 0.02;
@@ -708,7 +718,8 @@ fn apply_prices_updates_last_price_and_min_lot_like_delphi() {
 }
 
 #[test]
-fn apply_prices_updates_market_funding_fields_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:UpdateMarketsList
+fn apply_prices_updates_market_funding_fields() {
     let mut st = MarketsState::new();
     st.apply_markets_list(MarketsListResponse {
         markets: vec![mk_market("BTCUSDT", 0)],
@@ -740,7 +751,8 @@ fn apply_prices_updates_market_funding_fields_like_delphi() {
 }
 
 #[test]
-fn apply_prices_payload_keeps_read_updates_on_late_corr_parse_error_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:UpdateMarketsList
+fn apply_prices_payload_keeps_read_updates_on_late_corr_parse_error() {
     let mut st = MarketsState::new();
     st.apply_markets_list(MarketsListResponse {
         markets: vec![mk_market("BTCUSDT", 0)],
@@ -826,7 +838,8 @@ fn apply_prices_skips_stale_server_index_mapping() {
 }
 
 #[test]
-fn apply_prices_marks_refresh_needed_for_unknown_indexed_market_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:UpdateMarketsList
+fn apply_prices_marks_refresh_needed_for_unknown_indexed_market() {
     let mut st = MarketsState::new();
     st.apply_markets_list(MarketsListResponse {
         markets: vec![mk_market("BTCUSDT", 0)],
@@ -860,7 +873,8 @@ fn apply_prices_marks_refresh_needed_for_unknown_indexed_market_like_delphi() {
 }
 
 #[test]
-fn apply_prices_marks_refresh_needed_for_out_of_range_index_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:UpdateMarketsList
+fn apply_prices_marks_refresh_needed_for_out_of_range_index() {
     let mut st = MarketsState::new();
     st.apply_markets_list(MarketsListResponse {
         markets: vec![mk_market("BTCUSDT", 0)],
@@ -989,7 +1003,8 @@ fn apply_prices_out_of_range_skipped() {
 }
 
 #[test]
-fn apply_markets_list_skips_corr_market_with_empty_base_currency_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:GetMarketsList
+fn apply_markets_list_skips_corr_market_with_empty_base_currency() {
     let mut st = MarketsState::new();
     st.apply_markets_list(MarketsListResponse {
         markets: vec![],
@@ -1009,7 +1024,8 @@ fn apply_markets_list_skips_corr_market_with_empty_base_currency_like_delphi() {
 }
 
 #[test]
-fn apply_markets_list_preserves_existing_corr_market_currency_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:GetMarketsList
+fn apply_markets_list_preserves_existing_corr_market_currency() {
     let mut st = MarketsState::new();
     st.apply_markets_list(MarketsListResponse {
         markets: vec![],
@@ -1041,7 +1057,8 @@ fn apply_markets_list_preserves_existing_corr_market_currency_like_delphi() {
 }
 
 #[test]
-fn check_corr_markets_sets_ref_btc_market_like_delphi() {
+// parity: MoonBot MarketsU.pas:TMarkets.CheckCorrMarkets
+fn check_corr_markets_sets_ref_btc_market() {
     let mut st = MarketsState::new();
     st.set_server_base_currency(Some("USDT"), Some(BaseCurrency::USDT));
     st.apply_markets_list(MarketsListResponse {
@@ -1062,7 +1079,8 @@ fn check_corr_markets_sets_ref_btc_market_like_delphi() {
 }
 
 #[test]
-fn check_corr_markets_skips_btc_base_like_delphi() {
+// parity: MoonBot MarketsU.pas:TMarkets.CheckCorrMarkets
+fn check_corr_markets_skips_btc_base() {
     let mut st = MarketsState::new();
     st.set_server_base_currency(Some("BTC"), Some(BaseCurrency::BTC));
     st.apply_markets_list(MarketsListResponse {
@@ -1082,7 +1100,8 @@ fn check_corr_markets_skips_btc_base_like_delphi() {
 }
 
 #[test]
-fn update_currency_prices_uses_usdt_market_like_delphi() {
+// parity: MoonBot MarketsU.pas:TMarkets.UpdateCurrencyPrices
+fn update_currency_prices_uses_usdt_market() {
     let mut st = MarketsState::new();
     st.apply_markets_list(MarketsListResponse {
         markets: vec![mk_pair_market("BTCUSDT", "BTC", "USDT", 0)],
@@ -1115,7 +1134,8 @@ fn update_currency_prices_uses_usdt_market_like_delphi() {
 }
 
 #[test]
-fn update_currency_prices_uses_usdt_corr_market_like_delphi() {
+// parity: MoonBot MarketsU.pas:TMarkets.UpdateCurrencyPrices
+fn update_currency_prices_uses_usdt_corr_market() {
     let mut st = MarketsState::new();
     st.apply_markets_list(MarketsListResponse {
         markets: vec![],
@@ -1152,7 +1172,8 @@ fn update_currency_prices_uses_usdt_corr_market_like_delphi() {
 }
 
 #[test]
-fn apply_corr_prices_merges_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:UpdateMarketsList (corr-market prices)
+fn apply_corr_prices_merges() {
     let mut st = MarketsState::new();
     st.apply_markets_list(MarketsListResponse {
         markets: vec![],
@@ -1185,7 +1206,8 @@ fn apply_corr_prices_merges_like_delphi() {
 }
 
 #[test]
-fn apply_corr_prices_ignores_unknown_corr_market_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:UpdateMarketsList (corr-market prices)
+fn apply_corr_prices_ignores_unknown_corr_market() {
     let mut st = MarketsState::new();
     st.apply_markets_list(MarketsListResponse {
         markets: vec![],
@@ -1222,7 +1244,8 @@ fn apply_corr_prices_ignores_unknown_corr_market_like_delphi() {
 }
 
 #[test]
-fn apply_token_tags_clears_missing_markets_like_delphi_check_binance_tags() {
+// parity: MoonBot MoonProtoEngine.pas:CheckBinanceTags
+fn apply_token_tags_clears_missing_markets() {
     let mut st = MarketsState::new();
     st.apply_markets_list(MarketsListResponse {
         markets: vec![
@@ -1268,7 +1291,8 @@ fn apply_token_tags_clears_missing_markets_like_delphi_check_binance_tags() {
 }
 
 #[test]
-fn apply_token_tags_payload_keeps_read_tags_on_late_parse_error_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:CheckBinanceTags
+fn apply_token_tags_payload_keeps_read_tags_on_late_parse_error() {
     let mut st = MarketsState::new();
     st.apply_markets_list(MarketsListResponse {
         markets: vec![mk_market("BTCUSDT", 0), mk_market("ETHUSDT", 1)],
@@ -1354,7 +1378,8 @@ fn market_index_helpers_hide_stale_mapping() {
 }
 
 #[test]
-fn get_markets_list_rebuilds_stale_server_indexes_like_delphi_token_change() {
+// parity: MoonBot MoonProtoEngine.pas:GetMarketsList (rebuilds Markets lookups)
+fn get_markets_list_rebuilds_stale_server_indexes() {
     let mut st = MarketsState::new();
     st.apply_markets_list(MarketsListResponse {
         markets: vec![mk_market("BTCUSDT", 0), mk_market("ETHUSDT", 1)],

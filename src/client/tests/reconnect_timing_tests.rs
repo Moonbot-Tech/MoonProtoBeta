@@ -298,7 +298,8 @@ fn early_hello_again_uses_master_key_before_whoareyou() {
 }
 
 #[test]
-fn fine_requires_master_key_hello_payload_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ClientNewData
+fn fine_requires_master_key_hello_payload() {
     let mut client = dummy_client();
 
     assert!(!apply_reader_handshake_payload(
@@ -843,7 +844,8 @@ fn orderbook_reconnect_first_tick_is_immediate_without_inflight_subscribe() {
 }
 
 #[test]
-fn queued_orderbook_subscribe_blocks_pre_response_reconnect_like_delphi_sendandwait() {
+// parity: MoonBot MoonProtoEngine.pas:SendAndWait
+fn queued_orderbook_subscribe_blocks_pre_response_reconnect() {
     let mut client = dummy_client();
     client.set_domain_ready(true);
     client.auth_status = AuthStatus::AuthDone;
@@ -885,7 +887,8 @@ fn queued_orderbook_subscribe_blocks_pre_response_reconnect_like_delphi_sendandw
 }
 
 #[test]
-fn first_successful_orderbook_subscribe_sets_initial_book_server_token_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:NeedResubscribeOrderBooks
+fn first_successful_orderbook_subscribe_sets_initial_book_server_token() {
     let mut client = dummy_client();
     client.set_domain_ready(true);
     client.auth_status = AuthStatus::AuthDone;
@@ -992,7 +995,8 @@ fn malformed_get_markets_indexes_response_does_not_reopen_stream_gate() {
 }
 
 #[test]
-fn unknown_indexed_market_price_requests_markets_list_like_delphi_new_market_found() {
+// parity: MoonBot MoonProtoEngine.pas:GetMarketsList (NewMarketFound)
+fn unknown_indexed_market_price_requests_markets_list() {
     let mut client = dummy_client();
     client.set_domain_ready(true);
     client.auth_status = AuthStatus::AuthDone;
@@ -1054,7 +1058,8 @@ fn unknown_indexed_market_price_requests_markets_list_like_delphi_new_market_fou
 }
 
 #[test]
-fn new_market_list_refresh_requests_immediate_prices_like_delphi_new_markets() {
+// parity: MoonBot MoonProtoEngine.pas:GetMarketsList (NewMarkets)
+fn new_market_list_refresh_requests_immediate_prices() {
     let mut client = dummy_client();
     client.set_domain_ready(true);
     client.auth_status = AuthStatus::AuthDone;
@@ -1225,7 +1230,8 @@ fn trades_reconnect_retries_every_five_seconds_until_stream_token_is_seen() {
 }
 
 #[test]
-fn successful_subscribe_all_trades_response_refreshes_reconnect_gate_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:SubscribeAllTrades
+fn successful_subscribe_all_trades_response_refreshes_reconnect_gate() {
     let mut client = dummy_client();
     client.set_domain_ready(true);
     client.server_token = 0x2222;
@@ -1269,7 +1275,8 @@ fn successful_subscribe_all_trades_response_refreshes_reconnect_gate_like_delphi
 }
 
 #[test]
-fn queued_subscribe_all_trades_request_blocks_pre_response_reconnect_like_delphi_sendandwait() {
+// parity: MoonBot MoonProtoEngine.pas:SendAndWait
+fn queued_subscribe_all_trades_request_blocks_pre_response_reconnect() {
     let mut client = dummy_client();
     client.set_domain_ready(true);
     client.server_token = 0x2222;

@@ -382,7 +382,8 @@ mod tests {
     }
 
     #[test]
-    fn parses_strategy_schema_body_like_delphi_builder() {
+    // parity: MoonBot StrategySchemaBuilder.pas:BuildStrategySchemaBlob
+    fn parses_strategy_schema_body() {
         let mut raw = Vec::new();
         raw.push(SCHEMA_FORMAT_VERSION);
         raw.push(2); // kind_count

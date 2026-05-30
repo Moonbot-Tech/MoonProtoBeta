@@ -55,7 +55,8 @@ fn send_cmd_int_queue_removes_first_matching_sliced_or_high_before_append() {
 }
 
 #[test]
-fn send_cmd_int_queue_does_not_dedup_low_priority_like_delphi() {
+// parity: MoonBot MoonProtoCommon.pas:TMoonProtoBaseNet.SendCmdInt
+fn send_cmd_int_queue_does_not_dedup_low_priority() {
     let mut queues = SendQueues::default();
     queues.push_send_cmd_int(item_with_priority(UK_ORDER_MOVE, 7, 1, SendPriority::Low));
     queues.push_send_cmd_int(item_with_priority(UK_ORDER_MOVE, 7, 2, SendPriority::Low));

@@ -227,7 +227,8 @@ mod tests {
     }
 
     #[test]
-    fn apply_transfer_moves_amounts_like_delphi_after_success() {
+    // parity: MoonBot MoonProtoEngine.pas:AfterTransferAsset
+    fn apply_transfer_moves_amounts_after_success() {
         let mut state = TransferAssetsState::new();
         state.apply_update(ExchangeKind::Spot, 10, vec![asset("USDT", 10.0, 12.0)]);
         state.apply_update(ExchangeKind::Futures, 11, vec![asset("USDT", 1.0, 2.0)]);

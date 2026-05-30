@@ -402,7 +402,8 @@ mod tests {
     // ===== Delphi GetBestNTP selection =====
 
     #[test]
-    fn first_sync_accepts_large_offset_like_delphi() {
+    // parity: MoonBot IndyUDPHelper.pas:GetBestNTP
+    fn first_sync_accepts_large_offset() {
         let mut state = NtpState::default();
         let result = get_best_ntp_with_state(&mut state, 1, |_| Some((31_536_000.0, 0.120)));
 

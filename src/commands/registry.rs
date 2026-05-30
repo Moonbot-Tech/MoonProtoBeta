@@ -100,7 +100,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn write_string_writes_only_declared_wrapped_len_like_delphi() {
+    // parity: MoonBot Vars.pas:WriteStringToStreamUtf8
+    fn write_string_writes_only_declared_wrapped_len() {
         let s = "a".repeat(65_537);
         let mut buf = Vec::new();
         write_string(&mut buf, &s);
@@ -114,7 +115,8 @@ mod tests {
     }
 
     #[test]
-    fn read_string_replaces_invalid_utf8_with_question_mark_like_delphi() {
+    // parity: MoonBot Vars.pas:ReadStringFromStreamUtf8
+    fn read_string_replaces_invalid_utf8_with_question_mark() {
         let mut buf = Vec::new();
         buf.extend_from_slice(&4u16.to_le_bytes());
         buf.extend_from_slice(&[b'a', 0xFF, b'b', 0x80]);
@@ -125,7 +127,8 @@ mod tests {
     }
 
     #[test]
-    fn read_string_rejects_truncated_declared_body_like_delphi_read_buffer() {
+    // parity: MoonBot Vars.pas:ReadStringFromStreamUtf8
+    fn read_string_rejects_truncated_declared_body() {
         let mut buf = Vec::new();
         buf.extend_from_slice(&4u16.to_le_bytes());
         buf.extend_from_slice(b"ab");

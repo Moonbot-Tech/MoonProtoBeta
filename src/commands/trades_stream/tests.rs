@@ -194,7 +194,8 @@ fn section_iter_decodes_all_section_types_without_collecting_first() {
 }
 
 #[test]
-fn section_iter_keeps_only_complete_rows_from_truncated_tail_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:TMoonProtoEngine.ProcessTradesStream
+fn section_iter_keeps_only_complete_rows_from_truncated_tail() {
     let mut payload = Vec::new();
     payload.extend_from_slice(&45_000.0f64.to_le_bytes());
     payload.extend_from_slice(&78u16.to_le_bytes());
@@ -245,7 +246,8 @@ fn section_iter_consumes_truncated_declared_rows_instead_of_reparsing_tail() {
 }
 
 #[test]
-fn section_iter_stops_on_unknown_ext_type_like_delphi_exit() {
+// parity: MoonBot MoonProtoEngine.pas:TMoonProtoEngine.ProcessTradesStream
+fn section_iter_stops_on_unknown_ext_type() {
     let mut payload = Vec::new();
     payload.extend_from_slice(&45_000.0f64.to_le_bytes());
     payload.extend_from_slice(&80u16.to_le_bytes());
@@ -278,7 +280,8 @@ fn section_iter_stops_on_unknown_ext_type_like_delphi_exit() {
 }
 
 #[test]
-fn section_iter_stops_on_truncated_watcher_fills_like_delphi_row_read() {
+// parity: MoonBot MoonProtoEngine.pas:TMoonProtoEngine.ProcessTradesStream
+fn section_iter_stops_on_truncated_watcher_fills() {
     let mut payload = Vec::new();
     payload.extend_from_slice(&45_000.0f64.to_le_bytes());
     payload.extend_from_slice(&81u16.to_le_bytes());

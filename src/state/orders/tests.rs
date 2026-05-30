@@ -120,7 +120,8 @@ fn terminal_status_marks_done_then_deferred_removal() {
 }
 
 #[test]
-fn from_cache_status_does_not_create_unknown_order_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
+fn from_cache_status_does_not_create_unknown_order() {
     let mut orders = Orders::new();
     let mut cached = make_status(42, "BTCUSDT", OrderWorkerStatus::BuySet, 1);
     cached.from_cache = true;
@@ -139,7 +140,8 @@ fn from_cache_status_does_not_create_unknown_order_like_delphi() {
 }
 
 #[test]
-fn existing_full_status_keeps_worker_identity_fields_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
+fn existing_full_status_keeps_worker_identity_fields() {
     let mut orders = Orders::new();
     let mut first = make_status(42, "BTCUSDT", OrderWorkerStatus::BuySet, 1);
     first.epoch_header.market.currency = 1;
@@ -185,7 +187,8 @@ fn existing_full_status_keeps_worker_identity_fields_like_delphi() {
 }
 
 #[test]
-fn incoming_set_immune_is_not_applied_by_process_command_order_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
+fn incoming_set_immune_is_not_applied_by_process_command_order() {
     let mut orders = Orders::new();
     orders.apply(order_status_cmd(make_status(
         42,
@@ -215,7 +218,8 @@ fn incoming_set_immune_is_not_applied_by_process_command_order_like_delphi() {
 }
 
 #[test]
-fn outgoing_set_immune_clicks_mutates_only_found_active_orders_like_delphi() {
+// parity: MoonBot MoonProtoServer.pas:TMoonProtoNetServer.ProcessCommandOrder (TSetImmuneCommand)
+fn outgoing_set_immune_clicks_mutates_only_found_active_orders() {
     let mut orders = Orders::new();
     orders.apply(order_status_cmd(make_status(
         42,
@@ -316,7 +320,8 @@ fn outgoing_send_stops_if_changed_matches_delphi_change_gate() {
 }
 
 #[test]
-fn send_stops_derives_take_profit_changed_like_delphi_gui_u2() {
+// parity: MoonBot Unit1.pas (GUI send-stops; TakeProfit auto-default guard)
+fn send_stops_derives_take_profit_changed() {
     // U2 (sverka journal_review #14): the trader must never set the
     // take_profit_changed wire flag by hand. The runtime derives it so the server
     // never auto-defaults (clobbers) the trader's TP on the SELL transition
@@ -661,7 +666,8 @@ fn outgoing_market_panic_sell_matches_delphi_workers_toggle() {
 }
 
 #[test]
-fn incoming_turn_panic_sell_is_not_applied_by_process_command_order_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
+fn incoming_turn_panic_sell_is_not_applied_by_process_command_order() {
     let mut orders = Orders::new();
     orders.apply(order_status_cmd(make_status(
         42,
@@ -688,7 +694,8 @@ fn incoming_turn_panic_sell_is_not_applied_by_process_command_order_like_delphi(
 }
 
 #[test]
-fn incoming_noop_trade_epoch_still_updates_epoch_like_delphi_accept_server_command() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
+fn incoming_noop_trade_epoch_still_updates_epoch() {
     let mut orders = Orders::new();
     orders.apply(order_status_cmd(make_status(
         42,
@@ -847,7 +854,8 @@ fn sell_almost_done_is_terminal() {
 }
 
 #[test]
-fn visual_trace_after_terminal_status_is_accepted_before_deferred_removal_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
+fn visual_trace_after_terminal_status_is_accepted_before_deferred_removal() {
     let mut orders = Orders::new();
     orders.apply(order_status_cmd(make_status(
         42,
@@ -910,7 +918,8 @@ fn trace_points_are_not_capped_like_former_rust_ring_buffer() {
 }
 
 #[test]
-fn trace_line_ignores_non_initial_without_existing_line_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
+fn trace_line_ignores_non_initial_without_existing_line() {
     let mut orders = Orders::new();
     orders.apply(order_status_cmd(make_status(
         42,
@@ -1047,7 +1056,8 @@ fn trace_line_initial_temp_and_finish_match_delphi_order_line() {
 }
 
 #[test]
-fn order_not_found_marks_server_forced_then_deferred_removal_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
+fn order_not_found_marks_server_forced_then_deferred_removal() {
     let mut orders = Orders::new();
     orders.apply(order_status_cmd(make_status(
         42,
@@ -1205,7 +1215,8 @@ fn epoch_duplicate_rejected() {
 }
 
 #[test]
-fn first_same_epoch_after_new_order_is_accepted_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
+fn first_same_epoch_after_new_order_is_accepted() {
     let mut orders = Orders::new();
     let mut status = make_status(1, "X", OrderWorkerStatus::BuySet, 10);
     status.buy_order.actual_price = 10.0;
@@ -1330,7 +1341,8 @@ fn vstop_update_uses_phase_guard() {
 }
 
 #[test]
-fn terminal_status_update_does_not_apply_update_data_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
+fn terminal_status_update_does_not_apply_update_data() {
     let mut orders = Orders::new();
     let mut status = make_status(1, "X", OrderWorkerStatus::SellSet, 10);
     status.sell_order.actual_price = 10.0;
@@ -1360,7 +1372,8 @@ fn terminal_status_update_does_not_apply_update_data_like_delphi() {
 }
 
 #[test]
-fn sell_done_status_update_applies_set_done_flags_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
+fn sell_done_status_update_applies_set_done_flags() {
     let mut orders = Orders::new();
     let mut status = make_status(1, "X", OrderWorkerStatus::SellSet, 10);
     status.buy_order.is_opened = DelphiBool::TRUE;
@@ -1405,7 +1418,8 @@ fn sell_done_status_update_applies_set_done_flags_like_delphi() {
 }
 
 #[test]
-fn sell_done_full_status_applies_set_done_flags_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
+fn sell_done_full_status_applies_set_done_flags() {
     let mut orders = Orders::new();
     orders.apply(order_status_cmd(make_status(
         1,
@@ -1445,7 +1459,8 @@ fn sell_done_full_status_applies_set_done_flags_like_delphi() {
 }
 
 #[test]
-fn zero_sell_reason_update_keeps_previous_reason_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
+fn zero_sell_reason_update_keeps_previous_reason() {
     let mut orders = Orders::new();
     orders.apply(order_status_cmd(make_status(
         1,
@@ -1484,7 +1499,8 @@ fn zero_sell_reason_update_keeps_previous_reason_like_delphi() {
 }
 
 #[test]
-fn pending_status_update_tracks_vorder_buy_cond_price_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
+fn pending_status_update_tracks_vorder_buy_cond_price() {
     let mut orders = Orders::new();
     let mut status = make_status(1, "X", OrderWorkerStatus::None, 10);
     status.buy_order.mean_price = 10.0;
@@ -1531,7 +1547,8 @@ fn pending_status_update_tracks_vorder_buy_cond_price_like_delphi() {
 }
 
 #[test]
-fn os_none_update_without_pending_vorder_does_not_create_pending_price_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
+fn os_none_update_without_pending_vorder_does_not_create_pending_price() {
     let mut orders = Orders::new();
     let mut status = make_status(1, "X", OrderWorkerStatus::BuySet, 10);
     status.buy_order.mean_price = 10.0;
@@ -1564,7 +1581,8 @@ fn os_none_update_without_pending_vorder_does_not_create_pending_price_like_delp
 }
 
 #[test]
-fn full_os_none_status_for_existing_pending_keeps_vorder_price_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
+fn full_os_none_status_for_existing_pending_keeps_vorder_price() {
     let mut orders = Orders::new();
     let mut pending = make_status(1, "X", OrderWorkerStatus::None, 10);
     pending.buy_order.mean_price = 10.0;
@@ -1591,7 +1609,8 @@ fn full_os_none_status_for_existing_pending_keeps_vorder_price_like_delphi() {
 }
 
 #[test]
-fn full_os_none_status_for_existing_non_pending_does_not_create_vorder_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
+fn full_os_none_status_for_existing_non_pending_does_not_create_vorder() {
     let mut orders = Orders::new();
     let mut status = make_status(1, "X", OrderWorkerStatus::BuySet, 10);
     status.buy_order.mean_price = 10.0;
@@ -1614,7 +1633,8 @@ fn full_os_none_status_for_existing_non_pending_does_not_create_vorder_like_delp
 }
 
 #[test]
-fn corridor_update_marks_order_as_moon_shot_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
+fn corridor_update_marks_order_as_moon_shot() {
     let mut orders = Orders::new();
     orders.apply(order_status_cmd(make_status(
         1,
@@ -1639,7 +1659,8 @@ fn corridor_update_marks_order_as_moon_shot_like_delphi() {
 }
 
 #[test]
-fn replace_response_quantity_base_zero_preserves_existing_value_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
+fn replace_response_quantity_base_zero_preserves_existing_value() {
     let mut orders = Orders::new();
     let mut status = make_status(1, "X", OrderWorkerStatus::BuySet, 10);
     status.buy_order.quantity_base = 12.5;
@@ -1665,7 +1686,8 @@ fn replace_response_quantity_base_zero_preserves_existing_value_like_delphi() {
 }
 
 #[test]
-fn replace_response_buy_stop_uses_sell_side_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
+fn replace_response_buy_stop_uses_sell_side() {
     let mut orders = Orders::new();
     let mut status = make_status(1, "X", OrderWorkerStatus::BuySet, 10);
     status.buy_order.actual_price = 111.0;
@@ -1698,7 +1720,8 @@ fn replace_response_buy_stop_uses_sell_side_like_delphi() {
 }
 
 #[test]
-fn bulk_replace_timeout_clears_flag_after_5000ms_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder (ReplaceSentTime lifecycle)
+fn bulk_replace_timeout_clears_flag_after_5000ms() {
     let mut orders = Orders::new();
     orders.apply(order_status_cmd(make_status(
         1,
@@ -1726,7 +1749,8 @@ fn bulk_replace_timeout_clears_flag_after_5000ms_like_delphi() {
 }
 
 #[test]
-fn replace_response_clears_flag_then_tick_clears_shared_sent_time_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder (ReplaceSentTime lifecycle)
+fn replace_response_clears_flag_then_tick_clears_shared_sent_time() {
     let mut orders = Orders::new();
     orders.apply(order_status_cmd(make_status(
         1,
@@ -1765,7 +1789,8 @@ fn replace_response_clears_flag_then_tick_clears_shared_sent_time_like_delphi() 
 }
 
 #[test]
-fn bulk_replace_tick_checks_only_current_side_like_delphi_forder() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder (ReplaceSentTime lifecycle)
+fn bulk_replace_tick_checks_only_current_side() {
     let mut orders = Orders::new();
     orders.apply(order_status_cmd(make_status(
         1,
@@ -1794,7 +1819,8 @@ fn bulk_replace_tick_checks_only_current_side_like_delphi_forder() {
 }
 
 #[test]
-fn bulk_replace_notify_reports_only_found_workers_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder (TBulkReplaceNotify)
+fn bulk_replace_notify_reports_only_found_workers() {
     let mut orders = Orders::new();
     orders.apply(order_status_cmd(make_status(
         1,
@@ -1838,7 +1864,8 @@ fn bulk_replace_notify_reports_only_found_workers_like_delphi() {
 }
 
 #[test]
-fn bulk_replace_notify_buy_stop_uses_sell_side_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder (TBulkReplaceNotify)
+fn bulk_replace_notify_buy_stop_uses_sell_side() {
     let mut orders = Orders::new();
     orders.apply(order_status_cmd(make_status(
         1,
@@ -1862,7 +1889,8 @@ fn bulk_replace_notify_buy_stop_uses_sell_side_like_delphi() {
 }
 
 #[test]
-fn bulk_replace_notify_unknown_order_type_uses_sell_side_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder (TBulkReplaceNotify)
+fn bulk_replace_notify_unknown_order_type_uses_sell_side() {
     let mut orders = Orders::new();
     orders.apply(order_status_cmd(make_status(
         1,
@@ -1886,7 +1914,8 @@ fn bulk_replace_notify_unknown_order_type_uses_sell_side_like_delphi() {
 }
 
 #[test]
-fn order_status_maintains_local_price_fields_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
+fn order_status_maintains_local_price_fields() {
     let mut orders = Orders::new();
     let mut status = make_status(1, "X", OrderWorkerStatus::BuySet, 10);
     status.buy_order.actual_price = 10.0;
@@ -1958,7 +1987,8 @@ fn missing_after_snapshot_returns_old_orders_after_dispatcher_style_status_loop(
 }
 
 #[test]
-fn existing_order_command_refreshes_snapshot_flag_before_epoch_guard_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder (SnapshotFlag)
+fn existing_order_command_refreshes_snapshot_flag_before_epoch_guard() {
     let mut orders = Orders::new();
     orders.apply(order_status_cmd(make_status(
         1,
@@ -1990,7 +2020,8 @@ fn existing_order_command_refreshes_snapshot_flag_before_epoch_guard_like_delphi
 }
 
 #[test]
-fn unknown_status_ordinal_preserves_snapshot_flag_and_skips_epoch_index_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder (SnapshotFlag)
+fn unknown_status_ordinal_preserves_snapshot_flag_and_skips_epoch_index() {
     let mut orders = Orders::new();
     orders.apply(order_status_cmd(make_status(
         1,
@@ -2018,7 +2049,8 @@ fn unknown_status_ordinal_preserves_snapshot_flag_and_skips_epoch_index_like_del
 }
 
 #[test]
-fn bulk_replace_notify_does_not_refresh_snapshot_flag_like_delphi_special_branch() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder (TBulkReplaceNotify early-exit branch)
+fn bulk_replace_notify_does_not_refresh_snapshot_flag() {
     let mut orders = Orders::new();
     orders.apply(order_status_cmd(make_status(
         1,
@@ -2044,7 +2076,8 @@ fn bulk_replace_notify_does_not_refresh_snapshot_flag_like_delphi_special_branch
 }
 
 #[test]
-fn non_base_market_trade_command_does_not_refresh_snapshot_flag_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder (SnapshotFlag)
+fn non_base_market_trade_command_does_not_refresh_snapshot_flag() {
     let mut orders = Orders::new();
     orders.apply(order_status_cmd(make_status(
         1,
@@ -2065,7 +2098,8 @@ fn non_base_market_trade_command_does_not_refresh_snapshot_flag_like_delphi() {
 }
 
 #[test]
-fn missing_after_snapshot_keeps_terminal_entry_until_deferred_removal_like_delphi_wcache() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder (WCache SnapshotFlag sweep)
+fn missing_after_snapshot_keeps_terminal_entry_until_deferred_removal() {
     let mut orders = Orders::new();
     orders.apply_at(
         order_status_cmd(make_status(1, "X", OrderWorkerStatus::SellSet, 1)),

@@ -46,7 +46,8 @@ fn duplicate_detected() {
 }
 
 #[test]
-fn duplicate_refreshes_pause_timer_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:TMoonProtoEngine.ProcessTradesStream
+fn duplicate_refreshes_pause_timer() {
     let mut s = TradesState::new();
     let _ = s.on_packet(make_pkt(100), 1000);
     let _ = s.on_packet(make_pkt(100), 20_000);
@@ -114,7 +115,8 @@ fn out_of_order_live_packet_refreshes_pause_timer() {
 }
 
 #[test]
-fn late_resend_outside_bucket_is_still_applied_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:TMoonProtoEngine.ProcessTradesResendBatch
+fn late_resend_outside_bucket_is_still_applied() {
     let mut s = TradesState::new();
     let evs = s.on_packet_resend(make_pkt(777));
     assert!(matches!(
@@ -177,7 +179,8 @@ fn tick_throttles_within_100ms() {
 }
 
 #[test]
-fn tick_updates_last_check_even_without_buckets_like_delphi_caller() {
+// parity: MoonBot MoonProtoEngine.pas:TMoonProtoEngine.CheckMissingTradesPackets
+fn tick_updates_last_check_even_without_buckets() {
     let mut s = TradesState::new();
 
     let payloads = s.tick(250, 1000);
@@ -260,7 +263,8 @@ fn consecutive_gaps_extend_existing_bucket() {
 }
 
 #[test]
-fn extending_bucket_refunds_one_retry_once_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:TMoonProtoEngine.FindBucketForPacket
+fn extending_bucket_refunds_one_retry_once() {
     let mut s = TradesState::new();
     let _ = s.on_packet(make_pkt(100), 1000);
     let _ = s.on_packet(make_pkt(105), 1010);
@@ -296,7 +300,8 @@ fn extending_bucket_refunds_one_retry_once_like_delphi() {
 }
 
 #[test]
-fn bucket_with_retry_count_two_is_not_extended_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:TMoonProtoEngine.FindBucketForPacket
+fn bucket_with_retry_count_two_is_not_extended() {
     let mut s = TradesState::new();
     let _ = s.on_packet(make_pkt(100), 1000);
     let _ = s.on_packet(make_pkt(105), 1010);
@@ -322,7 +327,8 @@ fn bucket_with_retry_count_two_is_not_extended_like_delphi() {
 }
 
 #[test]
-fn overflow_gap_resets_buckets_but_applies_packet_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:TMoonProtoEngine.ProcessTradesStream
+fn overflow_gap_resets_buckets_but_applies_packet() {
     // If the gap exceeds MAX_RECVD_SIZE, Delphi resets the buckets but does not
     // discard the current packet.
     let mut s = TradesState::new();
@@ -391,7 +397,8 @@ fn pause_resets_buckets() {
 }
 
 #[test]
-fn tick_lazily_shrinks_oversized_inactive_recvd_after_30min_like_delphi() {
+// parity: MoonBot MoonProtoEngine.pas:TMoonProtoEngine.CheckMissingTradesPackets
+fn tick_lazily_shrinks_oversized_inactive_recvd_after_30min() {
     // Delphi MoonProtoEngine.pas:1566-1573: every 30 minutes it shrinks `recvd` for
     // inactive buckets that grew above DEFAULT on a one-off large gap, reclaiming memory.
     // Rust grew recvd up to gap_size and never shrank it without this.

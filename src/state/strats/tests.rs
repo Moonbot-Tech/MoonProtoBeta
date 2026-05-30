@@ -150,7 +150,8 @@ fn bench_firetest_strategy_snapshot_payload() {
 }
 
 #[test]
-fn sell_price_update_is_ignored_like_delphi_client() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessStratCommand
+fn sell_price_update_is_ignored() {
     let mut s = StratsState::new();
     s.upsert(100, 0, "");
     let ev = s.apply(StratCommand::SellPriceUpdate(StratSellPriceUpdate {
@@ -162,7 +163,8 @@ fn sell_price_update_is_ignored_like_delphi_client() {
 }
 
 #[test]
-fn incoming_schema_request_is_ignored_like_delphi_client() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessStratCommand
+fn incoming_schema_request_is_ignored() {
     let mut s = StratsState::new();
     let ev = s.apply(StratCommand::SchemaRequest { uid: 77 });
     assert!(matches!(ev, StratEvent::Ignored));
@@ -224,7 +226,8 @@ fn listing_strategy_helpers_match_delphi_active_predicates() {
 }
 
 #[test]
-fn listing_sell_helper_uses_short_moonshot_only_for_spot_like_delphi() {
+// parity: MoonBot Strategies.pas:TStrategies.IsThereListingSell
+fn listing_sell_helper_uses_short_moonshot_only_for_spot() {
     let mut s = StratsState::new();
     s.upsert_local_snapshot(snapshot_for_listing_checks(
         1,
@@ -274,7 +277,8 @@ fn delete_removes_entry() {
 }
 
 #[test]
-fn delete_with_folder_path_deletes_strategy_then_empty_folder_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessStratCommand (Strategies.pas:DeleteStrategyByID)
+fn delete_with_folder_path_deletes_strategy_then_empty_folder() {
     let mut s = StratsState::new();
     s.upsert_from_snapshot(&StrategySnapshot {
         strategy_id: 100,
@@ -306,7 +310,8 @@ fn delete_with_folder_path_deletes_strategy_then_empty_folder_like_delphi() {
 }
 
 #[test]
-fn delete_zero_strategy_id_can_delete_empty_folder_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessStratCommand (Strategies.pas:DeleteFolderByPath)
+fn delete_zero_strategy_id_can_delete_empty_folder() {
     let mut s = StratsState::new();
     s.upsert_from_snapshot(&StrategySnapshot {
         strategy_id: 100,
@@ -341,7 +346,8 @@ fn delete_zero_strategy_id_can_delete_empty_folder_like_delphi() {
 }
 
 #[test]
-fn delete_folder_path_keeps_non_empty_folder_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessStratCommand (Strategies.pas:DeleteFolderByPath)
+fn delete_folder_path_keeps_non_empty_folder() {
     let mut s = StratsState::new();
     s.upsert_from_snapshot(&StrategySnapshot {
         strategy_id: 100,
@@ -381,7 +387,8 @@ fn delete_folder_path_keeps_non_empty_folder_like_delphi() {
 }
 
 #[test]
-fn delete_unknown_strategy_without_folder_change_is_ignored_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessStratCommand (Strategies.pas:DeleteStrategyByID)
+fn delete_unknown_strategy_without_folder_change_is_ignored() {
     let mut s = StratsState::new();
     let ev = s.apply(StratCommand::Delete(StratDelete {
         strategy_id: 404,
@@ -577,7 +584,8 @@ fn apply_snapshot_decoded_corrupted_returns_none() {
 }
 
 #[test]
-fn full_snapshot_preserves_missing_strategies_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessStratCommand
+fn full_snapshot_preserves_missing_strategies() {
     use crate::commands::strategy_serializer::{FieldValue, StrategyBatchBuilder};
 
     let mut old_fields = StrategyFields::new();
@@ -626,7 +634,8 @@ fn full_snapshot_preserves_missing_strategies_like_delphi() {
 }
 
 #[test]
-fn checked_sync_full_only_updates_items_like_delphi() {
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessStratCommand
+fn checked_sync_full_only_updates_items() {
     let mut s = StratsState::new();
     // Initially id=1 and id=2 are checked.
     s.upsert(1, 0, "");
