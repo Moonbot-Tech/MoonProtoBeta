@@ -558,6 +558,21 @@ fn s1_drops_plaintext_api_response_with_non_unencrypted_method() {
         "owned decode path drops the same forged plaintext API response"
     );
 
+    // An unparseable / short plaintext API payload is not a valid engine response.
+    // The server never sends such a thing in plaintext, so it is dropped rather
+    // than delivered raw — matching the эталон, where a non-response either fails
+    // the TEngineResponse gate or no-ops in ProcessApiCommand (no state change).
+    let unparseable = vec![0u8; 5];
+    assert!(
+        Client::decode_data_read_int_payload_shared(
+            &mut client.data_read_state,
+            Command::API.to_byte(),
+            &unparseable,
+        )
+        .is_none(),
+        "unparseable plaintext API must be dropped, not delivered raw"
+    );
+
     // Legitimate plaintext responses (public market data / already-zlib candles)
     // still pass through the gate.
     for method in [
@@ -885,14 +900,17 @@ fn owned_data_read_keeps_plain_sliced_payload_allocation() {
     let payload = vec![1, 2, 3, 4, 5];
     let ptr = payload.as_ptr();
 
+    // Generic non-API command: this test pins buffer ownership of the owned
+    // decode path, not API semantics. API now carries the S1 part-2 gate, which
+    // would drop this non-response payload.
     let (cmd, decoded) = Client::decode_data_read_int_payload_owned(
         &mut client.data_read_state,
-        Command::API.to_byte(),
+        Command::Data.to_byte(),
         payload,
     )
     .expect("plain owned payload must decode");
 
-    assert_eq!(cmd, Command::API.to_byte());
+    assert_eq!(cmd, Command::Data.to_byte());
     assert_eq!(decoded, vec![1, 2, 3, 4, 5]);
     assert_eq!(
         decoded.as_ptr(),

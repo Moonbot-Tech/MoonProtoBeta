@@ -219,9 +219,9 @@ impl Client {
     /// S1 (эталон `MoonProtoCommon.pas` DataReadInt): a non-crypted command in
     /// `MoonProtoSensitiveCmds` must be dropped on the client, except `MPC_API`
     /// (a server API response is the only legitimate plaintext sensitive command;
-    /// its method is further checked by the dispatcher). On the server every
-    /// sensitive command including API must be crypted, but the Rust port is a
-    /// client, so the API exception always applies here.
+    /// its method is further checked by [`Self::drop_plaintext_api`]). On the
+    /// server every sensitive command including API must be crypted, but the Rust
+    /// port is a client, so the API exception always applies here.
     fn drop_plaintext_sensitive(real_cmd: u8) -> bool {
         matches!(
             Command::from_byte(real_cmd),
@@ -230,16 +230,21 @@ impl Client {
     }
 
     /// S1 part 2 (эталон `MoonProtoClient.pas` ClientNewData `MPC_API` branch):
-    /// a non-crypted `MPC_API` packet is only legitimate when it is an engine
-    /// *response* whose method is in `UnencryptedMethods` — the reference server
-    /// sends `GetMarketsList` / `UpdateMarketsList` / `RequestCandlesData`
-    /// unencrypted (public market lists, and candle data that is already
-    /// zlib-compressed). A plaintext engine response carrying any other method is
-    /// a spoof: part 1 deliberately lets `MPC_API` through the sensitive gate, so
-    /// the method check is what blocks an attacker from injecting, say, a forged
-    /// balance or order-status response over the authenticity-only transport MAC.
-    /// A payload that does not parse as an engine response is left alone, matching
-    /// the эталон guard which only fires for `ApiCmd is TEngineResponse`.
+    /// the only legitimate plaintext `MPC_API` is an engine *response* whose
+    /// method is in `UnencryptedMethods` — the reference server sends
+    /// `GetMarketsList` / `UpdateMarketsList` / `RequestCandlesData` unencrypted
+    /// (public market lists, and candle data that is already zlib-compressed) and
+    /// crypts everything else. Anything else over plaintext is dropped:
+    /// - a response with a sensitive method → forged balance/order-status spoof;
+    /// - a request or an unparseable payload → never sent plaintext by the server.
+    ///
+    /// This nets out exactly like the эталон, where the only plaintext API that
+    /// ever reaches client state is an `UnencryptedMethods` response: the
+    /// `ClientNewData` gate drops sensitive-method responses, and
+    /// `ProcessApiCommand` is a no-op for a non-response
+    /// (`if cmd.ClassType = TEngineResponse`), so a plaintext request changes
+    /// nothing. Part 1 deliberately lets `MPC_API` past the sensitive gate, so
+    /// this method check is what blocks injection over the authenticity-only MAC.
     fn drop_plaintext_api(payload: &[u8]) -> bool {
         match Self::engine_response_meta_from_payload(payload) {
             Some(meta) => !matches!(
@@ -248,7 +253,7 @@ impl Client {
                     | EngineMethod::UpdateMarketsList
                     | EngineMethod::RequestCandlesData
             ),
-            None => false,
+            None => true,
         }
     }
 

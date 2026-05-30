@@ -306,7 +306,7 @@ fn reader_sends_sliced_ack_without_main_loop_tick() {
         0x00, // DatagramNum = 42
         0x00, // BlockNum = 0
         0x00, // MaxBlockNum = 0
-        Command::API.to_byte(),
+        Command::OrderBook.to_byte(),
         0xDE,
         0xAD,
     ];
@@ -319,7 +319,7 @@ fn reader_sends_sliced_ack_without_main_loop_tick() {
     assert_eq!(ack_payload.len(), slicing::ACK256_WIRE_SIZE);
     assert_eq!(ack_payload[0] & 0x01, 0x01);
     assert_eq!(&ack_payload[32..34], &42u16.to_le_bytes());
-    assert_eq!(events, vec![(Command::API, vec![0xDE, 0xAD])]);
+    assert_eq!(events, vec![(Command::OrderBook, vec![0xDE, 0xAD])]);
     assert_no_inline_reader_events(
         &mut client,
         "single-owner receive drains decoded payload in the same datagram step",
@@ -409,7 +409,7 @@ fn reader_handles_partial_sliced_without_recv_event_backlog() {
         (datagram_num >> 8) as u8,
         0x00, // BlockNum = 0
         0x01, // MaxBlockNum = 1, so this packet is only a partial datagram
-        Command::API.to_byte(),
+        Command::OrderBook.to_byte(),
         0xCA,
         0xFE,
     ];
@@ -448,7 +448,7 @@ fn reader_handles_partial_sliced_without_recv_event_backlog() {
     assert_eq!(&ack_payload2[32..34], &datagram_num.to_le_bytes());
     assert_eq!(
         second_events,
-        vec![(Command::API, vec![0xCA, 0xFE, 0xBE, 0xEF])]
+        vec![(Command::OrderBook, vec![0xCA, 0xFE, 0xBE, 0xEF])]
     );
     assert_eq!(client.total_recv, (packet.len() + packet2.len()) as u64);
 }
