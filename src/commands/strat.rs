@@ -25,7 +25,9 @@ use super::strategy_serializer::{
 use zerocopy::byteorder::little_endian::U64 as LeU64;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
-const BASE_STRAT_CLASS_CMD_ID_BASE: u8 = 0; // TBaseStratCommand
+// parity: TBaseStratCommand ordinal base (head of the CMD_* series below)
+#[allow(dead_code)]
+const BASE_STRAT_CLASS_CMD_ID_BASE: u8 = 0;
 const CMD_SNAPSHOT_REQUEST: u8 = 1;
 const CMD_SNAPSHOT: u8 = 2;
 const CMD_DELETE: u8 = 3;
@@ -471,11 +473,6 @@ pub(crate) fn build_checked_echo(uid: u64, items: &[StratCheckedItem]) -> Vec<u8
         it.write_to(&mut out);
     }
     out
-}
-
-#[allow(dead_code)]
-fn _silence_unused_const() {
-    let _ = BASE_STRAT_CLASS_CMD_ID_BASE;
 }
 
 #[cfg(test)]

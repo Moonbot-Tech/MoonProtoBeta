@@ -7,61 +7,40 @@ pub(crate) struct EngineStreamReader<'a> {
     pos: usize,
 }
 
-#[allow(dead_code)]
 impl<'a> EngineStreamReader<'a> {
     pub(crate) fn new(data: &'a [u8]) -> Self {
         Self { data, pos: 0 }
     }
 
+    #[cfg(test)]
     pub(crate) fn position(&self) -> usize {
         self.pos
-    }
-    pub(crate) fn len(&self) -> usize {
-        self.data.len()
-    }
-    pub(crate) fn is_empty(&self) -> bool {
-        self.data.is_empty()
     }
     pub(crate) fn remaining(&self) -> usize {
         self.data.len().saturating_sub(self.pos)
     }
 
-    pub(crate) fn read_u8(&mut self) -> Option<u8> {
+    pub(crate) fn read_byte(&mut self) -> Option<u8> {
         Some(self.read_zero_tail::<1>()[0])
     }
     pub(crate) fn read_bool(&mut self) -> Option<bool> {
-        self.read_u8().map(|b| b != 0)
-    }
-    pub(crate) fn read_byte(&mut self) -> Option<u8> {
-        self.read_u8()
+        self.read_byte().map(|b| b != 0)
     }
 
-    pub(crate) fn read_u16(&mut self) -> Option<u16> {
+    pub(crate) fn read_word(&mut self) -> Option<u16> {
         Some(u16::from_le_bytes(self.read_zero_tail::<2>()))
     }
-    pub(crate) fn read_word(&mut self) -> Option<u16> {
-        self.read_u16()
-    }
 
-    pub(crate) fn read_i32(&mut self) -> Option<i32> {
+    pub(crate) fn read_int(&mut self) -> Option<i32> {
         Some(i32::from_le_bytes(self.read_zero_tail::<4>()))
     }
-    pub(crate) fn read_int(&mut self) -> Option<i32> {
-        self.read_i32()
-    }
 
-    pub(crate) fn read_i64(&mut self) -> Option<i64> {
+    pub(crate) fn read_int64(&mut self) -> Option<i64> {
         Some(i64::from_le_bytes(self.read_zero_tail::<8>()))
     }
-    pub(crate) fn read_int64(&mut self) -> Option<i64> {
-        self.read_i64()
-    }
 
-    pub(crate) fn read_f64(&mut self) -> Option<f64> {
-        Some(f64::from_le_bytes(self.read_zero_tail::<8>()))
-    }
     pub(crate) fn read_double(&mut self) -> Option<f64> {
-        self.read_f64()
+        Some(f64::from_le_bytes(self.read_zero_tail::<8>()))
     }
 
     pub(crate) fn read_str(&mut self) -> Option<String> {

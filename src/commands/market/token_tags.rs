@@ -1,3 +1,4 @@
+#[cfg(test)]
 use super::{write_str, EngineStreamReader};
 
 /// `TTokenTag` flag set (Vars.pas:64). On the wire it is an i32 bitmask.
@@ -63,8 +64,7 @@ pub struct MarketTokenTags {
 /// `emk_CheckBinanceTags` response: list of (market_name, tags).
 /// Wire-form (MoonProtoEngineServer.pas:324-333):
 ///   `count:i32 + (market_name:string + tags:i32)[count]`.
-#[doc(hidden)]
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn parse_token_tags_response(data: &[u8]) -> Option<Vec<MarketTokenTags>> {
     let mut r = EngineStreamReader::new(data);
     // MarketTokenTags: market_name (string u16+chars) + tags (i32) = at least 6 bytes.
@@ -81,8 +81,7 @@ pub(crate) fn parse_token_tags_response(data: &[u8]) -> Option<Vec<MarketTokenTa
     Some(out)
 }
 
-#[doc(hidden)]
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn build_token_tags_response(items: &[MarketTokenTags]) -> Vec<u8> {
     let mut out = Vec::with_capacity(4 + items.len() * 16);
     out.extend_from_slice(&(items.len() as i32).to_le_bytes());

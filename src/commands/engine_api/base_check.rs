@@ -88,7 +88,7 @@ pub(crate) mod exchange_type_flags {
 /// 2. `server_name` — u16-length UTF-8 string;
 /// 3. `exchange_code` — Delphi `TBotPlatform` ordinal;
 /// 4. `exchange_name` — UI name such as "Binance Futures";
-/// 5. `exchange_type_mask` — bitmask, see [`exchange_type_flags`];
+/// 5. `exchange_type_mask` — bitmask, see `exchange_type_flags`;
 /// 6. `dex_name` — HIP-3 DEX name for Hyperliquid futures, otherwise empty;
 /// 7. `base_currency_name` — "USDT", "BTC", etc.;
 /// 8. `base_currency_code` — Delphi `TBaseCurrency` ordinal;
@@ -106,7 +106,7 @@ pub struct ServerInfo {
     pub exchange_code: Option<ExchangeCode>,
     /// Human-readable exchange name.
     pub exchange_name: Option<String>,
-    /// Available exchange capabilities. See [`exchange_type_flags`].
+    /// Available exchange capabilities. See `exchange_type_flags`.
     pub exchange_type_mask: Option<ExchangeTypeMask>,
     /// HIP-3 DEX name for Hyperliquid futures. Other exchanges usually send an
     /// empty string.

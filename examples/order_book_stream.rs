@@ -49,8 +49,8 @@ fn main() {
 
     while Instant::now() < deadline {
         for event in client.drain_events() {
-            match event {
-                Event::OrderBook(event) => match event {
+            if let Event::OrderBook(event) = event {
+                match event {
                     OrderBookEvent::Apply {
                         market_name,
                         kind,
@@ -100,8 +100,7 @@ fn main() {
                         );
                     }
                     OrderBookEvent::RequestFullNeeded { .. } => {}
-                },
-                _ => {}
+                }
             }
         }
         std::thread::sleep(Duration::from_millis(50));

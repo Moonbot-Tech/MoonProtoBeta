@@ -45,11 +45,13 @@ pub static ERR_EMU_RATE: AtomicU8 = AtomicU8::new(0);
 ///
 /// `0` disables emulation and is the default. This hook is for tests only and
 /// mirrors Delphi `MoonProtoErrEmu`.
+#[doc(hidden)]
 pub fn set_err_emu(percent: u8) {
     ERR_EMU_RATE.store(percent.min(100), Ordering::Relaxed);
 }
 
 /// Per-command packet counters collected while [`set_err_emu`] is non-zero.
+#[doc(hidden)]
 #[derive(Debug, Clone, Default)]
 pub struct ErrEmuCommandDiagnostics {
     pub raw_cmd: u8,
@@ -59,6 +61,7 @@ pub struct ErrEmuCommandDiagnostics {
 }
 
 /// Per-block counters for one incoming `MPC_Sliced` datagram.
+#[doc(hidden)]
 #[derive(Debug, Clone, Default)]
 pub struct ErrEmuSlicedBlockDiagnostics {
     pub block_num: u8,
@@ -67,6 +70,7 @@ pub struct ErrEmuSlicedBlockDiagnostics {
 }
 
 /// Packet-loss counters for one incoming `MPC_Sliced` datagram.
+#[doc(hidden)]
 #[derive(Debug, Clone, Default)]
 pub struct ErrEmuSlicedDatagramDiagnostics {
     pub datagram_num: u16,
@@ -128,6 +132,7 @@ impl ErrEmuSlicedDatagramDiagnostics {
 }
 
 /// Snapshot of client-side packet-loss emulator counters.
+#[doc(hidden)]
 #[derive(Debug, Clone, Default)]
 pub struct ErrEmuDiagnostics {
     pub configured_rate: u8,
@@ -543,6 +548,15 @@ pub(crate) fn err_emu_drop_rate_for_cmd(base_rate: u8, cmd: u8) -> u8 {
     }
 }
 
+pub(crate) fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in bytes {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
+    }
+    hash
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -620,13 +634,4 @@ mod tests {
         );
         assert_eq!(dg.completed_payload_hash, Some(fnv1a64(&payload)));
     }
-}
-
-pub(crate) fn fnv1a64(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325u64;
-    for byte in bytes {
-        hash ^= *byte as u64;
-        hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
-    }
-    hash
 }

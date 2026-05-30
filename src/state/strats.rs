@@ -31,7 +31,7 @@ pub use self::types::{StratEvent, StrategyInfo};
 ///
 /// Full snapshots are applied through `apply_snapshot_decoded(deflate_data)`:
 /// the dispatcher decompresses the raw payload through
-/// [`crate::commands::strategy_serializer`] and applies the decoded batch.
+/// `crate::commands::strategy_serializer` and applies the decoded batch.
 #[derive(Debug, Clone, Default)]
 pub struct StratsState {
     /// `strategy_id -> StrategyInfo`; entries are removed by `TStratDelete`.

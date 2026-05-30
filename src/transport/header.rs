@@ -37,7 +37,7 @@ pub struct ServerMsgHeader {
     pub rnd: u8,
     /// HMAC-CRC32C checksum stored in little-endian order on the wire.
     pub checksum: u32,
-    /// Transport version. Valid packets use [`TRANSPORT_VER`].
+    /// Transport version. Valid packets use `TRANSPORT_VER`.
     pub ver: u8,
     /// MoonProto command byte.
     pub cmd: u8,
@@ -50,7 +50,7 @@ pub(crate) struct ClientMsgHeader {
     pub(crate) rnd: u8,
     /// HMAC-CRC32C checksum stored in little-endian order on the wire.
     pub(crate) checksum: u32,
-    /// Transport version. Valid packets use [`TRANSPORT_VER`].
+    /// Transport version. Valid packets use `TRANSPORT_VER`.
     pub(crate) ver: u8,
     /// MoonProto command byte.
     pub(crate) cmd: u8,
@@ -114,7 +114,7 @@ impl ClientMsgHeader {
 
     /// Serialize this header to the exact 15-byte wire layout.
     #[inline]
-    pub(crate) fn to_bytes(&self) -> [u8; CLIENT_HDR_SIZE] {
+    pub(crate) fn to_bytes(self) -> [u8; CLIENT_HDR_SIZE] {
         let wire = WireClientMsgHeader {
             rnd: self.rnd,
             checksum: LeU32::new(self.checksum),

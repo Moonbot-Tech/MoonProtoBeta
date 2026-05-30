@@ -49,16 +49,7 @@ pub(crate) enum TradeSectionRef<'a> {
     },
 }
 
-#[allow(dead_code)]
 impl<'a> TradeSectionRef<'a> {
-    pub(crate) fn market_index(&self) -> u16 {
-        match self {
-            Self::Trades(rows) | Self::LiqOrders(rows) => rows.market_index(),
-            Self::MMOrders(rows) => rows.market_index(),
-            Self::WatcherFills { market_index, .. } => *market_index,
-        }
-    }
-
     pub(super) fn into_owned(self) -> TradeSection {
         match self {
             Self::Trades(rows) => TradeSection::Trades(rows.collect()),
@@ -94,7 +85,6 @@ pub(crate) struct TradeRows<'a> {
     pos: usize,
 }
 
-#[allow(dead_code)]
 impl<'a> TradeRows<'a> {
     pub(crate) fn market_index(&self) -> u16 {
         self.market_index
@@ -106,10 +96,6 @@ impl<'a> TradeRows<'a> {
 
     pub(crate) fn len(&self) -> usize {
         (self.data.len().saturating_sub(self.pos)) / TRADE_ROW_SIZE
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.len() == 0
     }
 }
 
@@ -142,7 +128,6 @@ pub(crate) struct MMOrderRows<'a> {
     pos: usize,
 }
 
-#[allow(dead_code)]
 impl<'a> MMOrderRows<'a> {
     pub(crate) fn market_index(&self) -> u16 {
         self.market_index
@@ -151,10 +136,6 @@ impl<'a> MMOrderRows<'a> {
     pub(crate) fn len(&self) -> usize {
         let row_size = TRADE_ROW_SIZE + if self.has_taker { 20 } else { 0 };
         (self.data.len().saturating_sub(self.pos)) / row_size
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.len() == 0
     }
 }
 

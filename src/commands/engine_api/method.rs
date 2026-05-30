@@ -2,7 +2,7 @@
 
 /// Engine RPC method identifiers.
 ///
-/// Each method has a corresponding builder in [`super::super::engine_request`]
+/// Each method has a corresponding builder in `super::super::engine_request`
 /// and a `Client::api_*` wrapper. Most wrappers return an `mpsc::Receiver` for
 /// asynchronous handling through the pending-response registry.
 ///
@@ -23,7 +23,7 @@ impl EngineMethod {
     /// `GetMarketsList`: full list of tradable markets.
     ///
     /// The response contains market records parsed by
-    /// [`crate::commands::market::parse_markets_list_response`].
+    /// `crate::commands::market::parse_markets_list_response`.
     pub const GetMarketsList: Self = Self(3);
     /// `UpdateMarketsList`: refresh market prices, funding, mark price, and
     /// correlation prices.
@@ -67,7 +67,7 @@ impl EngineMethod {
     /// [`super::parse_query_hedge_mode_response`].
     pub const QueryHedgeMode: Self = Self(14);
     /// `CheckAPIExpirationTime`: exchange API-key expiration as a Delphi
-    /// `TDateTime`, parsed by [`super::parse_api_expiration_time_response`].
+    /// `TDateTime`, parsed by `super::parse_api_expiration_time_response`.
     pub const CheckAPIExpirationTime: Self = Self(15);
     /// `CheckBinanceTags`: Binance token permission tags.
     pub const CheckBinanceTags: Self = Self(16);
@@ -101,7 +101,7 @@ impl EngineMethod {
     /// `DoTransferAsset`: transfer one asset between exchange wallet kinds.
     pub const DoTransferAsset: Self = Self(29);
     /// `UpdateTransferAssets`: refresh the transferable asset list for one
-    /// exchange wallet kind. Parse with [`super::parse_update_transfer_assets_response`].
+    /// exchange wallet kind. Parse with `super::parse_update_transfer_assets_response`.
     pub const UpdateTransferAssets: Self = Self(30);
     /// `GetCoinCardCandles`: short candle history for a coin-card UI component.
     pub const GetCoinCardCandles: Self = Self(31);

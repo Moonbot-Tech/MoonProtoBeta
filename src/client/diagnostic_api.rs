@@ -6,6 +6,7 @@ impl Client {
     /// This does not affect protocol behavior. FireTest uses it to distinguish
     /// "server did not send", "ErrEmu dropped all retries", and
     /// "Sliced reassembly/parse failed after packets arrived".
+    #[doc(hidden)]
     pub fn err_emu_diagnostics_snapshot(&self) -> ErrEmuDiagnostics {
         let configured_rate = ERR_EMU_RATE.load(std::sync::atomic::Ordering::Relaxed);
         self.metrics
@@ -20,6 +21,7 @@ impl Client {
     }
 
     /// Clear client-side [`set_err_emu`] counters without changing the loss rate.
+    #[doc(hidden)]
     pub fn reset_err_emu_diagnostics(&self) {
         *self.metrics.err_emu_diagnostics.lock().unwrap() = ErrEmuDiagnosticsState::default();
     }

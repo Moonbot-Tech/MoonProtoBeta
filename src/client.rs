@@ -94,6 +94,7 @@ pub use config::{
 };
 #[doc(hidden)]
 pub use diagnostics::ERR_EMU_RATE;
+#[doc(hidden)]
 pub use diagnostics::{
     set_err_emu, ErrEmuCommandDiagnostics, ErrEmuDiagnostics, ErrEmuSlicedBlockDiagnostics,
     ErrEmuSlicedDatagramDiagnostics,

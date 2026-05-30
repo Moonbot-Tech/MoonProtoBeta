@@ -1,7 +1,10 @@
+#[cfg(test)]
 use super::{
     read_corr_market, read_market_with_local_shift, write_corr_market,
-    write_market_with_local_shift, CorrMarket, EngineStreamReader, Market,
+    write_market_with_local_shift, EngineStreamReader,
 };
+use super::{CorrMarket, Market};
+#[cfg(test)]
 use crate::commands::candles::current_local_time_shift_minutes;
 
 /// `emk_GetMarketsList` response: full list of markets + CorrMarkets.
@@ -15,13 +18,12 @@ pub struct MarketsListResponse {
 }
 
 /// Parse `EngineResponse.data` for `emk_GetMarketsList`.
-#[doc(hidden)]
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn parse_markets_list_response(data: &[u8], ver: u16) -> Option<MarketsListResponse> {
     parse_markets_list_response_with_local_shift(data, ver, current_local_time_shift_minutes())
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(super) fn parse_markets_list_response_with_local_shift(
     data: &[u8],
     ver: u16,
@@ -52,13 +54,12 @@ pub(super) fn parse_markets_list_response_with_local_shift(
 }
 
 /// Optional builder for tests.
-#[doc(hidden)]
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn build_markets_list_response(resp: &MarketsListResponse, ver: u16) -> Vec<u8> {
     build_markets_list_response_with_local_shift(resp, ver, current_local_time_shift_minutes())
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(super) fn build_markets_list_response_with_local_shift(
     resp: &MarketsListResponse,
     ver: u16,

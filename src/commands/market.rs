@@ -24,34 +24,31 @@ mod list;
 mod prices;
 mod reader;
 mod token_tags;
+#[cfg(test)]
+pub(crate) use self::indexes::build_markets_indexes_response;
 #[doc(hidden)]
-#[allow(unused_imports)]
-pub(crate) use self::indexes::{build_markets_indexes_response, parse_markets_indexes_response};
+pub(crate) use self::indexes::parse_markets_indexes_response;
 #[cfg(test)]
 use self::list::build_markets_list_response_with_local_shift;
 #[doc(hidden)]
-#[allow(unused_imports)]
-pub(crate) use self::list::{
-    build_markets_list_response, parse_markets_list_response, MarketsListResponse,
-};
-#[doc(hidden)]
-#[allow(unused_imports)]
-pub(crate) use self::prices::{
-    build_markets_prices_response, parse_markets_prices_response, CorrMarketPriceUpdate,
-    MarketPriceUpdate, MarketsPricesResponse,
-};
+pub(crate) use self::list::MarketsListResponse;
+#[cfg(test)]
+pub(crate) use self::list::{build_markets_list_response, parse_markets_list_response};
+#[cfg(test)]
+pub(crate) use self::prices::build_markets_prices_response;
 #[cfg(test)]
 use self::prices::{
     build_markets_prices_response_with_local_shift, parse_markets_prices_response_with_local_shift,
 };
 #[doc(hidden)]
-pub(crate) use self::reader::EngineStreamReader;
-pub use self::token_tags::TokenTags;
+pub(crate) use self::prices::{CorrMarketPriceUpdate, MarketPriceUpdate, MarketsPricesResponse};
 #[doc(hidden)]
-#[allow(unused_imports)]
-pub(crate) use self::token_tags::{
-    build_token_tags_response, parse_token_tags_response, MarketTokenTags,
-};
+pub(crate) use self::reader::EngineStreamReader;
+#[doc(hidden)]
+pub(crate) use self::token_tags::MarketTokenTags;
+pub use self::token_tags::TokenTags;
+#[cfg(test)]
+pub(crate) use self::token_tags::{build_token_tags_response, parse_token_tags_response};
 
 // =============================================================================
 //  TBotPlatform ordinal (Vars.pas:24)
@@ -171,17 +168,6 @@ impl BaseCurrency {
     pub const EMPTY: Self = Self(25);
     pub const UNKNOWN: Self = Self(26);
 
-    #[allow(non_upper_case_globals)]
-    pub const Next2: Self = Self::NEXT2;
-    #[allow(non_upper_case_globals)]
-    pub const Next3: Self = Self::NEXT3;
-    #[allow(non_upper_case_globals)]
-    pub const Next4: Self = Self::NEXT4;
-    #[allow(non_upper_case_globals)]
-    pub const Next5: Self = Self::NEXT5;
-    #[allow(non_upper_case_globals)]
-    pub const Unknown: Self = Self::UNKNOWN;
-
     pub const fn from_byte(b: u8) -> Self {
         Self(b)
     }
@@ -207,15 +193,6 @@ impl ListedType {
     pub const SPOT: Self = Self(1);
     pub const FUTURES: Self = Self(2);
     pub const BOTH: Self = Self(3);
-
-    #[allow(non_upper_case_globals)]
-    pub const Unknown: Self = Self::UNKNOWN;
-    #[allow(non_upper_case_globals)]
-    pub const Spot: Self = Self::SPOT;
-    #[allow(non_upper_case_globals)]
-    pub const Futures: Self = Self::FUTURES;
-    #[allow(non_upper_case_globals)]
-    pub const Both: Self = Self::BOTH;
 }
 
 // =============================================================================
@@ -983,13 +960,12 @@ pub(crate) fn apply_delphi_local_funding_shift(
 /// This mirrors Delphi `WriteMarketToStream`. `FuturesType` is always written,
 /// as in the reference implementation; `ver` is kept only for symmetry with
 /// `read_market`.
-#[doc(hidden)]
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn write_market(out: &mut Vec<u8>, m: &Market, _ver: u16) {
     write_market_with_local_shift(out, m, _ver, current_local_time_shift_minutes())
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(super) fn write_market_with_local_shift(
     out: &mut Vec<u8>,
     m: &Market,
@@ -1101,8 +1077,7 @@ pub(crate) fn read_corr_market(r: &mut EngineStreamReader) -> Option<CorrMarket>
     })
 }
 
-#[doc(hidden)]
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn write_corr_market(out: &mut Vec<u8>, c: &CorrMarket) {
     write_str(out, &c.bn_market_name);
     write_str(out, &c.bn_market_currency);

@@ -251,6 +251,7 @@ impl MoonClient {
     /// enable ErrEmu at all. Mirrors [`crate::Client::err_emu_diagnostics_snapshot`]
     /// on the high-level runtime path so health/stress tests built on
     /// `MoonClient` can read the same counters.
+    #[doc(hidden)]
     pub fn err_emu_diagnostics_snapshot(&self) -> crate::client::ErrEmuDiagnostics {
         let configured_rate = ERR_EMU_RATE.load(Ordering::Relaxed);
         self.err_emu_diagnostics

@@ -203,7 +203,7 @@ impl EmuTradePoint {
 /// Many fields are append-only soft-read fields: depending on server version,
 /// part of the tail may be absent. Delphi `CreateFromStream` fills the missing
 /// tail from current `cfg`; in the Active Lib path this is handled by
-/// [`UICommand::parse_with_client_settings_fallback`].
+/// `UICommand::parse_with_client_settings_fallback`.
 ///
 /// `Default` gives the same ergonomic starting point as Delphi
 /// `TClientSettingsCommand.Create`: create defaults, change the fields the UI

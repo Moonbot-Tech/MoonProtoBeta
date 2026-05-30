@@ -47,38 +47,36 @@ fn main() {
 
     while Instant::now() < deadline {
         for event in client.drain_events() {
-            match event {
-                Event::OrderBook(OrderBookEvent::Apply {
-                    market_name,
-                    kind,
-                    seq,
-                    top,
-                    ..
-                }) => {
-                    let Some(name) = market_name.as_deref() else {
-                        continue;
-                    };
-                    if name != market {
-                        continue;
-                    }
-                    updates += 1;
-                    let bid = top
-                        .bid
-                        .map(|level| format!("{} @ {}", level.quantity, level.rate))
-                        .unwrap_or_else(|| "none".to_string());
-                    let ask = top
-                        .ask
-                        .map(|level| format!("{} @ {}", level.quantity, level.rate))
-                        .unwrap_or_else(|| "none".to_string());
-                    println!(
-                        "[top] {name} {} seq={} bid={} ask={}",
-                        kind_name(kind),
-                        seq,
-                        bid,
-                        ask
-                    );
+            if let Event::OrderBook(OrderBookEvent::Apply {
+                market_name,
+                kind,
+                seq,
+                top,
+                ..
+            }) = event
+            {
+                let Some(name) = market_name.as_deref() else {
+                    continue;
+                };
+                if name != market {
+                    continue;
                 }
-                _ => {}
+                updates += 1;
+                let bid = top
+                    .bid
+                    .map(|level| format!("{} @ {}", level.quantity, level.rate))
+                    .unwrap_or_else(|| "none".to_string());
+                let ask = top
+                    .ask
+                    .map(|level| format!("{} @ {}", level.quantity, level.rate))
+                    .unwrap_or_else(|| "none".to_string());
+                println!(
+                    "[top] {name} {} seq={} bid={} ask={}",
+                    kind_name(kind),
+                    seq,
+                    bid,
+                    ask
+                );
             }
         }
         std::thread::sleep(Duration::from_millis(50));

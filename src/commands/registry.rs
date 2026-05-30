@@ -1,5 +1,6 @@
 //! Command registry — matches MoonProtoBaseStruct.pas:314-348.
-//! Dispatches by (CmdClass << 8) | CmdId to the correct deserializer.
+//! Channel dispatch by command class is handled in `protocol::Command`; this
+//! module holds the shared wire-string codec and the proto command version gate.
 //!
 //! Wire format of every command:
 //!   CmdId (1 byte) + ver (2 bytes u16 LE) + UID (8 bytes u64 LE) + payload
@@ -7,35 +8,6 @@
 //! Version gate: if ver > CURRENT_VER (3), skip the command.
 
 pub(crate) const CURRENT_PROTO_CMD_VER: u16 = 3;
-
-/// Common header for all sub-commands within a channel.
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub(crate) struct CommandHeader {
-    pub cmd_id: u8,
-    pub ver: u16,
-    pub uid: u64,
-}
-
-#[allow(dead_code)]
-impl CommandHeader {
-    /// Read command header from bytes. Returns (header, bytes_consumed).
-    pub(crate) fn from_bytes(data: &[u8]) -> Option<(Self, usize)> {
-        if data.len() < 11 {
-            // 1 + 2 + 8
-            return None;
-        }
-        let cmd_id = data[0];
-        let ver = u16::from_le_bytes([data[1], data[2]]);
-        let uid = u64::from_le_bytes(data[3..11].try_into().unwrap());
-        Some((Self { cmd_id, ver, uid }, 11))
-    }
-
-    /// Check version gate. Returns true if command should be processed.
-    pub(crate) fn is_valid_version(&self) -> bool {
-        self.ver <= CURRENT_PROTO_CMD_VER
-    }
-}
 
 /// Read a UTF-8 string with 2-byte LE length prefix.
 /// Matches Delphi WriteStringToStreamUtf8/ReadStringFromStreamUtf8.

@@ -168,7 +168,7 @@ pub enum TradeSection {
         /// HyperLiquid user address shared by all records in `data`.
         user: [u8; 20],
         /// Raw watcher-fill records, each
-        /// [`crate::commands::trades_stream::WATCHER_FILL_RECORD_SIZE`] bytes.
+        /// `crate::commands::trades_stream::WATCHER_FILL_RECORD_SIZE` bytes.
         data: Vec<u8>,
     },
 }

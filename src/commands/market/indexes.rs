@@ -1,4 +1,6 @@
-use super::{write_str, EngineStreamReader};
+#[cfg(test)]
+use super::write_str;
+use super::EngineStreamReader;
 
 /// `emk_GetMarketsIndexes` response: list of market names in the same order as in `Markets.FList`.
 /// `index` = position in the array (corresponds to `mIndex` in Delphi).
@@ -16,8 +18,7 @@ pub(crate) fn parse_markets_indexes_response(data: &[u8]) -> Option<Vec<String>>
     Some(names)
 }
 
-#[doc(hidden)]
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn build_markets_indexes_response(names: &[String]) -> Vec<u8> {
     let mut out = Vec::with_capacity(4 + names.iter().map(|s| 2 + s.len()).sum::<usize>());
     out.extend_from_slice(&(names.len() as i32).to_le_bytes());

@@ -70,12 +70,12 @@ fn strategy_plain_capacity_hint(deflate_len: usize) -> usize {
 }
 
 /// Parse an already-decompressed flat payload (for the case where decompression was done externally).
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn parse_strategy_batch_plain(data: &[u8]) -> Option<StrategyBatch> {
     parse_strategy_batch_plain_with_schema(data, None)
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn parse_strategy_batch_plain_with_schema(
     data: &[u8],
     schema: Option<&StrategySchema>,

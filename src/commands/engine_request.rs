@@ -318,38 +318,6 @@ pub(crate) fn update_transfer_assets(e_kind: u8) -> Vec<u8> {
     build_engine_request_full(EngineMethod::UpdateTransferAssets, "", &[], &params)
 }
 
-/// `emk_GetOrder(AOrder)` — enum/request wire exists, but the current Delphi
-/// reference server does not implement this request branch and returns
-/// `Unknown method`.
-/// Wire: WriteInt64(uid).
-#[allow(dead_code)]
-pub(crate) fn get_order(uid: u64) -> Vec<u8> {
-    let mut params = Vec::with_capacity(8);
-    params::write_int64(&mut params, uid as i64);
-    build_engine_request_full(EngineMethod::GetOrder, "", &[], &params)
-}
-
-/// `emk_GetBalance(Currency)`: request balance for one currency.
-/// Wire: WriteStr(Currency).
-#[allow(dead_code)]
-pub(crate) fn get_balance(currency: &str) -> Vec<u8> {
-    let mut params = Vec::with_capacity(2 + currency.len());
-    params::write_str(&mut params, currency);
-    build_engine_request_full(EngineMethod::GetBalance, "", &[], &params)
-}
-
-/// `emk_GetOpenOrders` / `emk_GetActiveOrders` — enum/request wire exists, but
-/// the current Delphi reference server does not implement these request branches
-/// and returns `Unknown method`.
-#[allow(dead_code)]
-pub(crate) fn get_open_orders() -> Vec<u8> {
-    build_engine_request(EngineMethod::GetOpenOrders, "", &[])
-}
-#[allow(dead_code)]
-pub(crate) fn get_active_orders() -> Vec<u8> {
-    build_engine_request(EngineMethod::GetActiveOrders, "", &[])
-}
-
 /// `emk_RequestCandlesData`: request chunked candles and wall data.
 ///
 /// The request has no params. The response is chunked and should normally be

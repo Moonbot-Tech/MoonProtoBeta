@@ -254,6 +254,16 @@ fn read_f64_zero_tail(data: &[u8], pos: &mut usize) -> f64 {
     f64::from_le_bytes(read_zero_tail::<8>(data, pos))
 }
 
+fn read_flagged_u8(data: &[u8], pos: &mut usize, flags: u32, bit: &mut u32, default: u8) -> u8 {
+    let present = (flags & (1 << *bit)) != 0;
+    *bit += 1;
+    if present {
+        read_zero_tail::<1>(data, pos)[0]
+    } else {
+        default
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,15 +336,5 @@ mod tests {
         let parsed = parse_balance(3, &payload).unwrap();
 
         assert!(parsed.items.is_empty());
-    }
-}
-
-fn read_flagged_u8(data: &[u8], pos: &mut usize, flags: u32, bit: &mut u32, default: u8) -> u8 {
-    let present = (flags & (1 << *bit)) != 0;
-    *bit += 1;
-    if present {
-        read_zero_tail::<1>(data, pos)[0]
-    } else {
-        default
     }
 }

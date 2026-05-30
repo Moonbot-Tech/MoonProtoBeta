@@ -1,7 +1,9 @@
+#[cfg(test)]
 use super::{
     apply_delphi_local_funding_shift, remove_delphi_local_funding_shift, write_str,
     EngineStreamReader,
 };
+#[cfg(test)]
 use crate::commands::candles::current_local_time_shift_minutes;
 use crate::time::DelphiTime;
 
@@ -49,13 +51,7 @@ pub struct MarketsPricesResponse {
     pub corr_prices: Vec<CorrMarketPriceUpdate>,
 }
 
-#[doc(hidden)]
-#[allow(dead_code)]
-pub(crate) fn parse_markets_prices_response(data: &[u8]) -> Option<MarketsPricesResponse> {
-    parse_markets_prices_response_with_local_shift(data, current_local_time_shift_minutes())
-}
-
-#[allow(dead_code)]
+#[cfg(test)]
 pub(super) fn parse_markets_prices_response_with_local_shift(
     data: &[u8],
     local_shift_minutes: f64,
@@ -113,13 +109,12 @@ pub(super) fn parse_markets_prices_response_with_local_shift(
     })
 }
 
-#[doc(hidden)]
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn build_markets_prices_response(resp: &MarketsPricesResponse) -> Vec<u8> {
     build_markets_prices_response_with_local_shift(resp, current_local_time_shift_minutes())
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(super) fn build_markets_prices_response_with_local_shift(
     resp: &MarketsPricesResponse,
     local_shift_minutes: f64,
