@@ -44,11 +44,11 @@ pub(crate) struct ClientTransportModeState {
 }
 
 impl ClientTransportModeState {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
-    pub fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         self.sent_count_dns = 0;
     }
 

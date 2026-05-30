@@ -74,8 +74,10 @@ fn siphash13_init(key: &MoonKey) -> (u64, u64, u64, u64) {
 }
 
 /// Transport MAC over `data` keyed by `key` (Delphi `CalculateMac32`).
+// Reference one-shot MAC; production uses MacContext.
+#[allow(dead_code)]
 #[inline]
-pub fn calculate_mac32(key: &MoonKey, data: &[u8]) -> u32 {
+pub(crate) fn calculate_mac32(key: &MoonKey, data: &[u8]) -> u32 {
     let (v0, v1, v2, v3) = siphash13_init(key);
     siphash13_finish(v0, v1, v2, v3, data)
 }
@@ -88,7 +90,7 @@ pub fn calculate_mac32(key: &MoonKey, data: &[u8]) -> u32 {
 /// re-deriving the four key words on every packet. The wire result is byte-exact
 /// identical to [`calculate_mac32`].
 #[derive(Clone)]
-pub struct MacContext {
+pub(crate) struct MacContext {
     v0: u64,
     v1: u64,
     v2: u64,
@@ -97,7 +99,7 @@ pub struct MacContext {
 
 impl MacContext {
     /// Create the context for the given key (derives the four keyed words once).
-    pub fn new(key: &MoonKey) -> Self {
+    pub(crate) fn new(key: &MoonKey) -> Self {
         let (v0, v1, v2, v3) = siphash13_init(key);
         Self { v0, v1, v2, v3 }
     }
@@ -105,7 +107,7 @@ impl MacContext {
     /// Compute the MAC for the data. Hot-path replacement for
     /// `calculate_mac32(&key, data)` without re-deriving the key words.
     #[inline]
-    pub fn mac(&self, data: &[u8]) -> u32 {
+    pub(crate) fn mac(&self, data: &[u8]) -> u32 {
         siphash13_finish(self.v0, self.v1, self.v2, self.v3, data)
     }
 }

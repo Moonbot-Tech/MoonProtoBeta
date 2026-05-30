@@ -80,11 +80,11 @@ use moonproto::commands::strategy_serializer::{
 use moonproto::commands::trade::{OrderCompact, OrderWorkerStatus};
 use moonproto::commands::ui::ClientSettingsCommand;
 use moonproto::events::Event;
-use moonproto::protocol::Command;
 use moonproto::state::{
     ApplyResult, BalanceEvent, LastPricePoint, MarkPricePoint, MarketPrice, Order, OrderBookEvent,
     OrderBookKind, OrderEvent, SettingsEvent, StratEvent, TradeHistoryRow, TradesEvent,
 };
+use moonproto::Command;
 use moonproto::{
     parse_key_info, ClientConfig, ConnectConfig, EventDispatcherSnapshot, ExchangeKind,
     ImportedKeys, InitConfig, InitialStrategies, LifecycleEvent, MoonClient,

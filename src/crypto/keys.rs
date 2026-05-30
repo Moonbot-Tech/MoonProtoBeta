@@ -55,7 +55,7 @@ fn generate_sub_key(master_key: &MoonKey, token: u64) -> MoonKey {
 /// when they change.
 ///
 /// A-14 (docs_api iter-2): doc comment expanded.
-pub fn generate_sub_keys(master_key: &MoonKey, server_token: u64) -> (MoonKey, MoonKey) {
+pub(crate) fn generate_sub_keys(master_key: &MoonKey, server_token: u64) -> (MoonKey, MoonKey) {
     let key_true = generate_sub_key(master_key, server_token ^ XOR_CONST_ENCODE);
     let key_false = generate_sub_key(master_key, server_token ^ XOR_CONST_DECODE);
     // Client (ServerSide=false): encode with keys[false], decode with keys[true]
@@ -75,7 +75,7 @@ pub fn generate_sub_keys(master_key: &MoonKey, server_token: u64) -> (MoonKey, M
 /// the real packet integrity protection is `calculate_mac32` (HMAC-CRC32C).
 ///
 /// A-14 (docs_api iter-2): doc comment expanded.
-pub fn mix_values(key: &MoonKey, token1: u64, token2: u64) -> u64 {
+pub(crate) fn mix_values(key: &MoonKey, token1: u64, token2: u64) -> u64 {
     let token1_bytes = token1.to_le_bytes();
     let token2_bytes = token2.to_le_bytes();
 

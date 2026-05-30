@@ -9,12 +9,12 @@ const SLIDER_LEN: usize = 64; // MPSliderLen = 64 words
 const SLIDER_LEN_BITS: u64 = (SLIDER_LEN as u64) * 64; // 4096 bits
 
 #[derive(Clone)]
-pub struct Slider {
-    pub bit_field: [u64; SLIDER_LEN],
-    pub start_num: u64,
-    pub epoch: u8,
-    pub has_new_data: bool,
-    pub r_count: i32,
+pub(crate) struct Slider {
+    pub(crate) bit_field: [u64; SLIDER_LEN],
+    pub(crate) start_num: u64,
+    pub(crate) epoch: u8,
+    pub(crate) has_new_data: bool,
+    pub(crate) r_count: i32,
 }
 
 impl Default for Slider {
@@ -24,7 +24,7 @@ impl Default for Slider {
 }
 
 impl Slider {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             bit_field: [0u64; SLIDER_LEN],
             start_num: 0,
@@ -37,7 +37,7 @@ impl Slider {
     /// Check if message number is NEW (not a replay).
     /// Returns true = new message, false = duplicate/out-of-window.
     /// Matches TMoonProtoSlider.CheckRevd exactly.
-    pub fn check_revd(&mut self, num: u64) -> bool {
+    pub(crate) fn check_revd(&mut self, num: u64) -> bool {
         let n = num >> 6; // div 64
         let prev = self.start_num >> 6;
         let diff = (n as i64) - (prev as i64) - (SLIDER_LEN as i64) + 1;
@@ -87,7 +87,7 @@ impl Slider {
     /// Build ACK half — takes TAIL half of the window, trims trailing zeros.
     /// Returns (ack_start, words). Matches TMoonProtoSlider.BuildAckHalf.
     /// Note: in single-threaded context, epoch/lock-free logic is trivial.
-    pub fn build_ack_half(&self) -> (u64, Vec<u64>) {
+    pub(crate) fn build_ack_half(&self) -> (u64, Vec<u64>) {
         const HALF: usize = SLIDER_LEN / 2; // 32
         let start_idx = SLIDER_LEN - HALF; // 32
 

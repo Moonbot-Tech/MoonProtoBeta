@@ -16,12 +16,15 @@ use log::warn;
 use zerocopy::byteorder::little_endian::{U16 as LeU16, U64 as LeU64};
 use zerocopy::{FromBytes, Immutable, KnownLayout, Unaligned};
 
-pub const CRYPTO_HEADER_SIZE: usize = std::mem::size_of::<WireCryptoHeader>();
+pub(crate) const CRYPTO_HEADER_SIZE: usize = std::mem::size_of::<WireCryptoHeader>();
 const _: [(); 12] = [(); CRYPTO_HEADER_SIZE];
 
 /// TMoonProtoCryptoHeader — 12 bytes packed
 #[derive(Debug, Clone, Copy)]
-pub struct CryptoHeader {
+pub(crate) struct CryptoHeader {
+    // Parsed from the wire (random padding) but not read downstream; kept to map
+    // the exact 12-byte TMoonProtoCryptoHeader layout. Do not delete/reorder.
+    #[allow(dead_code)]
     pub rnd: u16,
     pub msg_num: u64,
     pub cmd: u8,
@@ -47,7 +50,7 @@ impl CryptoHeader {
         }
     }
 
-    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+    pub(crate) fn from_bytes(data: &[u8]) -> Option<Self> {
         if data.len() < CRYPTO_HEADER_SIZE {
             return None;
         }
@@ -64,7 +67,7 @@ impl CryptoHeader {
 /// `decode_cipher` — cached `Aes128Gcm` (B-V2-03), built from
 /// `MPKeys[not ServerSide]`. For the client (ServerSide=false) this is `MPKeys[true]`.
 /// Stored in `Client::decode_cipher` and updated on handshake.
-pub fn decrypt_command(
+pub(crate) fn decrypt_command(
     decode_cipher: &Aes128Gcm,
     encrypted_data: &[u8],
     slider: &mut Slider,

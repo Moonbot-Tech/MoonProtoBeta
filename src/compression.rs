@@ -60,7 +60,7 @@ thread_local! {
 ///   and breaks valid live `OrderBook` streams.
 /// - For a **back-ref**: before copying, the back-ref hashes positions `< dst` (NOT `dst + t`!), then
 ///   `inc(dst, t); last_hashed := dst - 1` — the copied t bytes are NOT hashed in this iteration.
-pub fn synlz_decompress(src: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn synlz_decompress(src: &[u8]) -> Option<Vec<u8>> {
     if src.len() < 2 {
         return None;
     }
@@ -249,13 +249,13 @@ fn synlz_decompress_inner(
 /// Decompress MoonProto packet (MPDecompress).
 /// MPCompressionAlgo=1 uses SynLZ. Algo 2 = raw deflate. Algo 3 = RLE+SynLZ.
 /// Currently only SynLZ (algo 1) is implemented — this is what the server uses.
-pub fn mp_decompress(data: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn mp_decompress(data: &[u8]) -> Option<Vec<u8>> {
     synlz_decompress(data)
 }
 
 /// SynLZ compression — byte-exact port of SynLZcompress1pas.
 /// Source: mormot.core.base.pas:10501-10633
-pub fn synlz_compress(src: &[u8]) -> Vec<u8> {
+pub(crate) fn synlz_compress(src: &[u8]) -> Vec<u8> {
     let mut dst = Vec::with_capacity(src.len() + src.len() / 8 + 32);
     synlz_compress_impl(src, &mut dst);
     dst
@@ -403,7 +403,7 @@ fn synlz_compress_inner(
 /// Compress for MoonProto (MPCompress).
 /// Returns compressed data and size, or None if compression doesn't help (< 5% savings).
 /// Matches MoonProtoDataStruct.pas:283-316 (MPCompressionAlgo=1 = SynLZ).
-pub fn mp_compress(data: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn mp_compress(data: &[u8]) -> Option<Vec<u8>> {
     if data.len() <= 64 {
         return None;
     }

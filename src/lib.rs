@@ -121,20 +121,28 @@
 // they are sent infrequently over the runtime channel, so boxing the large
 // variant would only add indirection without a hot-path benefit.
 #![allow(clippy::large_enum_variant)]
+// Cleanup driver: flag every `pub` item not reachable from outside the crate —
+// these should be `pub(crate)`. Shrinks the public surface to the real API.
+#![warn(unreachable_pub)]
 
 mod api_pending;
 mod app_queue;
 pub mod client;
 pub mod commands;
-pub mod compression;
-pub mod crypto;
 pub mod events;
 pub mod key_import;
 pub mod ntp;
-pub mod protocol;
 pub mod state;
 pub mod time;
-pub mod transport;
+
+// Low-level wire machinery: kept crate-internal. The high-level API
+// (`client` / `events` / `state`) is the application model; the byte-level
+// layers below are an implementation detail. Specific types the public API
+// needs (`MoonKey`, `Command`, `TransportMode`, …) are re-exported below.
+mod compression;
+mod crypto;
+mod protocol;
+mod transport;
 
 pub use client::{
     ActiveSubscriptions, Client, ClientConfig, ClosePositionParams, CoinCardCandlesTicket,
@@ -156,6 +164,12 @@ pub use commands::{
     ResetProfitKind, SpotMarketKind, StrategyActiveMode, StrategyFields, StrategyKind,
     StrategySnapshot, TokenTags, TriggerAction,
 };
+// Parameter types named by public high-level handle methods but defined in
+// command submodules (`MoonTrade::move_all_sells`/`move_all_buys`,
+// `MoonCandles::request_coin_card`, `Client::ui_emu_trades`).
+pub use commands::candles::DeepHistoryKind;
+pub use commands::trade::{MoveAllBuysParams, MoveAllSellsParams};
+pub use commands::ui::EmuTradePoint;
 pub use events::{
     ArbEvent, EngineActionEvent, EngineActionKind, Event, EventDispatcher, EventDispatcherSnapshot,
     MissingOrderStatusRequest, StrategySnapshotReply, WatcherFillEvent, WatcherFillsEvent,

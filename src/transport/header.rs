@@ -2,11 +2,11 @@ use zerocopy::byteorder::little_endian::{U32 as LeU32, U64 as LeU64};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 /// Current MoonProto transport header version.
-pub const TRANSPORT_VER: u8 = 3;
+pub(crate) const TRANSPORT_VER: u8 = 3;
 /// Size in bytes of the server-to-client UDP transport header.
-pub const SERVER_HDR_SIZE: usize = 7;
+pub(crate) const SERVER_HDR_SIZE: usize = 7;
 /// Size in bytes of the client-to-server UDP transport header.
-pub const CLIENT_HDR_SIZE: usize = 15;
+pub(crate) const CLIENT_HDR_SIZE: usize = 15;
 
 #[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C, packed)]
@@ -45,17 +45,17 @@ pub struct ServerMsgHeader {
 
 /// Client -> Server header (15 bytes)
 #[derive(Debug, Clone, Copy)]
-pub struct ClientMsgHeader {
+pub(crate) struct ClientMsgHeader {
     /// Random byte used as the seed for outer obfuscation.
-    pub rnd: u8,
+    pub(crate) rnd: u8,
     /// HMAC-CRC32C checksum stored in little-endian order on the wire.
-    pub checksum: u32,
+    pub(crate) checksum: u32,
     /// Transport version. Valid packets use [`TRANSPORT_VER`].
-    pub ver: u8,
+    pub(crate) ver: u8,
     /// MoonProto command byte.
-    pub cmd: u8,
+    pub(crate) cmd: u8,
     /// Client identifier carried in client-to-server packets.
-    pub client_id: u64,
+    pub(crate) client_id: u64,
 }
 
 // The small header parsers/serializers are called per-packet across a cross-crate
@@ -102,7 +102,7 @@ impl ClientMsgHeader {
     /// The checksum is initialized to zero; packing code fills it after the
     /// payload has been appended.
     #[inline]
-    pub fn new(cmd: u8, client_id: u64) -> Self {
+    pub(crate) fn new(cmd: u8, client_id: u64) -> Self {
         Self {
             rnd: rand_byte(),
             checksum: 0,
@@ -114,7 +114,7 @@ impl ClientMsgHeader {
 
     /// Serialize this header to the exact 15-byte wire layout.
     #[inline]
-    pub fn to_bytes(&self) -> [u8; CLIENT_HDR_SIZE] {
+    pub(crate) fn to_bytes(&self) -> [u8; CLIENT_HDR_SIZE] {
         let wire = WireClientMsgHeader {
             rnd: self.rnd,
             checksum: LeU32::new(self.checksum),
@@ -130,8 +130,11 @@ impl ClientMsgHeader {
     /// Parse a client-to-server header from the beginning of `data`.
     ///
     /// Returns `None` when `data` is shorter than `CLIENT_HDR_SIZE`.
+    // Only the transport/PMTU/service-command unit tests parse a client header;
+    // production never reads its own outgoing header back. Kept for those tests.
+    #[allow(dead_code)]
     #[inline]
-    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+    pub(crate) fn from_bytes(data: &[u8]) -> Option<Self> {
         if data.len() < CLIENT_HDR_SIZE {
             return None;
         }

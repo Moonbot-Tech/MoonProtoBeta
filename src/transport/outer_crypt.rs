@@ -28,7 +28,7 @@ fn next_keystream(s0: &mut u64, s1: &mut u64) -> u64 {
 /// of times/sec at peak) across a cross-crate boundary from `moonproto`. Audit
 /// B-V2-04. Do NOT remove without switching to LTO-fat.
 #[inline]
-pub fn outer_light_crypt(buf: &mut [u8], key: &MoonKey) {
+pub(crate) fn outer_light_crypt(buf: &mut [u8], key: &MoonKey) {
     if buf.len() <= 1 {
         return;
     }

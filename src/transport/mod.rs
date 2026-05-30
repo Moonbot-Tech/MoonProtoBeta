@@ -53,9 +53,11 @@ mod outer_crypt;
 use log::warn;
 
 pub(crate) use extended::ClientTransportModeState;
-pub use header::{ClientMsgHeader, ServerMsgHeader, TRANSPORT_VER};
-pub use mac::{calculate_mac32, MacContext};
-pub use outer_crypt::outer_light_crypt;
+pub(crate) use header::{ClientMsgHeader, TRANSPORT_VER};
+// `ServerMsgHeader` is re-exported from the crate root (`moonproto::ServerMsgHeader`).
+pub use header::ServerMsgHeader;
+pub(crate) use mac::MacContext;
+pub(crate) use outer_crypt::outer_light_crypt;
 
 /// MoonProto transport key: 16 bytes used by the MAC and outer obfuscation
 /// layer.
@@ -110,8 +112,12 @@ pub(crate) fn pack_client_packet(
 /// bytes inside the already allocated `Vec` without a second allocation. At
 /// 10K pps this saves 10K alloc/dealloc pairs per second and about 5-15 MB/s of
 /// allocator pressure.
+// Convenience wrapper that builds a fresh `MacContext` per call. Production uses
+// `transport_unpack_with_mac` with a cached context; this one-shot form is kept
+// for the transport unit tests and as the documented simple entry point.
+#[allow(dead_code)]
 #[inline]
-pub fn transport_unpack(
+pub(crate) fn transport_unpack(
     mac_key: &MoonKey,
     raw: &[u8],
     mask_ver: u8,
@@ -125,7 +131,7 @@ pub fn transport_unpack(
 ///
 /// `mac_key` is still required for `outer_light_crypt` (xoshiro128+ keystream).
 #[inline]
-pub fn transport_unpack_with_mac(
+pub(crate) fn transport_unpack_with_mac(
     mac_ctx: &MacContext,
     mac_key: &MoonKey,
     raw: &[u8],

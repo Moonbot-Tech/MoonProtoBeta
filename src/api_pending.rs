@@ -30,7 +30,7 @@ use crate::commands::engine_api::EngineResponse;
 
 /// Default request/response timeout — 12 seconds. Matches Delphi
 /// `TMoonProtoEngine.FTimeout = 12000` (MoonProtoEngine.pas) for `SendAndWait`.
-pub const DEFAULT_PENDING_TIMEOUT_MS: i64 = 12_000;
+pub(crate) const DEFAULT_PENDING_TIMEOUT_MS: i64 = 12_000;
 const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 
 struct PendingEntry {
@@ -47,14 +47,14 @@ struct PendingState {
 ///
 /// Thread-safe (internally `Arc<Mutex>`). `Arc<ApiPending>` can be cloned and passed to any threads.
 ///
-pub struct ApiPending {
+pub(crate) struct ApiPending {
     state: Mutex<PendingState>,
 }
 
 impl ApiPending {
     /// Convenience: build an already-wrapped `Arc<ApiPending>`. Most callers
     /// want shared access (the Client holds one, the receive phase gets a cloned Arc).
-    pub fn new_arc() -> Arc<Self> {
+    pub(crate) fn new_arc() -> Arc<Self> {
         Arc::new(Self::default())
     }
 
@@ -106,7 +106,7 @@ impl ApiPending {
     ///
     /// If a registration already existed for the same `uid`, the old sender is dropped (the old
     /// receiver gets "channel closed").
-    pub fn register(&self, uid: u64) -> mpsc::Receiver<EngineResponse> {
+    pub(crate) fn register(&self, uid: u64) -> mpsc::Receiver<EngineResponse> {
         self.register_with_timeout(uid, Self::default_timeout())
     }
 
@@ -132,7 +132,7 @@ impl ApiPending {
     /// Returns `Some(resp)` if the UID is **not registered** (the response arrived "on its own",
     /// with no active waiter — the consumer may handle it via `on_data`).
     /// Returns `None` if the UID was found and the response was sent to the receiver.
-    pub fn dispatch(&self, resp: EngineResponse) -> Option<EngineResponse> {
+    pub(crate) fn dispatch(&self, resp: EngineResponse) -> Option<EngineResponse> {
         let mut state = self.lock_state();
         let now = Instant::now();
         let Some(entry) = state.map.remove(&resp.request_uid) else {
@@ -185,7 +185,7 @@ impl ApiPending {
     }
 
     /// Remove a wait (e.g. on timeout) to free the sender and avoid accumulating the map.
-    pub fn remove(&self, uid: u64) {
+    pub(crate) fn remove(&self, uid: u64) {
         self.lock_state().map.remove(&uid);
     }
 
@@ -217,14 +217,14 @@ impl ApiPending {
 
     /// Number of active waits.
     #[cfg(test)]
-    pub fn pending_count(&self) -> usize {
+    pub(crate) fn pending_count(&self) -> usize {
         let _ = self.cleanup_expired(true);
         self.lock_state().map.len()
     }
 
     /// Clear all waits (e.g. on reconnect).
     #[cfg(test)]
-    pub fn clear(&self) {
+    pub(crate) fn clear(&self) {
         self.lock_state().map.clear();
     }
 }

@@ -21,17 +21,17 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 /// TMoonProtoHello — 56 bytes packed record
 /// Layout: Rnd(16) + MixTS(8) + TimeStamp(8) + ServerToken(8) + PeerMix(8) + AppToken(8)
-pub const HELLO_SIZE: usize = std::mem::size_of::<WireHello>();
+pub(crate) const HELLO_SIZE: usize = std::mem::size_of::<WireHello>();
 const _: [(); 56] = [(); HELLO_SIZE];
 
 #[derive(Debug, Clone)]
-pub struct Hello {
-    pub rnd: [u8; 16],
-    pub mix_ts: u64,
-    pub timestamp: f64, // TDateTime = Double
-    pub server_token: u64,
-    pub peer_mix: u64,
-    pub app_token: u64,
+pub(crate) struct Hello {
+    pub(crate) rnd: [u8; 16],
+    pub(crate) mix_ts: u64,
+    pub(crate) timestamp: f64, // TDateTime = Double
+    pub(crate) server_token: u64,
+    pub(crate) peer_mix: u64,
+    pub(crate) app_token: u64,
 }
 
 #[repr(C, packed)]
@@ -46,7 +46,7 @@ struct WireHello {
 }
 
 impl Hello {
-    pub fn new(client_token: u64, app_token: u64) -> Self {
+    pub(crate) fn new(client_token: u64, app_token: u64) -> Self {
         let mut rng = rand::thread_rng();
         let mut rnd = [0u8; 16];
         rng.fill(&mut rnd);
@@ -87,14 +87,14 @@ impl Hello {
     }
 
     /// Pack: TimeStamp bits plus MixTS, matching `TMoonProtoHello.pack`.
-    pub fn to_bytes_packed(&self) -> [u8; HELLO_SIZE] {
+    pub(crate) fn to_bytes_packed(&self) -> [u8; HELLO_SIZE] {
         let mut buf = [0u8; HELLO_SIZE];
         buf.copy_from_slice(self.to_wire().as_bytes());
         buf
     }
 
     /// Unpack from bytes (reverses timestamp packing).
-    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+    pub(crate) fn from_bytes(data: &[u8]) -> Option<Self> {
         if data.len() < HELLO_SIZE {
             return None;
         }
@@ -107,7 +107,7 @@ impl Hello {
 /// Build the Hello packet ready to send (encrypted with MasterKey).
 /// AAD = `{client_id, MPC_Hello}` (9 bytes, see [`handshake_aad`]).
 /// `timestamp_dt` — TDateTime from the caller (client.rs::delphi_now includes the NTP offset).
-pub fn build_hello_packet(
+pub(crate) fn build_hello_packet(
     master_key: &MoonKey,
     client_id: u64,
     client_token: &mut u64,

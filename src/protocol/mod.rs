@@ -5,11 +5,11 @@
 //! use `MoonClient`, events, and snapshots. Use these primitives only for
 //! protocol diagnostics or a custom transport/runtime tool.
 
-pub mod control;
-pub mod crypted;
-pub mod handshake;
-pub mod slicing;
-pub mod slider;
+pub(crate) mod control;
+pub(crate) mod crypted;
+pub(crate) mod handshake;
+pub(crate) mod slicing;
+pub(crate) mod slider;
 
 /// MoonProto command ordinal matching Delphi `TMoonProtoCommand`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]

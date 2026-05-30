@@ -63,7 +63,7 @@ pub(crate) fn missing_preview(flags: &[u8; 32], blocks_count: usize) -> String {
 
 /// TMoonProtoSliceHeader — 4 bytes packed
 #[derive(Debug, Clone, Copy)]
-pub struct SliceHeader {
+pub(crate) struct SliceHeader {
     pub datagram_num: u16,
     pub block_num: u8,
     pub max_block_num: u8,
@@ -77,7 +77,7 @@ struct WireSliceHeader {
     max_block_num: u8,
 }
 
-pub const SLICE_HEADER_SIZE: usize = std::mem::size_of::<WireSliceHeader>();
+pub(crate) const SLICE_HEADER_SIZE: usize = std::mem::size_of::<WireSliceHeader>();
 const _: [(); 4] = [(); SLICE_HEADER_SIZE];
 
 impl SliceHeader {
@@ -97,7 +97,7 @@ impl SliceHeader {
         }
     }
 
-    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+    pub(crate) fn from_bytes(data: &[u8]) -> Option<Self> {
         if data.len() < SLICE_HEADER_SIZE {
             return None;
         }
@@ -106,7 +106,7 @@ impl SliceHeader {
         ))
     }
 
-    pub fn write_to(self, out: &mut Vec<u8>) {
+    pub(crate) fn write_to(self, out: &mut Vec<u8>) {
         out.extend_from_slice(self.to_wire().as_bytes());
     }
 }
@@ -120,9 +120,12 @@ struct BlockSpan {
 
 /// Tracks all blocks of one datagram being received
 #[derive(Debug)]
-pub struct SlicedData {
+pub(crate) struct SlicedData {
+    // Parsed from the wire and set at construction, but not read downstream;
+    // kept to mirror TMoonProtoSlicedData's DatagramNum field. Do not delete.
+    #[allow(dead_code)]
     pub datagram_num: u16,
-    pub blocks_count: usize, // MaxBlockNum + 1
+    pub(crate) blocks_count: usize, // MaxBlockNum + 1
     // Delphi keeps received slices in a sorted list and does not reject
     // BlockNum > MaxBlockNum. Keep the same machine effect: ACK the actual
     // BlockNum, insert by BlockNum if not a duplicate, and use Count ==
@@ -132,12 +135,12 @@ pub struct SlicedData {
     max_present_block_num: u8,
     received_count: usize,
     completion_returned: bool,
-    pub ack_flags: [u8; 32], // TMoonProtoFlag256 = set of byte = 32 bytes
-    pub dup_count: u8,       // DupCount (matches IntStruct.pas:539)
+    pub(crate) ack_flags: [u8; 32], // TMoonProtoFlag256 = set of byte = 32 bytes
+    pub(crate) dup_count: u8,       // DupCount (matches IntStruct.pas:539)
 }
 
 impl SlicedData {
-    pub fn new(datagram_num: u16, max_block_num: u8) -> Self {
+    pub(crate) fn new(datagram_num: u16, max_block_num: u8) -> Self {
         let count = (max_block_num as usize) + 1;
         Self {
             datagram_num,
@@ -153,7 +156,7 @@ impl SlicedData {
     }
 
     /// Receive a piece. Returns true if this completes the datagram.
-    pub fn receive_piece(&mut self, block_num: u8, payload: &[u8]) -> bool {
+    pub(crate) fn receive_piece(&mut self, block_num: u8, payload: &[u8]) -> bool {
         let idx = block_num as usize;
 
         // Set ACK flag (set of byte semantics: byte index = block_num / 8, bit = block_num % 8)
@@ -177,14 +180,14 @@ impl SlicedData {
         self.received_count == self.blocks_count
     }
 
-    pub fn is_complete(&self) -> bool {
+    pub(crate) fn is_complete(&self) -> bool {
         self.received_count == self.blocks_count
     }
 
     /// Reassemble the complete message. Returns (cmd, data).
     /// Block 0: SliceHeader already stripped by caller, first byte = cmd, rest = data.
     /// Block N>0: SliceHeader already stripped, all = data.
-    pub fn assemble(&self) -> Option<(u8, Vec<u8>)> {
+    pub(crate) fn assemble(&self) -> Option<(u8, Vec<u8>)> {
         if !self.is_complete() {
             return None;
         }
@@ -237,12 +240,12 @@ struct WireSlicedAck {
 }
 
 /// ACK256 wire format: 32 bytes flags + 2 bytes DatagramNum = 34 bytes
-pub const ACK256_WIRE_SIZE: usize = std::mem::size_of::<WireSlicedAck>();
+pub(crate) const ACK256_WIRE_SIZE: usize = std::mem::size_of::<WireSlicedAck>();
 const _: [(); 34] = [(); ACK256_WIRE_SIZE];
-pub type SlicedPayloadResult = Option<(u16, u8, Vec<u8>, u8, usize)>;
-pub type SlicedProcessResult = (SlicedPayloadResult, [u8; ACK256_WIRE_SIZE]);
+pub(crate) type SlicedPayloadResult = Option<(u16, u8, Vec<u8>, u8, usize)>;
+pub(crate) type SlicedProcessResult = (SlicedPayloadResult, [u8; ACK256_WIRE_SIZE]);
 
-pub fn build_ack_bytes(flags: &[u8; 32], datagram_num: u16) -> [u8; ACK256_WIRE_SIZE] {
+pub(crate) fn build_ack_bytes(flags: &[u8; 32], datagram_num: u16) -> [u8; ACK256_WIRE_SIZE] {
     let mut buf = [0u8; ACK256_WIRE_SIZE];
     let wire = WireSlicedAck {
         flags: *flags,
@@ -252,7 +255,7 @@ pub fn build_ack_bytes(flags: &[u8; 32], datagram_num: u16) -> [u8; ACK256_WIRE_
     buf
 }
 
-pub fn parse_ack_bytes(payload: &[u8]) -> Option<([u8; 32], u16)> {
+pub(crate) fn parse_ack_bytes(payload: &[u8]) -> Option<([u8; 32], u16)> {
     if payload.len() < ACK256_WIRE_SIZE {
         return None;
     }
@@ -262,8 +265,8 @@ pub fn parse_ack_bytes(payload: &[u8]) -> Option<([u8; 32], u16)> {
 
 /// Receiving state: tracks all in-progress datagrams.
 /// Matches TMoonProtoClient.Receiving: TDictionary<TDatagramNum, TMoonProtoSlicedData>
-pub struct SlicingReceiver {
-    pub receiving: HashMap<u16, SlicedData>,
+pub(crate) struct SlicingReceiver {
+    pub(crate) receiving: HashMap<u16, SlicedData>,
     /// B-09 fix: fixed LAST_RECVD_BUF_SIZE — typed as an array,
     /// `Box<[..; N]>` so we don't put 16KB on the stack (Client creation doesn't blow the stack),
     /// but the size is known at compile-time → bounds checks are eliminated.
@@ -288,7 +291,7 @@ impl Default for SlicingReceiver {
 }
 
 impl SlicingReceiver {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             receiving: HashMap::new(),
             last_recvd_ts: Box::new([NEVER_RECEIVED_MS; LAST_RECVD_BUF_SIZE]),
@@ -297,13 +300,13 @@ impl SlicingReceiver {
         }
     }
 
-    pub fn set_last_online(&mut self, ms: i64) {
+    pub(crate) fn set_last_online(&mut self, ms: i64) {
         self.last_online = ms;
     }
 
     /// Matches `TMoonProtoClient.DoCleanUp`: reader-side cleanup is driven by
     /// accepted incoming packets and runs before command-specific handling.
-    pub fn do_cleanup(&mut self) {
+    pub(crate) fn do_cleanup(&mut self) {
         if (self.last_cleaned_received - self.last_online).abs() > 5000 {
             self.clear_old();
             self.last_cleaned_received = self.last_online;
@@ -328,7 +331,7 @@ impl SlicingReceiver {
     /// dictionary and returns the completed `TMoonProtoSlicedData` equivalent.
     /// The caller must run `DataReadInt` first and only then remove the datagram
     /// from `Receiving`, like `TMoonProtoBaseNet.OnNewSliced`.
-    pub fn on_new_sliced(&mut self, payload: &[u8]) -> SlicedProcessResult {
+    pub(crate) fn on_new_sliced(&mut self, payload: &[u8]) -> SlicedProcessResult {
         let trace = trace_enabled();
         let hdr = match SliceHeader::from_bytes(payload) {
             Some(h) => h,
@@ -463,7 +466,7 @@ impl SlicingReceiver {
     /// Clean old incomplete datagrams (called periodically).
     /// Matches TMoonProtoClient.ClearOldReceiving: for every removed datagram Delphi calls
     /// `IsNewDatagram`, which also refreshes the timestamp bucket.
-    pub fn clear_old(&mut self) {
+    pub(crate) fn clear_old(&mut self) {
         let last_online = self.last_online;
         let last_recvd_ts = &mut self.last_recvd_ts;
         self.receiving.retain(|&k, _| {
