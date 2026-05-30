@@ -77,5 +77,5 @@ if let Some(snapshot) = client.snapshot() {
 `EngineMethod` remains public because events and diagnostics can name server
 methods. Raw request builders and protocol receivers are crate-internal Active
 Lib machinery. Public code should not wait on raw `Receiver<EngineResponse>` or
-pick a protocol-pump duration; that was the old finite-pump model and is not the
-application API.
+pick a protocol-loop duration; the application API is the owned `MoonClient`
+runtime plus events/snapshots.
