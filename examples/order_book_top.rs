@@ -50,7 +50,6 @@ fn main() {
             if let Event::OrderBook(OrderBookEvent::Apply {
                 market_name,
                 kind,
-                seq,
                 top,
                 ..
             }) = event
@@ -70,13 +69,7 @@ fn main() {
                     .ask
                     .map(|level| format!("{} @ {}", level.quantity, level.rate))
                     .unwrap_or_else(|| "none".to_string());
-                println!(
-                    "[top] {name} {} seq={} bid={} ask={}",
-                    kind_name(kind),
-                    seq,
-                    bid,
-                    ask
-                );
+                println!("[top] {name} {} bid={} ask={}", kind_name(kind), bid, ask);
             }
         }
         std::thread::sleep(Duration::from_millis(50));
