@@ -4,12 +4,12 @@ use super::{
     FieldValue, StrategyBatch, StrategyFields, StrategySnapshot, TID_BOOL, TID_BYTE, TID_DOUBLE,
     TID_INT32, TID_INT64, TID_SINGLE, TID_STRING, TID_UINT32, TID_UINT64, TID_WORD, TID_ZERO_FLAG,
 };
+use crate::commands::inflate::read_inflate_to_vec;
 use crate::commands::registry::decode_utf8_delphi;
 use crate::commands::strategy_schema::StrategySchema;
 use crate::commands::strict_read::{read_i32, read_u16, read_u64, read_u8};
 use flate2::read::DeflateDecoder;
 use std::collections::HashMap;
-use std::io::Read;
 use std::sync::Arc;
 
 /// Parse from a DEFLATE-compressed payload (as it arrives in `TStratSnapshot.data`).
@@ -36,8 +36,11 @@ pub(crate) fn parse_strategy_batch_with_schema_field_types(
     schema_field_types: Option<&HashMap<String, u8>>,
 ) -> Option<StrategyBatch> {
     let mut decoder = DeflateDecoder::new(deflate_bytes);
-    let mut decompressed = Vec::with_capacity(strategy_plain_capacity_hint(deflate_bytes.len()));
-    decoder.read_to_end(&mut decompressed).ok()?;
+    let decompressed = read_inflate_to_vec(
+        &mut decoder,
+        strategy_plain_capacity_hint(deflate_bytes.len()),
+    )
+    .ok()?;
     parse_strategy_batch_plain_with_schema_field_types(&decompressed, schema_field_types)
 }
 
@@ -50,8 +53,11 @@ where
     F: FnMut(StrategySnapshot),
 {
     let mut decoder = DeflateDecoder::new(deflate_bytes);
-    let mut decompressed = Vec::with_capacity(strategy_plain_capacity_hint(deflate_bytes.len()));
-    decoder.read_to_end(&mut decompressed).ok()?;
+    let decompressed = read_inflate_to_vec(
+        &mut decoder,
+        strategy_plain_capacity_hint(deflate_bytes.len()),
+    )
+    .ok()?;
     parse_strategy_batch_plain_for_each_with_schema_field_types(
         &decompressed,
         schema_field_types,

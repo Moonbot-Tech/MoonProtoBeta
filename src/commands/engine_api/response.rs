@@ -1,6 +1,7 @@
 //! `TEngineResponse` parser.
 
 use super::{read_i32_zero_tail, read_u64_zero_tail, read_u8_zero_tail, EngineMethod};
+use crate::commands::inflate::read_inflate_to_vec;
 use crate::commands::registry::read_string;
 use flate2::read::DeflateDecoder;
 
@@ -69,11 +70,9 @@ pub(crate) fn parse_engine_response(data: &[u8]) -> Option<EngineResponse> {
         let end = pos + available.min(sz);
         let raw = &data[pos..end];
         if is_compressed {
-            use std::io::Read;
             let mut decoder = DeflateDecoder::new(raw);
-            let mut decompressed = Vec::new();
-            match decoder.read_to_end(&mut decompressed) {
-                Ok(_) => decompressed,
+            match read_inflate_to_vec(&mut decoder, raw.len().saturating_mul(8)) {
+                Ok(decompressed) => decompressed,
                 Err(e) => {
                     log::warn!(target: "moonproto::engine_api",
                         "DEFLATE decompress failed for EngineResponse uid={}: {}",

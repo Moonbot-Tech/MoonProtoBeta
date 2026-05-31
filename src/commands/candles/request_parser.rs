@@ -5,8 +5,8 @@ use super::{
     WireDeepPricePack, WireDeepPricePackOld, DEEP_PRICE_PACK_OLD_SIZE, DEEP_PRICE_PACK_SIZE,
     MINS_IN_DAY, REQUEST_CANDLES_MARKET_MIN_SIZE,
 };
+use crate::commands::inflate::read_inflate_to_vec;
 use flate2::read::ZlibDecoder;
-use std::io::Read;
 use zerocopy::FromBytes;
 /// Parse merged `emk_RequestCandlesData` bytes.
 ///
@@ -50,11 +50,11 @@ pub(crate) fn parse_request_candles_data_response_with_local_shift(
     local_time_shift_minutes: f64,
 ) -> Option<Vec<RequestCandlesMarket>> {
     let mut decoder = ZlibDecoder::new(zipped_data);
-    let mut data = Vec::new();
-    if let Err(e) = decoder.read_to_end(&mut data) {
-        log::warn!(target: "moonproto::candles", "RequestCandlesData zlib decode failed: {e}");
-        return None;
-    }
+    let data = read_inflate_to_vec(&mut decoder, zipped_data.len().saturating_mul(12))
+        .map_err(|e| {
+            log::warn!(target: "moonproto::candles", "RequestCandlesData zlib decode failed: {e}");
+        })
+        .ok()?;
 
     let mut pos = 0usize;
     let legacy_count = read_i32(&data, &mut pos)?;
@@ -143,11 +143,11 @@ pub(crate) fn parse_request_candles_data_response_partial_with_local_shift(
     local_time_shift_minutes: f64,
 ) -> Option<Vec<RequestCandlesMarket>> {
     let mut decoder = ZlibDecoder::new(zipped_data);
-    let mut data = Vec::new();
-    if let Err(e) = decoder.read_to_end(&mut data) {
-        log::warn!(target: "moonproto::candles", "RequestCandlesData zlib decode failed: {e}");
-        return None;
-    }
+    let data = read_inflate_to_vec(&mut decoder, zipped_data.len().saturating_mul(12))
+        .map_err(|e| {
+            log::warn!(target: "moonproto::candles", "RequestCandlesData zlib decode failed: {e}");
+        })
+        .ok()?;
 
     let mut pos = 0usize;
     let legacy_count = read_i32(&data, &mut pos)?;

@@ -14,6 +14,7 @@ pub(crate) mod balance;
 pub(crate) mod candles;
 pub(crate) mod engine_api;
 pub(crate) mod engine_request;
+pub(crate) mod inflate;
 pub(crate) mod market;
 pub(crate) mod order_book;
 pub(crate) mod registry;

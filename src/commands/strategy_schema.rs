@@ -5,8 +5,7 @@
 //! The Rust active library stores the decoded schema so consumers do not carry
 //! hardcoded strategy field UI metadata.
 
-use std::io::Read;
-
+use super::inflate::read_inflate_to_vec;
 use flate2::read::DeflateDecoder;
 
 use super::strategy_serializer::{
@@ -220,8 +219,8 @@ impl StrategySchema {
     /// Parse raw-deflate `TStratSchema.Data`.
     pub fn parse_compressed(deflate_bytes: &[u8]) -> Option<Self> {
         let mut decoder = DeflateDecoder::new(deflate_bytes);
-        let mut plain = Vec::new();
-        decoder.read_to_end(&mut plain).ok()?;
+        let plain =
+            read_inflate_to_vec(&mut decoder, deflate_bytes.len().saturating_mul(16)).ok()?;
         Self::parse_plain(&plain)
     }
 
