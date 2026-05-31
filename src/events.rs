@@ -608,6 +608,7 @@ impl EventDispatcher {
         &self.settings
     }
 
+    #[doc(hidden)]
     /// Seed Delphi `cfg` fallback for old `TClientSettingsCommand` packets.
     ///
     /// Current servers send the full v3 settings snapshot. This matters for

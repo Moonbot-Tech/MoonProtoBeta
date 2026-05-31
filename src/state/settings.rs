@@ -39,9 +39,9 @@ pub struct SettingsState {
     /// Delphi `CreateFromStream` fills missing append-only tail fields from
     /// current `cfg` when an old packet does not contain them. After every full
     /// settings snapshot this fallback is refreshed automatically; before the
-    /// first snapshot, application code may seed it through
-    /// [`SettingsState::set_client_settings_fallback`].
-    pub client_settings_fallback: ClientSettingsCommand,
+    /// first snapshot, low-level dispatcher tests/tools may seed it through
+    /// the hidden fallback helper.
+    client_settings_fallback: ClientSettingsCommand,
     /// Current leverage-management settings, if received.
     pub lev_manage: Option<LevManage>,
     /// Whether market-maker orders are currently subscribed.
@@ -104,6 +104,7 @@ impl SettingsState {
 
     /// Seed Delphi `cfg` fallback used while parsing old `TClientSettingsCommand`
     /// payloads with missing append-only tail fields.
+    #[doc(hidden)]
     pub fn set_client_settings_fallback(&mut self, fallback: ClientSettingsCommand) {
         self.client_settings_fallback = fallback;
     }

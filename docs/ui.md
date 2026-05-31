@@ -74,7 +74,7 @@ if let Some(mut settings) = client
     .snapshot()
     .and_then(|state| state.settings().client_settings.clone())
 {
-    settings.x_sell = true;
+    settings.x_sell = 50;
     client.settings().send(settings)?;
 }
 client.settings().set_mm_orders_subscription(true)?;
@@ -134,6 +134,33 @@ effect.
 
 Low-level builders remain internal diagnostics/compatibility machinery; normal
 applications should use the typed methods above.
+
+### Leverage Management
+
+Leverage management is a separate settings snapshot, just like in MoonBot. A
+terminal normally edits the latest retained leverage settings and sends the
+whole snapshot back:
+
+```rust
+if let Some(mut lev) = client
+    .snapshot()
+    .and_then(|state| state.settings().lev_manage.clone())
+{
+    lev.auto_fix_lev = true;
+    lev.fix_lev = 5;
+    client.settings().manage_leverage(&lev)?;
+}
+```
+
+The wire UID and command-version fields are not user input. The runtime writes a
+fresh UID and Delphi's current leverage command version when it queues the
+command.
+
+### Arbitrage Activation
+
+`notify_arb_activation(...)` is the MoonBot arb-valid-until notification path.
+Incoming notifications update `snapshot().settings().arb_valid_until_time()` and
+emit `SettingsEvent::ArbActivated`.
 
 ### Chart Trade Emulator
 
