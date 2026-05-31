@@ -47,11 +47,21 @@ pub enum StratEvent {
     /// Full snapshot (`Full=true`) was decoded and applied.
     SnapshotFull {
         server_epoch: u64,
+        /// Compressed snapshot payload length. The raw bytes are kept only in
+        /// diagnostics builds for FireTest/custom decoder dumps.
+        raw_len: usize,
+        #[cfg(feature = "diagnostics")]
+        #[doc(hidden)]
         raw_data: Vec<u8>,
     },
     /// Partial snapshot (`Full=false`) was decoded and applied.
     SnapshotPartial {
         server_epoch: u64,
+        /// Compressed snapshot payload length. The raw bytes are kept only in
+        /// diagnostics builds for FireTest/custom decoder dumps.
+        raw_len: usize,
+        #[cfg(feature = "diagnostics")]
+        #[doc(hidden)]
         raw_data: Vec<u8>,
     },
     /// Result of `TStratDelete`.
@@ -109,8 +119,8 @@ impl StratEvent {
     /// Raw snapshot payload length for diagnostics without touching the bytes.
     pub fn snapshot_raw_len(&self) -> Option<usize> {
         match self {
-            StratEvent::SnapshotFull { raw_data, .. }
-            | StratEvent::SnapshotPartial { raw_data, .. } => Some(raw_data.len()),
+            StratEvent::SnapshotFull { raw_len, .. }
+            | StratEvent::SnapshotPartial { raw_len, .. } => Some(*raw_len),
             StratEvent::SchemaApplied { raw_len, .. }
             | StratEvent::SchemaParseFailed { raw_len } => Some(*raw_len),
             _ => None,

@@ -2183,12 +2183,14 @@ fn record_event(
         Event::Strat(StratEvent::SnapshotFull {
             server_epoch,
             raw_data,
+            ..
         }) => {
             record_strategy_snapshot(&mut st, event_no, "SnapshotFull", *server_epoch, raw_data);
         }
         Event::Strat(StratEvent::SnapshotPartial {
             server_epoch,
             raw_data,
+            ..
         }) => {
             record_strategy_snapshot(
                 &mut st,

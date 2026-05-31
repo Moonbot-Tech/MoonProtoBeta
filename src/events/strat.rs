@@ -6,6 +6,7 @@
 use super::{Event, EventDispatcher};
 use crate::commands::strat::StratCommand;
 use crate::protocol::Command;
+use crate::state::StratEvent;
 
 impl EventDispatcher {
     pub(super) fn client_new_data_strat(&mut self, payload: &[u8], out: &mut Vec<Event>) {
@@ -24,50 +25,42 @@ impl EventDispatcher {
             | StratCommand::Unknown { .. } => return,
             _ => {}
         }
-        let ev = self.strats.apply(cmd_v);
-        // Active library: auto-decode strategy snapshot raw bytes
-        // into `StratsState`. Previously the app had to call
-        // `strats.apply_snapshot_decoded(raw_data)` itself; now the library
-        // does it on SnapshotFull/Partial events.
-        match &ev {
-            crate::state::StratEvent::SnapshotFull {
-                server_epoch,
-                raw_data,
-            } => {
-                if self
-                    .strats
-                    .apply_snapshot_decoded_with_mode_in_place(raw_data, true)
-                    .is_none()
-                {
-                    log::warn!(
-                        target: "moonproto::events",
-                        "failed to decode full strategy snapshot payload ({} bytes)",
-                        raw_data.len()
-                    );
-                    return;
-                }
-                self.strats.last_server_epoch = *server_epoch;
+        if let StratCommand::Snapshot(snap) = cmd_v {
+            let raw_len = snap.data.len();
+            if self
+                .strats
+                .apply_snapshot_decoded_with_mode_in_place(&snap.data, snap.full)
+                .is_none()
+            {
+                log::warn!(
+                    target: "moonproto::events",
+                    "failed to decode {} strategy snapshot payload ({} bytes)",
+                    if snap.full { "full" } else { "partial" },
+                    raw_len
+                );
+                return;
             }
-            crate::state::StratEvent::SnapshotPartial {
-                server_epoch,
-                raw_data,
-            } => {
-                if self
-                    .strats
-                    .apply_snapshot_decoded_with_mode_in_place(raw_data, false)
-                    .is_none()
-                {
-                    log::warn!(
-                        target: "moonproto::events",
-                        "failed to decode partial strategy snapshot payload ({} bytes)",
-                        raw_data.len()
-                    );
-                    return;
+            self.strats.last_server_epoch = snap.server_epoch;
+            let ev = if snap.full {
+                StratEvent::SnapshotFull {
+                    server_epoch: snap.server_epoch,
+                    raw_len,
+                    #[cfg(feature = "diagnostics")]
+                    raw_data: snap.data,
                 }
-                self.strats.last_server_epoch = *server_epoch;
-            }
-            _ => {}
+            } else {
+                StratEvent::SnapshotPartial {
+                    server_epoch: snap.server_epoch,
+                    raw_len,
+                    #[cfg(feature = "diagnostics")]
+                    raw_data: snap.data,
+                }
+            };
+            out.push(Event::Strat(ev));
+            return;
         }
+
+        let ev = self.strats.apply(cmd_v);
         out.push(Event::Strat(ev));
     }
 }

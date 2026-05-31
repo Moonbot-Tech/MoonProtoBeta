@@ -91,21 +91,26 @@ impl StratsState {
 
     /// Apply one decoded strategy command.
     ///
-    /// For `TStratSnapshot`, this returns the raw snapshot event; the active
-    /// dispatcher performs the serializer decode/apply and advances
-    /// `last_server_epoch` only after that succeeds, matching Delphi
-    /// `ProcessStratCommand`.
+    /// For `TStratSnapshot`, this returns a snapshot notification. The active
+    /// dispatcher decodes/applies the serializer payload before publishing the
+    /// event and advances `last_server_epoch` only after that succeeds,
+    /// matching Delphi `ProcessStratCommand`.
     pub fn apply(&mut self, cmd: StratCommand) -> StratEvent {
         match cmd {
             StratCommand::Snapshot(snap) => {
+                let raw_len = snap.data.len();
                 if snap.full {
                     StratEvent::SnapshotFull {
                         server_epoch: snap.server_epoch,
+                        raw_len,
+                        #[cfg(feature = "diagnostics")]
                         raw_data: snap.data,
                     }
                 } else {
                     StratEvent::SnapshotPartial {
                         server_epoch: snap.server_epoch,
+                        raw_len,
+                        #[cfg(feature = "diagnostics")]
                         raw_data: snap.data,
                     }
                 }
