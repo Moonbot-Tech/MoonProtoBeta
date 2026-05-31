@@ -158,10 +158,11 @@ fn encrypted_server_hello(
     master_key: &MoonKey,
     cmd: Command,
     client_id: u64,
+    mix_ts: u64,
     server_token: u64,
     peer_app_token: u64,
 ) -> Vec<u8> {
-    let mut hello = handshake::Hello::new(0x1111, peer_app_token);
+    let mut hello = handshake::Hello::new(mix_ts, peer_app_token);
     hello.server_token = server_token;
     hello.app_token = peer_app_token;
     hello.timestamp = delphi_now();
@@ -648,6 +649,7 @@ fn reader_handles_who_are_you_imfriend_without_main_loop_tick() {
         &client.cfg.master_key,
         Command::WhoAreYou,
         client.cfg.client_id,
+        client.client_token.wrapping_add(3),
         server_token,
         peer_app_token,
     );
@@ -727,6 +729,7 @@ fn reader_who_are_you_uses_writer_updated_hello_token() {
         &client.cfg.master_key,
         Command::WhoAreYou,
         client.cfg.client_id,
+        client.client_token.wrapping_add(3),
         server_token,
         peer_app_token,
     );
@@ -753,6 +756,49 @@ fn reader_who_are_you_uses_writer_updated_hello_token() {
 }
 
 #[test]
+fn reader_drops_who_are_you_when_mix_ts_is_not_latest_hello_plus_three() {
+    let _err_emu_guard = err_emu_test_guard();
+    let (server_sock, client_addr, mut client) = inline_reader_test_client();
+    server_sock
+        .set_read_timeout(Some(Duration::from_millis(30)))
+        .unwrap();
+    let token_before = client.client_token;
+    client.start_hello_wait(HelloWaitState::PrimaryHelloCold, 0);
+
+    let who = encrypted_server_hello(
+        &client.cfg.master_key,
+        Command::WhoAreYou,
+        client.cfg.client_id,
+        client.client_token.wrapping_add(2),
+        0x2222_3333_4444_5555,
+        0xAAAA_BBBB_CCCC_DDDD,
+    );
+    let packet = pack_server_packet(&client.cfg.mac_key, Command::WhoAreYou, &who);
+    server_sock.send_to(&packet, client_addr).unwrap();
+
+    pump_inline_reader(&mut client);
+
+    assert_eq!(client.server_token, 0);
+    assert_eq!(client.peer_app_token, 0);
+    assert_eq!(
+        client.client_token, token_before,
+        "stale/foreign WhoAreYou must not build ImFriend or advance ClientToken",
+    );
+
+    let mut raw = [0u8; 256];
+    let err = server_sock
+        .recv_from(&mut raw)
+        .expect_err("stale/foreign WhoAreYou must not produce ImFriend");
+    assert!(
+        matches!(
+            err.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ),
+        "unexpected recv error: {err}"
+    );
+}
+
+#[test]
 fn reader_handles_fine_auth_done_without_recv_event_backlog() {
     let _err_emu_guard = err_emu_test_guard();
     let server_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -774,6 +820,7 @@ fn reader_handles_fine_auth_done_without_recv_event_backlog() {
         &client.cfg.master_key,
         Command::Fine,
         client.cfg.client_id,
+        client.client_token,
         0x2222,
         0x3333,
     );
@@ -820,6 +867,7 @@ fn reader_drops_late_who_are_you_after_server_token_is_set() {
         &client.cfg.master_key,
         Command::WhoAreYou,
         client.cfg.client_id,
+        client.client_token.wrapping_add(3),
         0xAAAA,
         0xBBBB,
     );
@@ -980,6 +1028,7 @@ fn nat_binding_change_rebinds_with_hello_again_from_new_socket() {
         &client.cfg.master_key,
         Command::Fine,
         client.cfg.client_id,
+        client.client_token,
         server_token,
         0xAAAA_BBBB_CCCC_DDDD,
     );

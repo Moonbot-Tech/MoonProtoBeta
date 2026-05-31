@@ -108,7 +108,12 @@ fn encrypted_hello(
     server_token: u64,
     peer_app_token: u64,
 ) -> Vec<u8> {
-    let mut hello = handshake::Hello::new(client.client_token, client.app_token);
+    let mix_ts = if cmd == Command::WhoAreYou {
+        client.client_token.wrapping_add(3)
+    } else {
+        client.client_token
+    };
+    let mut hello = handshake::Hello::new(mix_ts, client.app_token);
     hello.server_token = server_token;
     hello.app_token = peer_app_token;
     hello.timestamp = delphi_now();
@@ -127,6 +132,9 @@ fn apply_reader_handshake_payload(client: &mut Client, cmd: Command, payload: &[
 
     match cmd {
         Command::WhoAreYou => {
+            if hello.mix_ts != client.client_token.wrapping_add(3) {
+                return false;
+            }
             let _encrypted_imfriend = ProtocolCore { client }.apply_hello_and_build_imfriend(hello);
             true
         }

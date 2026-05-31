@@ -120,6 +120,15 @@ impl ProtocolCore<'_> {
             Command::WhoAreYou.to_byte(),
             payload,
         ) {
+            // Freshness check: WhoAreYou must answer our latest primary Hello.
+            // The server echoes Hello.MixTS after `Inc(MixTS, 3)`, while
+            // `client_token` remains the MixTS of the last sent Hello until
+            // ImFriend is built. A replayed/foreign WhoAreYou can decrypt, but
+            // must not move the session to the server token it carries.
+            if hello.mix_ts != self.client.client_token.wrapping_add(3) {
+                let _ = (recv_bytes, timestamp_ms);
+                return Duration::ZERO;
+            }
             let encrypted = self.apply_hello_and_build_imfriend(hello);
             self.client
                 .start_hello_wait(HelloWaitState::PrimaryImFriendSent, timestamp_ms);
