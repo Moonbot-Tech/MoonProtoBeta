@@ -39,22 +39,30 @@ pub struct BalancesState {
     pub global: GlobalBalance,
     /// Last applied balance-packet epoch. Diagnostic; per-market epoch gating
     /// lives on `Market` (Delphi `m.LastBalanceEpoch`).
+    #[doc(hidden)]
     pub last_epoch: u16,
 }
 
 #[derive(Debug, Clone)]
 pub enum BalanceEvent {
     /// Full snapshot applied: N markets received rows, missing rows were reset.
-    SnapshotApplied { count: usize, epoch: u16 },
+    SnapshotApplied {
+        count: usize,
+        #[doc(hidden)]
+        epoch: u16,
+    },
     /// Incremental update applied.
     IncrementalApplied {
         count: usize,
+        #[doc(hidden)]
         epoch: u16,
         global_changed: bool,
     },
     /// Command was recognized, but Delphi does not apply it to balance state.
+    #[doc(hidden)]
     Ignored { cmd_id: u8, epoch: u16 },
     /// Epoch check rejected the packet as stale.
+    #[doc(hidden)]
     EpochStale { incoming: u16, last: u16 },
 }
 

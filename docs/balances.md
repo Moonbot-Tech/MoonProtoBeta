@@ -19,13 +19,11 @@ a separate balance row. This mirrors Delphi: balance packets mutate the live
 - `asset_balance`, `asset_balance_full`;
 - `total_profit_b`, `total_profit_l`, `total_profit_s`;
 - `max_value`, `leverage_x`, `position_type` (`PositionType::Cross` /
-  `PositionType::Isolated`);
-- `balance_hash`, `last_balance_epoch`.
+  `PositionType::Isolated`).
 
-`BalancesState` remains the account-level/low-level balance view:
+`BalancesState` remains the account-level balance view:
 
-- global account totals in BTC equivalent;
-- per-market epoch tracking so stale incremental rows are ignored.
+- global account totals in BTC equivalent.
 
 Transferable wallet assets are a different state model. They are not chart
 position fields. Use `client.balances().refresh_transfer_assets()` and
@@ -112,19 +110,15 @@ use moonproto::{Event, state::BalanceEvent};
 
 for event in client.drain_events() {
     match event {
-        Event::Balance(BalanceEvent::SnapshotApplied { count, epoch }) => {
-            println!("full balance snapshot: rows={count} epoch={epoch}");
+        Event::Balance(BalanceEvent::SnapshotApplied { count, .. }) => {
+            println!("full balance snapshot: rows={count}");
         }
         Event::Balance(BalanceEvent::IncrementalApplied {
             count,
-            epoch,
             global_changed,
+            ..
         }) => {
-            println!("balance increment: rows={count} epoch={epoch} global={global_changed}");
-        }
-        Event::Balance(BalanceEvent::Ignored { .. })
-        | Event::Balance(BalanceEvent::EpochStale { .. }) => {
-            // Diagnostic states. The read model remains valid.
+            println!("balance increment: rows={count} global={global_changed}");
         }
         _ => {}
     }
@@ -133,6 +127,8 @@ for event in client.drain_events() {
 
 `SnapshotApplied.count` and `IncrementalApplied.count` are counts of rows that
 actually changed the read model after market filtering and stale-epoch checks.
+Stale/ignored packet notifications are hidden diagnostics; the read model
+remains valid and UI code does not drive recovery from them.
 
 ## Transferable Assets
 
