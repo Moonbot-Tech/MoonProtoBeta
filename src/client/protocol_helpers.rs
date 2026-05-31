@@ -223,13 +223,17 @@ impl Client {
     // Private API responses are dropped too, but AFTER optional decompression
     // (their method id lives inside the EngineResponse body). Only the public
     // market feed (identical to the exchange's own) stays plaintext.
-    // AEAD over that feed would buy little: this is a thin client that executes
-    // nothing off the feed, so forging/replaying it only affects what is
-    // displayed; a replayed tick is cosmetic (the next live packet overwrites the
-    // tail) and keyless forgery is already a 2^32 brute force. The cost would be a
-    // per-packet nonce+tag on the highest-volume path, for data that is public
-    // anyway. Integrity is enforced where it changes account state (the AES-GCM
-    // gate).
+    // AEAD over that feed would not shrink the attacker's worst case: the same
+    // on-path attacker can drop packets, and for a leveraged client a dropped
+    // channel is the dominant, unpreventable harm (loss of position control ->
+    // liquidation). Feed forge/replay is strictly weaker — account/order integrity
+    // stays under AES-GCM (the core executes, not the display), the display
+    // self-corrects on the next live packet unless the attacker also drops (the
+    // dominant-harm regime again), and the residual is bounded well below a
+    // liquidation; keyless forgery is anyway a 2^32 brute force. So the per-packet
+    // nonce+tag cost on the highest-volume public path buys nothing the drop does
+    // not already grant. Integrity is enforced where it changes account state (the
+    // AES-GCM gate).
     fn drop_plaintext_sensitive(real_cmd: u8) -> bool {
         matches!(
             Command::from_byte(real_cmd),

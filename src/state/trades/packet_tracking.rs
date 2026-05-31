@@ -148,16 +148,19 @@ impl TradesState {
         // applied on arrival; a duplicate is applied too — for a feed, "see it
         // late" beats dropping it or waiting for strict order.
         // Anti-replay is not warranted here:
-        //  - thin client: nothing is executed off the feed, so a replay only
-        //    affects display — a stale tail is overwritten by the next live
-        //    packet, at most leaving cosmetic duplicate rows in the local trade
-        //    history; no executable price or account state changes;
-        //  - a sustained effect would also require dropping the live feed (an
-        //    availability denial — the dominant harm), which a window cannot stop;
-        //  - packet_num is a u16 that wraps within seconds on a live stream, and
-        //    the feed carries no wider authenticated counter; across the wrap a
-        //    replayed number is indistinguishable from a legitimately recurring
-        //    one, so a window would either drop real packets or miss the replay.
+        //  - it would not shrink the attacker's worst case: the same on-path
+        //    attacker can drop packets, and a dropped channel (loss of position
+        //    control -> liquidation) is the dominant, unpreventable harm. A replay
+        //    is strictly weaker — nothing is executed off the feed (account/order
+        //    state is server-side under AES-GCM), the display self-corrects on the
+        //    next live packet, and sustaining a stale view needs dropping the live
+        //    feed anyway (the dominant-harm regime); the residual is bounded well
+        //    below a liquidation;
+        //  - and it would not even work cleanly: packet_num is a u16 that wraps
+        //    within seconds on a live stream with no wider authenticated counter,
+        //    so across the wrap a replayed number is indistinguishable from a
+        //    legitimately recurring one — a window would drop real packets or miss
+        //    the replay.
         // Replay of account-state commands is handled separately by the crypted
         // slider (its msg_num is a non-wrapping u64 inside AEAD).
 

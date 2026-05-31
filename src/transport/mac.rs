@@ -19,14 +19,16 @@ use super::MoonKey;
 /// money/orders/strategies are authenticated separately by AES-128-GCM (128-bit
 /// tag + replay window). Defeating this tag lets an attacker tamper only with the
 /// plaintext transport: the public market feed (display) and the Ping control
-/// channel, which carries transient operational hints — incoming-status time
-/// correction, PMTU, send-rate. This is a thin client: it executes no trade off
-/// either, and order/account integrity stays under AES-128-GCM regardless. Those
-/// effects are transient (the next live Ping or feed packet overrides them), and
-/// sustaining any of them requires also dropping the live channel — i.e. denying
-/// availability, the dominant harm (loss of position control -> liquidation).
-/// Judge this width by the actual attack gain here — keyless forge is already
-/// impractical, replay is unaffected by width — not the reflex that 32 < 128.
+/// channel (operational hints — incoming-status time correction, PMTU, send-rate).
+/// This does not shrink the attacker's worst case: the same on-path attacker can
+/// drop packets, and for a leveraged client a dropped channel is the dominant,
+/// unpreventable harm (loss of position control -> liquidation). Tampering here is
+/// strictly weaker — order/account integrity stays under AES-128-GCM (the core
+/// executes, not the display), the effect self-corrects on the next live packet
+/// unless the attacker also drops (the dominant-harm regime again), and the
+/// residual is bounded well below a liquidation. Judge this width by that actual
+/// gain — keyless forge is already impractical, replay is unaffected by width —
+/// not the reflex that 32 < 128.
 /// One SipHash round (`SIPROUND`), operating in place on the four state words.
 macro_rules! sipround {
     ($v0:ident, $v1:ident, $v2:ident, $v3:ident) => {{
