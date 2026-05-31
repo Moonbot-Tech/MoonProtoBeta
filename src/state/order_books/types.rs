@@ -131,11 +131,13 @@ pub enum OrderBookEvent {
     /// Low-level control event: send `emk_RequestOrderBookFull` (throttle already
     /// applied). `EventDispatcher::dispatch_into_active` consumes this internally
     /// before invoking application callbacks.
+    #[doc(hidden)]
     RequestFullNeeded {
         market_index: u16,
         kind: OrderBookKind,
     },
     /// Packet was ignored (stale / no full yet / cache).
+    #[doc(hidden)]
     Ignored {
         market_index: u16,
         kind: OrderBookKind,

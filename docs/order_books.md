@@ -35,7 +35,6 @@ for event in client.drain_events() {
         market_name,
         kind,
         is_full,
-        seq,
         top,
         ..
     }) = event {
@@ -45,7 +44,6 @@ for event in client.drain_events() {
             top.bid,
             top.ask,
             is_full,
-            seq,
         );
     }
 }
@@ -55,11 +53,10 @@ for event in client.drain_events() {
 For UI code, use the resolved `market_name`, typed `kind`, and `top` fields.
 For the full book, read the retained `OrderBookSnapshot` by market name.
 
-`RequestFullNeeded` is a low-level recovery signal. `MoonClient` consumes it
-internally and requests a fresh full book automatically.
-Diagnostic `Ignored` events are also kept out of the high-level `MoonClient`
-event sink. Application code observes the maintained book snapshot and typed
-applied/failed events.
+Recovery control and ignored-packet notifications are hidden diagnostic
+telemetry. `MoonClient` consumes them internally and requests fresh full books
+automatically. Application code observes the maintained book snapshot and
+applied top-of-book events.
 
 ## Reading Current Book
 
