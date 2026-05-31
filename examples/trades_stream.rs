@@ -46,17 +46,16 @@ fn main() {
         println!("[subscribe] all-trades, retained all markets");
     }
 
-    let mut packets = 0u64;
+    let mut signals = 0u64;
     let mut trades = 0u64;
-    let mut gaps = 0u64;
     let mut printed = 0u64;
     let deadline = Instant::now() + Duration::from_secs(watch_secs);
 
     while Instant::now() < deadline {
         for event in client.drain_events() {
             match event {
-                Event::Trade(TradesEvent::Applied { packet_num, .. }) => {
-                    packets += 1;
+                Event::Trade(TradesEvent::Applied { .. }) => {
+                    signals += 1;
                     if let Some(name) = market_filter.as_deref() {
                         let Some(snapshot) = client.snapshot() else {
                             continue;
@@ -76,24 +75,17 @@ fn main() {
                                 "buy"
                             };
                             println!(
-                                "[trade-tail] pkt={} {name} {} price={}",
-                                packet_num, side, tail.last_trade_price
+                                "[trade-tail] {name} {} price={}",
+                                side, tail.last_trade_price
                             );
                         }
                     } else {
                         trades += 1;
                         if printed < 25 {
                             printed += 1;
-                            println!("[trade-signal] pkt={packet_num}");
+                            println!("[trade-signal] retained rows updated");
                         }
                     }
-                }
-                Event::Trade(TradesEvent::GapDetected { start, end }) => {
-                    gaps += 1;
-                    println!("[trade] gap detected {start}..{end}");
-                }
-                Event::Trade(TradesEvent::GapFilled { packet_num, .. }) => {
-                    println!("[trade] gap filled packet={packet_num}");
                 }
                 _ => {}
             }
@@ -101,5 +93,5 @@ fn main() {
         std::thread::sleep(Duration::from_millis(50));
     }
 
-    println!("[done] packets={packets} trades={trades} gaps={gaps}");
+    println!("[done] update_signals={signals} visible_updates={trades}");
 }

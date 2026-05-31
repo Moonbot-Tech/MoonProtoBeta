@@ -1,4 +1,4 @@
-/// Result of applying the TradesStream packet-number state.
+/// Retained trades/history state changed.
 #[derive(Debug, Clone)]
 pub enum TradesEvent {
     /// Packet was applied.
@@ -11,13 +11,17 @@ pub enum TradesEvent {
     Applied { packet_num: u16, base_time: f64 },
     /// A packet-number gap was detected: `[start..=end]` is missing. The
     /// recovery bucket was created; retry is driven by `tick()`.
+    #[doc(hidden)]
     GapDetected { start: u16, end: u16 },
     /// Packet number was a duplicate (`packet_num == last`).
     /// Delphi does not advance gap-state for it, but still applies the payload.
+    #[doc(hidden)]
     Duplicate,
     /// Packet number was outside the accepted range, usually after a reset.
+    #[doc(hidden)]
     OutOfOrder { packet_num: u16 },
     /// An out-of-order packet filled one slot in an existing gap bucket.
+    #[doc(hidden)]
     GapFilled {
         packet_num: u16,
         bucket_seq_range: (u16, u16),
@@ -27,8 +31,10 @@ pub enum TradesEvent {
     /// This is diagnostic only. The active client sends the request
     /// automatically; applications must not send their own duplicate request
     /// because they saw this event.
+    #[doc(hidden)]
     ResendRequested { packet_nums: Vec<u16> },
     /// Recovery bucket was closed: all packets arrived or retry limit expired.
+    #[doc(hidden)]
     BucketClosed {
         start: u16,
         end: u16,

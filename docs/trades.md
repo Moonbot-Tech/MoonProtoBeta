@@ -50,7 +50,7 @@ let mut rows = Vec::new();
 for event in client.drain_events() {
     if let Event::Trade(trade_event) = event {
         match trade_event {
-            TradesEvent::Applied { packet_num, .. } => {
+            TradesEvent::Applied { .. } => {
                 let Some(state) = client.snapshot() else { continue; };
                 let Some(market) = state.markets().get("BTCUSDT") else { continue; };
                 let Some(readers) = state.market_history_readers_for(&market) else { continue; };
@@ -62,14 +62,9 @@ for event in client.drain_events() {
                 if meta.clipped {
                     on_retained_history_gap(meta.actual_start_seq);
                 }
-                on_new_trades(packet_num, &rows);
+                on_new_trades(&rows);
             }
-            TradesEvent::GapDetected { start, end } => log_gap(*start, *end),
-            TradesEvent::Duplicate => log_duplicate_packet(),
-            TradesEvent::OutOfOrder { packet_num } => log_out_of_order(*packet_num),
-            TradesEvent::GapFilled { packet_num, .. } => log_gap_filled(*packet_num),
-            TradesEvent::ResendRequested { packet_nums } => log_resend(packet_nums),
-            TradesEvent::BucketClosed { .. } => {}
+            _ => {}
         }
     }
 }
@@ -80,9 +75,9 @@ emitted, Active Lib has already updated live market tails and queued retained
 history writes. Applications read rows from `MarketHistoryReaders` with their
 own `SeqRingCursor`.
 
-Gap, duplicate, out-of-order, resend, and bucket-close events are diagnostic
-telemetry. Applications do not drive recovery from them; `MoonClient` does that
-automatically.
+Gap, duplicate, out-of-order, resend, and bucket-close notifications are hidden
+diagnostic telemetry. Applications do not drive recovery from them;
+`MoonClient` does that automatically.
 
 Watcher fills are emitted as `Event::WatcherFills(WatcherFillsEvent)` because
 they are domain events rather than retained trade-history rows.
