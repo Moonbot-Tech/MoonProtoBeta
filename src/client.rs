@@ -1,10 +1,10 @@
 //! High-level MoonProto client session API.
 //!
-//! [`Client`] owns one UDP session: transport handshake, reconnect, retry
-//! queues, slicing, pending Engine API responses, lifecycle events, and the
-//! active read-model work performed by [`crate::events::EventDispatcher`].
-//! Regular applications should use [`MoonClient`], which owns the runtime thread
-//! and keeps the session alive until `disconnect()` or drop.
+//! Regular applications use [`MoonClient`]: it owns the runtime thread, keeps
+//! reconnect/retry/recovery alive, publishes snapshots/events, and exposes typed
+//! Active Lib handles. The lower-level UDP session object remains in this module
+//! for internal protocol tests and diagnostics, but it is not the application
+//! model.
 
 use crate::api_pending::ApiPending;
 use crate::commands::candles::{CandlesAggregator, CandlesChunkResult};
