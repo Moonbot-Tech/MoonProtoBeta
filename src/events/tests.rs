@@ -2066,6 +2066,31 @@ fn active_dispatch_queues_trades_into_history_worker_without_direct_store_write(
 }
 
 #[test]
+fn default_history_worker_uses_client_sizing_policy() {
+    let mut d = EventDispatcher::new();
+    d.set_market_history_sizing(crate::state::MarketHistorySizing::fixed(
+        crate::state::MarketHistoryConfig {
+            futures_trades_capacity: 1,
+            spot_trades_capacity: 0,
+            liquidation_capacity: 0,
+            mm_orders_capacity: 0,
+            last_price_capacity: 0,
+            mini_candles_capacity: 0,
+            candles_5m_capacity: 0,
+        },
+    ));
+    seed_event_markets(&mut d, &["BTCUSDT"]);
+    d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
+    d.set_trade_storage_scope(Some(&crate::state::TradeStorageScope::All), 45_000.0);
+    assert!(d.flush_market_history(45_000.0));
+
+    let readers = d
+        .market_history_readers("BTCUSDT")
+        .expect("default worker should be spawned from dispatcher sizing");
+    assert_eq!(readers.futures_trades.unwrap().capacity(), 1);
+}
+
+#[test]
 fn candles_snapshot_ready_after_worker_barrier_exposes_reader_rows() {
     let worker = crate::state::MarketHistoryWorker::spawn(crate::state::MarketHistoryConfig {
         futures_trades_capacity: 0,
@@ -3010,6 +3035,7 @@ fn dummy_client_cfg() -> crate::client::ClientConfig {
             update_markets_every: None,
             check_tags_every: None,
         },
+        market_history: crate::state::MarketHistorySizing::default(),
     }
 }
 

@@ -41,10 +41,10 @@ pub use history::{
     RollingTradeVolumeSnapshot, TradeHistoryRow, TradeVolumeTotals, DELPHI_MSECS_PER_DAY,
     DELPHI_SAME_TRADES_TIME_DAYS,
 };
-pub use history_store::{
-    MarketHistoryConfig, MarketHistoryReaders, MarketHistoryRegistry, MarketHistoryStore,
-    TradeStorageScope,
-};
+pub use history_store::{MarketHistoryConfig, MarketHistoryReaders, MarketHistorySizing};
+#[doc(hidden)]
+pub use history_store::{MarketHistoryRegistry, MarketHistoryStore, TradeStorageScope};
+#[doc(hidden)]
 pub use history_worker::{
     MarketHistoryCandlesSnapshot, MarketHistoryHandle, MarketHistoryLastPriceBatch,
     MarketHistoryLastPriceInput, MarketHistoryMMOrderInput, MarketHistoryStreamBatch,
@@ -62,9 +62,11 @@ pub use order_books::{
 pub use orders::{
     ApplyResult, Order, OrderEvent, OrderTraceChartPoint, OrderTraceLine, Orders, SellReason,
 };
+#[doc(hidden)]
+pub use seq_ring::SeqRingWriter;
 pub use seq_ring::{
     SeqRingBounds, SeqRingCursor, SeqRingError, SeqRingReadMeta, SeqRingReadView, SeqRingReader,
-    SeqRingRow, SeqRingTimedRow, SeqRingWriter,
+    SeqRingRow, SeqRingTimedRow,
 };
 pub use settings::{SettingsEvent, SettingsState};
 pub use strats::{StratEvent, StrategyInfo, StratsState};

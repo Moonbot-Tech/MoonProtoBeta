@@ -503,11 +503,10 @@ impl Client {
             encode_cipher: None,
             _start: Instant::now(),
             // NEVER_SENT sentinel = "long ago". Any `(cur_tm - NEVER_SENT) > interval`
-            // is instantly true -> the first Hello / cleanup / etc fire on the first main loop tick
-            // (5ms after bind instead of a 2 second delay). Delphi used `GetTickCount64`
-            // (milliseconds since boot) ~= 10^7+ when initializing `FLastSentHello := 0`, which gave
-            // the same effect; in Rust `now_ms()` = `Instant::elapsed()` starts at 0 -> an explicit
-            // sentinel is needed. See delphi_deviation audit #1.
+            // is instantly true, so the first Hello/cleanup tick fires immediately
+            // after bind. Delphi got the same machine effect from `GetTickCount64`
+            // being milliseconds since boot while `FLastSentHello := 0`; this Rust
+            // session clock starts at zero, so the sentinel preserves that timing.
             last_sent_hello: NEVER_SENT_MS,
             waiting_hello_start: 0,
             last_socket_recreate: i64::MIN / 2,

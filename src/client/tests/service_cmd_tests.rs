@@ -31,6 +31,7 @@ fn dummy_cfg_for_server(server_addr: SocketAddr) -> ClientConfig {
         client_id: 0x1234_5678_9ABC_DEF0,
         ntp_host: None,
         refresh: RefreshConfig::default(),
+        market_history: crate::state::MarketHistorySizing::default(),
     }
 }
 
@@ -1116,6 +1117,7 @@ fn generic_send_error_logs_without_force_disconnect() {
         client_id: 0,
         ntp_host: None,
         refresh: RefreshConfig::default(),
+        market_history: crate::state::MarketHistorySizing::default(),
     });
     client.transport.socket = Some(std::net::UdpSocket::bind("127.0.0.1:0").unwrap());
     let incompatible_addr: SocketAddr = "[::1]:9".parse().unwrap();

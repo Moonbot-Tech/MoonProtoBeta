@@ -72,11 +72,11 @@ impl Client {
         self.transport.send_buf.clear();
     }
 
-    /// Actually sends the packet (plus an optional extra transport packet) with error handling.
-    /// Closes D-06: send errors are no longer ignored via `.ok()`.
-    /// EWOULDBLOCK is logged as warn (normal kernel buffering). Other errors are logged
-    /// but do not change reconnect state: Delphi `DoSendPacket` returns false and does not set
-    /// `ForceDisconnect`.
+    /// Actually sends the packet (plus an optional extra transport packet).
+    ///
+    /// Send errors are logged instead of being collapsed into `.ok()`. They do
+    /// not force reconnect: Delphi `DoSendPacket` returns false and leaves
+    /// `ForceDisconnect` unchanged, so Rust keeps the same retry/recovery owner.
     pub(crate) fn dispatch_send(
         &mut self,
         cmd: u8,

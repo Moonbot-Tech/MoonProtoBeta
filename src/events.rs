@@ -42,7 +42,7 @@ use crate::protocol::Command;
 use crate::state::eps::EpsProfile;
 use crate::state::{
     AccountEvent, AccountState, BalanceEvent, BalancesState, Candle5mRow, MarketDerivedSnapshot,
-    MarketHistoryCandlesSnapshot, MarketHistoryConfig, MarketHistoryHandle, MarketHistoryReaders,
+    MarketHistoryCandlesSnapshot, MarketHistoryHandle, MarketHistoryReaders, MarketHistorySizing,
     MarketHistoryWorker, MarketsEvent, MarketsState, OrderBookEvent, OrderBooks, OrderEvent,
     Orders, RollingTradeVolumeSnapshot, SettingsEvent, SettingsState, StratEvent, StratsState,
     TradeStorageScope, TradesEvent, TradesState, TransferAssetsEvent, TransferAssetsState,
@@ -152,16 +152,12 @@ pub struct EventDispatcher {
     /// Do not confuse it with `StratsState::last_server_epoch`, which mirrors
     /// Delphi `cfg.LocalStratEpoch` after receiving a server snapshot.
     local_strategy_epoch: u64,
-    /// Last known `ServerToken` — for detecting a hard reconnect.
-    /// On a token change, `dispatch_into_active` resets per-token state
-    /// (`trades.full_reset()`, `order_books.reset_caches_keep_books()`) before applying the new packet.
-    /// Otherwise stale `last_packet_num` / `expected_seq` from the old numbering of the new
-    /// session produces spurious `GapDetected` events and a corrupted orderbook display
-    /// in the first seconds. Analogous to Delphi `MoonProtoEngine.pas:1586-1591`
-    /// (`If FTradesServerToken <> MClient.Client.ServerToken then ResetGapBuckets`) +
-    /// `MoonProtoEngine.pas:316-318` (`If NeedResubscribeOrderBooks then ResetOrderBookCaches`).
-    /// Init=0 (never connected) → the first non-zero token does not trigger a reset.
-    /// See audit_responsibility_hints #1, #2.
+    /// Last known `ServerToken` for detecting a hard reconnect.
+    ///
+    /// On a token change, `dispatch_into_active` resets per-token stream state
+    /// before applying the new packet. Otherwise stale trade packet numbers and
+    /// orderbook sequence counters from the previous server session can look
+    /// like fresh gaps in the first seconds after reconnect.
     last_known_server_token: u64,
     /// Delphi `Bworks.pas LastAddedNewMarket` analogue for active-lib
     /// `NewMarketFound -> GetMarketsList` auto refresh.
@@ -210,6 +206,7 @@ pub struct EventDispatcher {
     /// `subscribe_all_trades`.
     owned_market_history: Option<MarketHistoryWorker>,
     market_history_auto_enabled: bool,
+    market_history_sizing: MarketHistorySizing,
     /// Active Lib retained-storage scope from `Client::subscribe_*trades*`.
     /// `None` means trades stream is not subscribed and retained trade/candle/
     /// derived state must stay disabled.
@@ -250,6 +247,7 @@ impl Default for EventDispatcher {
             market_history: None,
             owned_market_history: None,
             market_history_auto_enabled: true,
+            market_history_sizing: MarketHistorySizing::default(),
             trade_storage_scope: None,
             eps_profile: EpsProfile::default(),
             last_market_history_scope: None,

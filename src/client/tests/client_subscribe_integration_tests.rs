@@ -14,6 +14,7 @@ fn dummy_cfg() -> ClientConfig {
             update_markets_every: None,
             check_tags_every: None,
         },
+        market_history: crate::state::MarketHistorySizing::default(),
     }
 }
 

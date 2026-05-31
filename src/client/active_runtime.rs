@@ -129,6 +129,7 @@ impl MoonClient {
         });
 
         let join = thread::spawn(move || {
+            let market_history_sizing = cfg.market_history;
             let mut client = Client::new(cfg);
             #[cfg(any(test, feature = "diagnostics"))]
             let _ = diagnostics_tx.send((
@@ -140,7 +141,8 @@ impl MoonClient {
             let _ = diagnostics_tx.send(Arc::clone(&client.subscriptions.subscription_registry));
             client.set_runtime_shutdown_flag(runtime_shutdown);
             client.set_lifecycle_event_sender(Some(lifecycle_tx));
-            let dispatcher = crate::events::EventDispatcher::new();
+            let mut dispatcher = crate::events::EventDispatcher::new();
+            dispatcher.set_market_history_sizing(market_history_sizing);
 
             runtime_loop(
                 client,

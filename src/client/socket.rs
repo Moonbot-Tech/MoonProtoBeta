@@ -62,10 +62,10 @@ impl ClientTransport {
 }
 
 /// Set SO_RCVBUF + SO_SNDBUF to 8 MB via socket2 (cross-platform).
-/// Closes ARCH §30 ("UDP buffer sizes — must be substantially larger than sysctl defaults").
-/// At peak load (~50K packets/sec) a small kernel buffer → silent drop.
-/// D-07 + D-08: errors are no longer ignored — logged as warn (the OS may refuse,
-/// e.g. Linux without `net.core.rmem_max ≥ 8MB` silently clamps to the sysctl setting).
+///
+/// MoonProto can receive short UDP bursts during snapshots/recovery. A small
+/// kernel buffer turns those bursts into silent packet loss, so the socket asks
+/// for a larger buffer and logs when the OS clamps or rejects it.
 pub(crate) fn set_socket_buffers(sock: &UdpSocket) {
     let sock2 = socket2::SockRef::from(sock);
     if let Err(e) = sock2.set_recv_buffer_size(8 * 1024 * 1024) {
@@ -77,16 +77,12 @@ pub(crate) fn set_socket_buffers(sock: &UdpSocket) {
 }
 
 /// Cross-platform IP_DONTFRAGMENT / IP_MTU_DISCOVER / IP_DONTFRAG.
-/// Closes ARCH §20 (PMTU discovery must work on all platforms, not only Windows).
-/// Without it SizeAck/ProbeMTUAck are sent with fragmentation allowed → the PMTU
-/// measurement becomes false → the client picks a non-optimal PMTU → cascading retransmits.
 ///
-/// IPv4 vs IPv6: the option name on an IPv6 socket is different — `IP_DONTFRAGMENT` (v4) does NOT
-/// work on AF_INET6, you need `IPV6_DONTFRAG` (or `IPV6_MTU_DISCOVER` on Linux). Without it a
-/// dual-stack client (Android/iOS) would silently fail PMTU detection. See rust_quality audit #5.
-///
-/// The setsockopt return value is checked and warn-logged on error (previously silently
-/// ignored — no trace was left for diagnosing the problem).
+/// SizeAck/ProbeMTUAck are the protocol's PMTU probes, so they must exercise
+/// the real no-fragment path instead of letting the OS fragment them. IPv4 and
+/// IPv6 use different socket options; setting both paths explicitly keeps PMTU
+/// discovery honest on desktop and dual-stack clients. Failures are warn-logged
+/// because a rejected option changes recovery behaviour under packet loss.
 pub(crate) fn set_dont_fragment_for_socket(sock: &UdpSocket, enable: bool) {
     // Determine IPv6 vs IPv4 from the local address. If local_addr returned an error — fall back
     // to IPv4 semantics (most systems are IPv4 by default).

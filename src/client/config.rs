@@ -1,5 +1,6 @@
 use super::ConnectError;
 use crate::commands::engine_api::ServerInfo;
+use crate::state::MarketHistorySizing;
 use crate::MoonKey;
 use std::time::Duration;
 /// Transport authorization state for one [`crate::client::Client`].
@@ -305,6 +306,10 @@ pub struct ClientConfig {
     /// Periodic refresh settings. Defaults enable Delphi-worker intervals, but
     /// Engine API refresh traffic starts only after successful init.
     pub refresh: RefreshConfig,
+    /// Retained market-history capacity policy used when trades storage becomes
+    /// active. Default `Auto` sizes rings from system memory after the market
+    /// list and requested trade-storage scope are known.
+    pub market_history: MarketHistorySizing,
 }
 
 impl ClientConfig {
@@ -332,11 +337,10 @@ impl ClientConfig {
             client_id: rand::random(),
             ntp_host: Some("pool.ntp.org".to_string()),
             refresh: RefreshConfig::default(),
+            market_history: MarketHistorySizing::default(),
         }
     }
 
-    /// Override transport mode.
-    ///
     /// Override transport mode.
     pub fn with_transport_mode(mut self, mode: TransportMode) -> Self {
         self.mask_ver = mode;
@@ -376,9 +380,17 @@ impl ClientConfig {
         self.refresh = refresh;
         self
     }
+
+    /// Override retained-history capacity sizing for trades/candles/price
+    /// lines. Use `MarketHistorySizing::Auto` for memory-aware defaults or
+    /// `MarketHistorySizing::fixed(config)` for exact per-market capacities.
+    pub fn with_market_history(mut self, market_history: impl Into<MarketHistorySizing>) -> Self {
+        self.market_history = market_history.into();
+        self
+    }
 }
 
-// Custom Debug — secret keys redacted (audit rust_quality #20).
+// Custom Debug keeps imported MoonBot keys out of accidental logs.
 impl std::fmt::Debug for ClientConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ClientConfig")
@@ -390,6 +402,7 @@ impl std::fmt::Debug for ClientConfig {
             .field("client_id", &format_args!("{:#x}", self.client_id))
             .field("ntp_host", &self.ntp_host)
             .field("refresh", &self.refresh)
+            .field("market_history", &self.market_history)
             .finish()
     }
 }

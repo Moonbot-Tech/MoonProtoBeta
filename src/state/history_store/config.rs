@@ -79,6 +79,38 @@ pub struct MarketHistoryConfig {
     pub candles_5m_capacity: usize,
 }
 
+/// Capacity policy for Active Lib retained market history.
+///
+/// `Auto` sizes per-market rings from total system memory once the active trade
+/// storage scope and known market list are available. `Fixed` uses the supplied
+/// capacities verbatim; set individual capacities to `0` to disable that
+/// retained public history category.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MarketHistorySizing {
+    #[default]
+    Auto,
+    Fixed(MarketHistoryConfig),
+}
+
+impl MarketHistorySizing {
+    pub fn fixed(config: MarketHistoryConfig) -> Self {
+        Self::Fixed(config)
+    }
+
+    pub(crate) fn resolve(self, market_count: usize) -> MarketHistoryConfig {
+        match self {
+            Self::Auto => MarketHistoryConfig::from_system_memory(market_count),
+            Self::Fixed(config) => config,
+        }
+    }
+}
+
+impl From<MarketHistoryConfig> for MarketHistorySizing {
+    fn from(config: MarketHistoryConfig) -> Self {
+        Self::Fixed(config)
+    }
+}
+
 impl Default for MarketHistoryConfig {
     fn default() -> Self {
         Self {

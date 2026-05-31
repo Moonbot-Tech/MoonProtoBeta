@@ -1,8 +1,23 @@
 //! Retained-history worker wiring for `EventDispatcher`.
 
 use super::*;
+use std::collections::HashSet;
 
 impl EventDispatcher {
+    pub(crate) fn set_market_history_sizing(&mut self, sizing: MarketHistorySizing) {
+        if self.market_history_sizing == sizing {
+            return;
+        }
+        self.market_history_sizing = sizing;
+        if self.owned_market_history.is_some() {
+            self.market_history = None;
+            self.owned_market_history = None;
+        }
+        self.last_market_history_scope = None;
+        self.last_market_history_markets_version = None;
+        self.sync_market_history_storage();
+    }
+
     /// Attach a retained-history writer worker.
     ///
     /// The dispatcher does not mutate retained history directly. In active
@@ -33,7 +48,6 @@ impl EventDispatcher {
     /// The worker is spawned lazily when trades storage scope is active.
     pub fn enable_default_market_history(&mut self) {
         self.market_history_auto_enabled = true;
-        self.ensure_default_market_history_worker();
         self.sync_market_history_storage();
     }
 
@@ -163,7 +177,6 @@ impl EventDispatcher {
         if self.trade_storage_scope.as_ref() != scope {
             self.trade_storage_scope = scope.cloned();
             self.last_market_history_scope = None;
-            self.ensure_default_market_history_worker();
             self.sync_market_history_storage();
             if self.trade_storage_scope.is_some() {
                 self.queue_current_last_price_history(now_time_days);
@@ -171,7 +184,7 @@ impl EventDispatcher {
         }
     }
 
-    fn ensure_default_market_history_worker(&mut self) {
+    fn ensure_default_market_history_worker(&mut self, active_market_count: usize) {
         if self.trade_storage_scope.is_none() {
             if self.owned_market_history.is_some() {
                 self.market_history = None;
@@ -181,10 +194,14 @@ impl EventDispatcher {
             }
             return;
         }
+        if active_market_count == 0 {
+            return;
+        }
         if !self.market_history_auto_enabled || self.market_history.is_some() {
             return;
         }
-        let worker = MarketHistoryWorker::spawn(MarketHistoryConfig::default());
+        let worker =
+            MarketHistoryWorker::spawn(self.market_history_sizing.resolve(active_market_count));
         self.market_history = Some(worker.handle());
         self.owned_market_history = Some(worker);
         if let Some(handle) = &self.market_history {
@@ -215,8 +232,23 @@ impl EventDispatcher {
             .collect()
     }
 
+    fn active_market_history_market_count(&self, market_slots: &[Option<Arc<str>>]) -> usize {
+        let Some(scope) = self.trade_storage_scope.as_ref() else {
+            return 0;
+        };
+        let mut names = HashSet::new();
+        for market_name in market_slots.iter().filter_map(Option::as_deref) {
+            if scope.contains(market_name) {
+                names.insert(market_name);
+            }
+        }
+        names.len()
+    }
+
     pub(super) fn sync_market_history_storage(&mut self) {
-        self.ensure_default_market_history_worker();
+        let market_slots = self.market_history_market_slots();
+        let active_market_count = self.active_market_history_market_count(&market_slots);
+        self.ensure_default_market_history_worker(active_market_count);
         let Some(handle) = &self.market_history else {
             return;
         };
@@ -226,7 +258,6 @@ impl EventDispatcher {
         {
             return;
         }
-        let market_slots = self.market_history_market_slots();
         handle.configure_market_index_slots(market_slots, self.trade_storage_scope.clone());
         self.last_market_history_scope = self.trade_storage_scope.clone();
         self.last_market_history_markets_version = Some(markets_version);

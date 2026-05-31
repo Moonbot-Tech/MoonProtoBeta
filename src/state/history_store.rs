@@ -25,7 +25,7 @@ mod registry;
 
 #[cfg(test)]
 use self::config::GIB;
-pub use self::config::{MarketHistoryConfig, TradeStorageScope};
+pub use self::config::{MarketHistoryConfig, MarketHistorySizing, TradeStorageScope};
 #[cfg(test)]
 use self::derived::combine_deltas;
 pub use self::registry::MarketHistoryRegistry;

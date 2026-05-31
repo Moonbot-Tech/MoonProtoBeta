@@ -296,13 +296,13 @@ let mark_time = point.time_delphi();
 
 It is filled from `UpdateMarketsList -> MarketPrice.mark_price` when the server
 marks the value as present. UI code can compare the MarkPrice line with the
-LastPrice line for the same market; both are retained by the same
-`MarketHistoryWorker`.
+LastPrice line for the same market; both are retained in the same per-market
+history model.
 
-When trades retained storage is active, `MoonClient` queues these rows into its
-retained-history worker immediately after applying market prices. The default
-worker is lazy-created from the all-trades subscription scope. The UDP/protocol
-loop does not write the retained ring directly.
+When trades retained storage is active, `MoonClient` appends these rows
+immediately after applying market prices. Retained history is created lazily
+from the active trades subscription scope, so markets outside
+`subscribe_trades_for` do not allocate price-line rings.
 
 `Market::futures_type` uses `BaseCurrency`, a small public wrapper that
 preserves unknown future server values:

@@ -89,8 +89,9 @@ for event in client.drain_events() {
 - Detects trades gaps and sends `TradesResend` requests from the
   Delphi-equivalent tail check after valid trades packets.
 - Routes Engine API responses into runtime-owned pending actions and publishes
-  typed events/snapshots when the requested state is ready. Lower-level `api_*`
-  receivers exist only for diagnostics and custom runtimes.
+  typed events/snapshots when the requested state is ready. Applications should
+  use the typed `MoonClient` handles; lower-level `api_*` receivers are
+  diagnostic machinery.
 - Provides typed helpers for common Engine API reads including balances,
   hedge mode, API-key expiration, transferable assets, and candles.
 - Provides registry-aware single, batched, and all-clear helpers for orderbook

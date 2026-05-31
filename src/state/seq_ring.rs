@@ -463,9 +463,9 @@ impl<T: SeqRingRow> SeqRingState<T> {
 impl<T: SeqRingTimedRow> SeqRingState<T> {
     fn first_seq_at_or_after_time(&self, time: f64) -> u64 {
         let bounds = self.bounds();
-        // Consecutive seqs map to consecutive slots (`seq % capacity`). Hoist the
-        // single modulo out of the loop and advance the slot with a wrap instead
-        // of a per-element int64 DIV (audit #12 opt #1, hot chart scan).
+        // Consecutive seqs map to consecutive slots (`seq % capacity`). Hoist
+        // the single modulo out of the loop and advance the slot with a cheap
+        // wrap, so chart/history scans do not spend work on per-row int64 DIV.
         let mut slot = self.slot_index(bounds.oldest_seq);
         for seq in bounds.oldest_seq..bounds.next_seq {
             if self.rows[slot].seq_ring_time() >= time {

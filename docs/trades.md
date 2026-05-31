@@ -251,6 +251,8 @@ plus the current candle.
 ## Storage Configuration
 
 ```rust
+use moonproto::{ClientConfig, state::{MarketHistoryConfig, MarketHistorySizing}};
+
 pub struct MarketHistoryConfig {
     pub futures_trades_capacity: usize,
     pub spot_trades_capacity: usize,
@@ -267,19 +269,38 @@ impl MarketHistoryConfig {
     pub fn history_budget_bytes(total_memory_bytes: usize) -> usize;
     pub fn estimated_bytes_per_market(&self) -> usize;
 }
+
+let cfg = ClientConfig::new(host, port, master_key, mac_key)
+    .with_market_history(MarketHistorySizing::Auto);
+
+let cfg = ClientConfig::new(host, port, master_key, mac_key)
+    .with_market_history(MarketHistorySizing::fixed(MarketHistoryConfig {
+        futures_trades_capacity: 100_000,
+        spot_trades_capacity: 20_000,
+        liquidation_capacity: 10_000,
+        mm_orders_capacity: 10_000,
+        last_price_capacity: 20_000,
+        mini_candles_capacity: 20_000,
+        candles_5m_capacity: 20_000,
+    }));
 ```
 
-Capacities set to `0` disable that retained public history category.
+Each capacity is a row count per retained market, not a byte count. For example,
+`futures_trades_capacity: 100_000` keeps up to 100,000 futures trade rows for
+each market whose trades are retained. Capacities set to `0` disable that
+retained public history category.
 `mm_orders_capacity` governs both the MM-order ring and its taker/color
 companion ring; they push and evict in lockstep so an order and its companion
 can never desync (matching Delphi's single-size `TStreamableRingBuffer`).
-`from_system_memory(market_count)` is the recommended helper when the
-application wants a memory-aware default.
+`MarketHistorySizing::Auto` is the default: `MoonClient` waits until the market
+list and the requested trade-storage scope are known, then sizes per-market
+rings from system memory. Use `MarketHistorySizing::fixed(config)` when the
+application wants exact capacities or wants to disable selected retained
+categories with `0`.
 
 `MoonClient` creates and owns the default history worker automatically when the
-trades subscription scope becomes active. Custom runtimes can attach their own
-`MarketHistoryWorker`, but regular applications should use `MoonClient`
-snapshots and readers.
+trades subscription scope becomes active. Regular applications use
+`MoonClient` snapshots and readers; they do not create workers manually.
 
 ## Recovery Policy
 

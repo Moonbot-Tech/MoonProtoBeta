@@ -10,6 +10,7 @@ fn dummy_cfg(refresh: RefreshConfig) -> ClientConfig {
         client_id: 0,
         ntp_host: None,
         refresh,
+        market_history: crate::state::MarketHistorySizing::default(),
     }
 }
 
