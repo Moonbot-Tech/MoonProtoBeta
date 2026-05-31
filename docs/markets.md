@@ -1,123 +1,15 @@
 # Markets
 
-Markets state is maintained from Engine API responses:
+`MoonClient` maintains the market universe and live market read model for the
+application. UI code searches by symbol once, keeps a stable `MarketHandle`, and
+reads prices, funding, tags, balances/positions, arbitrage slots, and retained
+history from snapshots/handles.
 
-- `GetMarketsList` gives the full market list, correlation markets, and the
-  initial `mIndex -> market name` order.
-- `UpdateMarketsList` updates prices, funding, mark price, and correlation prices.
-- `GetMarketsIndexes` refreshes that mapping after reconnect/server restart.
-- `CheckBinanceTags` updates token tags.
-
-When using `MoonClient`, relevant responses are applied to the active markets
-read model automatically.
-
-The active runtime applies `GetMarketsList`, `UpdateMarketsList`, and
-`CheckBinanceTags` directly while reading the payload, matching Delphi's
-in-loop state updates. Applications should read the maintained state and events
-from `MoonClient` snapshots/events, not parse market payloads themselves.
-
-`CheckBinanceTags` follows the Delphi client: the latest successful response is
-authoritative for tags. Known markets present in the response receive the new
-tags; known markets absent from that response read back as empty tags. A late
-payload read error is the only exception: already-read tags remain applied, and
-old absent tags are not cleared because Delphi reaches the clear-unseen pass only
-after the read loop completes.
-
-`GetMarketsList` follows Delphi merge semantics. The first response populates
-the market list. Later responses update known markets by name and leave old
-names present if they are absent from the response; live price slots and token
-tags for known markets are preserved. Unknown names from a later response are
-added only when the list refresh was triggered by Delphi-style
-`NewMarketFound`; otherwise they are ignored like Delphi frees the incoming
-`TMarket`.
-
-The server-index mapping is rebuilt from the `GetMarketsList` response order on
-the first list and on a `NewMarketFound` refresh. A plain later
-`GetMarketsList` updates known market fields but does not rewrite the current
-`mIndex -> market name` mapping.
-
-For existing markets, `max_leverage` is updated from `GetMarketsList` only when
-the Delphi support flag `ES_MaxLevInGetMarkets` is active. In the active
-library path this is inferred from `BaseCheck`: currently only
-`ExchangeCode::FGate` enables it. New markets keep the value
-from the incoming list because Delphi inserts the whole `TMarket`.
-
-Correlation market definitions from `GetMarketsList` are inserted only when
-their `base_currency_name` is non-empty, matching Delphi's `If not
-BaseCur.IsEmpty then AddOrSetCorrMarket`. Repeated definitions for an existing
-correlation market update tick size and `base_currency_name`, but keep the
-original exchange market currency, matching Delphi `AddOrSetCorrMarket`.
-After a successful list, the active state also rebuilds Delphi
-`TMarket.refBTCMarket` equivalents and `BaseCurDict` references. `refBTCMarket`
-uses the current server base currency from `BaseCheck`: for a non-BTC base,
-the library replaces that base currency text in the market name with `BTC` and
-looks up the resulting CorrMarket name. For a BTC base it does nothing, like
-Delphi `CheckCorrMarkets`.
-Correlation market price updates are
-merge-style for known correlation markets only: prices present in
-`UpdateMarketsList` overwrite their entries, unknown names are ignored like
-Delphi `GetCorrMarket(MName) = nil`, and absent known prices keep their
-previous value. After each successful price update, `BaseCurrencyPrice.last_price`
-is refreshed with Delphi priority: direct USDT market ask, reverse USDT market
-ask inverse, direct USDT CorrMarket price, reverse USDT CorrMarket price inverse,
-then `USDT = 1`.
-For every applied market price row, `MarketPrice` also mirrors the Delphi
-post-assign fields from `TMoonProtoEngine.UpdateMarketsList`:
-`last_bid = bid`, `last_ask = ask`, `p_last = (bid + ask) / 2`, and
-`min_lot_size = max(max(step_size, min_qty) * p_last, min_notional)`.
-`chart_price_step` mirrors Delphi `TMarket.ChartPriceStep` from
-`AddNewAksPrice(Ask)`: both `UpdateMarketsList` and applied orderbook updates
-can refresh it from the current ask; when `Ask > 0`, it becomes
-`max(eps, Ask / 5000)`, and when `Ask` is zero/missing, the previous value is
-kept.
-When funding is included, the same row also updates
-`Market::funding_rate` and `Market::funding_time`, matching Delphi's `TMarket`
-mutation in the `HasFunding` branch.
-
-Trades stream packets also update the bounded live trade tail kept by Delphi on
-`TMarket`. For futures trade rows, the runtime updates
-`MarketTradeState::last_got_all_trades_ms`, `last_trade_price`,
-`last_buy_price`, `last_sell_price`, `last_trade_price_ema15`,
-`last_trade_price_ema5`, and `last_trade_was_sell` before emitting the public
-`TradesEvent::Applied` signal. Spot trade rows update only
-`last_got_spot_trades_ms`, matching Delphi's spot branch which exits before
-`SetLastTradePrices`.
-
-If `UpdateMarketsList` refers to a server market index whose name is present in
-`GetMarketsIndexes` but absent from the current market list, the active
-runtime follows Delphi `NewMarketFound`: it schedules a fresh
-`GetMarketsList` request automatically, throttled to roughly one request per
-30 seconds while the unknown market condition persists. If that listing refresh
-adds new markets, the runtime emits
-`MarketsEvent::NewMarketsAdded { names }` and immediately requests
-a fresh full order-status snapshot plus `UpdateMarketsList` again. Order pushes
-for an unknown market may have been dropped before the local market object
-existed, so the full order snapshot is requested again before the immediate
-price refresh.
-
-Inbound listing notifications also force this listing refresh, but that command
-is internal to the active library. User code should react to
-`MarketsEvent::NewMarketsAdded { names }`, which is emitted only after
-`GetMarketsList` actually inserted the named markets into `MarketsState`.
-
-`UpdateMarketsList` carries server `mIndex` values. Price updates and
-`price_by_index` resolve those indexes through the current `GetMarketsIndexes`
-mapping, so stale mappings after a server restart are not used.
-
-`MarketsState::last_markets_list_apply_timing()` is diagnostics only. In test
-or `--features diagnostics` builds it records coarse total/loop timing for the
-latest active `GetMarketsList` apply; regular builds return `None` and do not
-pay for these timer reads.
-Per-row read/apply attribution is intentionally absent from production code:
-thousands of timer calls inside the market/CorrMarket loops distort the CPU
-path they are supposed to measure.
-
-Funding timestamps match Delphi client state. The server serializes
-`FundingTime - TZShift`; Rust parsers add the local client timezone shift back,
-so `Market::funding_time` and `MarketPrice::funding_time` are client-local
-Delphi `TDateTime` values. A zero funding time stays zero.
-They are not Unix timestamps; use `funding_time_delphi().unix_millis()` when
-the UI needs wall-clock time.
+The runtime owns the server refreshes that feed this state: full market list,
+incremental price/funding updates, token tags, correlation prices, and
+server-index refresh after reconnect/server restart. Applications should read
+the maintained state and events from `MoonClient` snapshots/events, not parse
+market payloads or server indexes themselves.
 
 ## Reading State
 
@@ -207,17 +99,6 @@ pub enum MarketsEvent {
     TokenTagsUpdated { count: usize },
 }
 ```
-
-`MarketsState::indexes_synchronized()` is a critical invariant.
-Cold Init builds the initial map from `GetMarketsList`, exactly like Delphi
-`SrvMarkets.Rebuild(IndexMap)` inside `TMoonProtoEngine.GetMarketsList`. After
-server restart the runtime can mark it stale. If the one-time Init already
-completed, reconnect restore sends `GetMarketsIndexes` automatically and only
-then refreshes prices with `UpdateMarketsList`. Until the fresh response
-arrives, the active runtime drops orderbook/trades packets that depend on server
-indexes.
-Price updates keyed by server `mIndex` are also skipped while a previously known
-mapping is stale.
 
 ## Public State
 
@@ -380,3 +261,123 @@ TokenTags::TRAD_FI;
 ```
 
 Use `contains`, `is_empty`, `bits`, and `from_bits` for bitset work.
+
+## Behavior Notes
+
+These notes describe how the active runtime keeps the public read model current.
+Regular UI code should still use `MarketHandle`, market history readers, and
+typed events instead of server-index helpers.
+
+`CheckBinanceTags` follows the Delphi client: the latest successful response is
+authoritative for tags. Known markets present in the response receive the new
+tags; known markets absent from that response read back as empty tags. A late
+payload read error is the only exception: already-read tags remain applied, and
+old absent tags are not cleared because Delphi reaches the clear-unseen pass only
+after the read loop completes.
+
+`GetMarketsList` follows Delphi merge semantics. The first response populates
+the market list. Later responses update known markets by name and leave old
+names present if they are absent from the response; live price slots and token
+tags for known markets are preserved. Unknown names from a later response are
+added only when the list refresh was triggered by Delphi-style
+`NewMarketFound`; otherwise they are ignored like Delphi frees the incoming
+`TMarket`.
+
+The server-index mapping is rebuilt from the `GetMarketsList` response order on
+the first list and on a `NewMarketFound` refresh. A plain later
+`GetMarketsList` updates known market fields but does not rewrite the current
+`mIndex -> market name` mapping.
+
+`MarketsState::indexes_synchronized()` is a critical invariant.
+Cold Init builds the initial map from `GetMarketsList`, exactly like Delphi
+`SrvMarkets.Rebuild(IndexMap)` inside `TMoonProtoEngine.GetMarketsList`. After
+server restart the runtime can mark it stale. If the one-time Init already
+completed, reconnect restore sends `GetMarketsIndexes` automatically and only
+then refreshes prices with `UpdateMarketsList`. Until the fresh response
+arrives, the active runtime drops orderbook/trades packets that depend on server
+indexes.
+Price updates keyed by server `mIndex` are also skipped while a previously known
+mapping is stale.
+
+For existing markets, `max_leverage` is updated from `GetMarketsList` only when
+the Delphi support flag `ES_MaxLevInGetMarkets` is active. In the active
+library path this is inferred from `BaseCheck`: currently only
+`ExchangeCode::FGate` enables it. New markets keep the value
+from the incoming list because Delphi inserts the whole `TMarket`.
+
+Correlation market definitions from `GetMarketsList` are inserted only when
+their `base_currency_name` is non-empty, matching Delphi's `If not
+BaseCur.IsEmpty then AddOrSetCorrMarket`. Repeated definitions for an existing
+correlation market update tick size and `base_currency_name`, but keep the
+original exchange market currency, matching Delphi `AddOrSetCorrMarket`.
+After a successful list, the active state also rebuilds Delphi
+`TMarket.refBTCMarket` equivalents and `BaseCurDict` references. `refBTCMarket`
+uses the current server base currency from `BaseCheck`: for a non-BTC base,
+the library replaces that base currency text in the market name with `BTC` and
+looks up the resulting CorrMarket name. For a BTC base it does nothing, like
+Delphi `CheckCorrMarkets`.
+Correlation market price updates are merge-style for known correlation markets
+only: prices present in `UpdateMarketsList` overwrite their entries, unknown
+names are ignored like Delphi `GetCorrMarket(MName) = nil`, and absent known
+prices keep their previous value.
+
+After each successful price update, `BaseCurrencyPrice.last_price` is refreshed
+with Delphi priority: direct USDT market ask, reverse USDT market ask inverse,
+direct USDT CorrMarket price, reverse USDT CorrMarket price inverse, then
+`USDT = 1`.
+For every applied market price row, `MarketPrice` also mirrors the Delphi
+post-assign fields from `TMoonProtoEngine.UpdateMarketsList`:
+`last_bid = bid`, `last_ask = ask`, `p_last = (bid + ask) / 2`, and
+`min_lot_size = max(max(step_size, min_qty) * p_last, min_notional)`.
+`chart_price_step` mirrors Delphi `TMarket.ChartPriceStep` from
+`AddNewAksPrice(Ask)`: both `UpdateMarketsList` and applied orderbook updates
+can refresh it from the current ask; when `Ask > 0`, it becomes
+`max(eps, Ask / 5000)`, and when `Ask` is zero/missing, the previous value is
+kept.
+When funding is included, the same row also updates
+`Market::funding_rate` and `Market::funding_time`, matching Delphi's `TMarket`
+mutation in the `HasFunding` branch.
+
+Funding timestamps match Delphi client state. The server serializes
+`FundingTime - TZShift`; Rust parsers add the local client timezone shift back,
+so `Market::funding_time` and `MarketPrice::funding_time` are client-local
+Delphi `TDateTime` values. A zero funding time stays zero.
+They are not Unix timestamps; use `funding_time_delphi().unix_millis()` when
+the UI needs wall-clock time.
+
+Trades stream packets also update the bounded live trade tail kept by Delphi on
+`TMarket`. For futures trade rows, the runtime updates
+`MarketTradeState::last_got_all_trades_ms`, `last_trade_price`,
+`last_buy_price`, `last_sell_price`, `last_trade_price_ema15`,
+`last_trade_price_ema5`, and `last_trade_was_sell` before emitting the public
+`TradesEvent::Applied` signal. Spot trade rows update only
+`last_got_spot_trades_ms`, matching Delphi's spot branch which exits before
+`SetLastTradePrices`.
+
+If `UpdateMarketsList` refers to a server market index whose name is present in
+`GetMarketsIndexes` but absent from the current market list, the active runtime
+follows Delphi `NewMarketFound`: it schedules a fresh `GetMarketsList` request
+automatically, throttled to roughly one request per 30 seconds while the unknown
+market condition persists. If that listing refresh adds new markets, the
+runtime emits `MarketsEvent::NewMarketsAdded { names }` and immediately
+requests a fresh full order-status snapshot plus `UpdateMarketsList` again.
+Order pushes for an unknown market may have been dropped before the local market
+object existed, so the full order snapshot is requested again before the
+immediate price refresh.
+
+Inbound listing notifications also force this listing refresh, but that command
+is internal to the active library. User code should react to
+`MarketsEvent::NewMarketsAdded { names }`, which is emitted only after
+`GetMarketsList` actually inserted the named markets into `MarketsState`.
+
+`UpdateMarketsList` carries server `mIndex` values. Price updates and
+`price_by_index` resolve those indexes through the current `GetMarketsIndexes`
+mapping, so stale mappings after a server restart are not used.
+
+`MarketsState::last_markets_list_apply_timing()` is diagnostics only. In test
+or `--features diagnostics` builds it records coarse total/loop timing for the
+latest active `GetMarketsList` apply; regular builds return `None` and do not
+pay for these timer reads.
+Per-row read/apply attribution is intentionally absent from production code:
+thousands of timer calls inside the market/CorrMarket loops distort the CPU
+path they are supposed to measure.
