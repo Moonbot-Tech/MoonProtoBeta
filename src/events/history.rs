@@ -246,18 +246,18 @@ impl EventDispatcher {
     }
 
     pub(super) fn sync_market_history_storage(&mut self) {
-        let market_slots = self.market_history_market_slots();
-        let active_market_count = self.active_market_history_market_count(&market_slots);
-        self.ensure_default_market_history_worker(active_market_count);
-        let Some(handle) = &self.market_history else {
-            return;
-        };
         let markets_version = self.markets.markets_version();
         if self.last_market_history_scope == self.trade_storage_scope
             && self.last_market_history_markets_version == Some(markets_version)
         {
             return;
         }
+        let market_slots = self.market_history_market_slots();
+        let active_market_count = self.active_market_history_market_count(&market_slots);
+        self.ensure_default_market_history_worker(active_market_count);
+        let Some(handle) = &self.market_history else {
+            return;
+        };
         handle.configure_market_index_slots(market_slots, self.trade_storage_scope.clone());
         self.last_market_history_scope = self.trade_storage_scope.clone();
         self.last_market_history_markets_version = Some(markets_version);
