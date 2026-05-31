@@ -168,6 +168,7 @@ pub(crate) fn update_markets_list() -> Vec<u8> {
 /// Current Delphi server code calls `Engine.GetMarketsBalanceFull`, but
 /// `WriteBalancesToStream` is not implemented in the reference server, so
 /// successful responses have an empty payload.
+#[cfg(test)]
 pub(crate) fn get_markets_balance_full() -> Vec<u8> {
     build_engine_request(EngineMethod::GetMarketsBalanceFull, "", &[])
 }

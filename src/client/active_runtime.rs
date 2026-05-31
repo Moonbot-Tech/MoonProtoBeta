@@ -511,18 +511,6 @@ impl MoonClient {
         self.send_no_reply(RuntimeCommand::TransferAssetsRefreshKind(kind))
     }
 
-    /// Request server-side full balance refresh and return immediately.
-    ///
-    /// The balance state arrives through the normal balance channel.
-    pub(crate) fn refresh_markets_balance_full(
-        &self,
-    ) -> Result<EngineActionTicket, MoonClientError> {
-        self.queue_engine_action(
-            crate::events::EngineActionKind::MarketsBalanceFullRefresh,
-            crate::commands::engine_request::get_markets_balance_full(),
-        )
-    }
-
     /// Cancel all exchange orders through Engine API and return immediately.
     pub(crate) fn cancel_all_orders(&self) -> Result<EngineActionTicket, MoonClientError> {
         self.queue_engine_action(
@@ -563,20 +551,14 @@ impl MoonClient {
         &self,
         market: impl AsRef<str>,
         position_type: PositionType,
-        new_market: bool,
     ) -> Result<EngineActionTicket, MoonClientError> {
         let market = market.as_ref();
         self.queue_engine_action(
             crate::events::EngineActionKind::ChangePositionType {
                 market: market.to_string(),
                 position_type,
-                new_market,
             },
-            crate::commands::engine_request::change_position_type(
-                market,
-                position_type,
-                new_market,
-            ),
+            crate::commands::engine_request::change_position_type(market, position_type, false),
         )
     }
 

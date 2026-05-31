@@ -386,16 +386,6 @@ impl MoonBalances<'_> {
         self.client.refresh_balances()
     }
 
-    /// Request a fresh balance/position snapshot and return immediately.
-    pub fn refresh_markets(&self) -> Result<(), MoonClientError> {
-        self.client.refresh_balances()
-    }
-
-    /// Request server-side full balance refresh and return immediately.
-    pub fn refresh_markets_full(&self) -> Result<EngineActionTicket, MoonClientError> {
-        self.client.refresh_markets_balance_full()
-    }
-
     /// Request transferable asset refresh for Spot, Futures, and Quarterly.
     pub fn refresh_transfer_assets(&self) -> Result<(), MoonClientError> {
         self.client.refresh_transfer_assets()
@@ -466,10 +456,8 @@ impl MoonAccount<'_> {
         &self,
         market: impl AsRef<str>,
         position_type: crate::commands::market::PositionType,
-        new_market: bool,
     ) -> Result<EngineActionTicket, MoonClientError> {
-        self.client
-            .change_position_type(market, position_type, new_market)
+        self.client.change_position_type(market, position_type)
     }
 
     /// Confirm risk limit for a market through Engine API.

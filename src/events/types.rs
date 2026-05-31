@@ -148,7 +148,6 @@ impl WatcherFillsEvent {
 /// Active Lib exposes that same user effect as non-blocking intents.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EngineActionKind {
-    MarketsBalanceFullRefresh,
     CancelAllOrders,
     SetLeverage {
         market: String,
@@ -160,7 +159,6 @@ pub enum EngineActionKind {
     ChangePositionType {
         market: String,
         position_type: PositionType,
-        new_market: bool,
     },
     ConvertDustBnb,
     ConfirmRiskLimit {
