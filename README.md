@@ -137,7 +137,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // After the user chooses a market/order side:
     // client.trade().new_order(NewOrderParams::new("BTCUSDT", OrderSide::Long, 50100.0, 0.001))?;
     // After an order appears in events/snapshots:
-    // client.orders().move_order(order_uid, 50100.0)?; // also accepts &Order
+    // client.orders().move_order(&visible_order, 50100.0)?;
 
     for lifecycle in client.drain_lifecycle_events() {
         println!("lifecycle: {lifecycle:?}");

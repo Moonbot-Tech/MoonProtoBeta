@@ -151,7 +151,7 @@ Order actions go through `client.orders()`:
 use moonproto::VStopParams;
 
 let Some(snapshot) = client.snapshot() else { return; };
-let Some(order) = snapshot.orders().get(order_uid) else { return; };
+let Some(order) = snapshot.orders().get(ui_state.selected_order_uid()) else { return; };
 
 client.orders().move_order(order, new_price)?;
 client.orders().cancel(order)?;
@@ -170,10 +170,11 @@ client.orders().set_immune_for_orders([order], true)?;
 client.orders().request_status(order)?;
 ```
 
-The handle accepts either `&Order` from a snapshot or a raw UID. In both cases
-the runtime resolves the current live order state before sending. That live
-check is important: pending-cancel, replace-in-flight, stop/VStop changes,
-panic-sell flags, and click immunity are all stateful.
+Desktop UI should pass the visible `&Order` from its current snapshot. The
+handle also accepts a raw UID for CLI tools and scripts, but in both cases the
+runtime resolves the current live order state before sending. That live check is
+important: pending-cancel, replace-in-flight, stop/VStop changes, panic-sell
+flags, and click immunity are all stateful.
 
 ## Events
 

@@ -186,7 +186,7 @@ before sending:
 
 ```rust
 if let Some(snapshot) = client.snapshot() {
-    if let Some(order) = snapshot.orders().get(order_uid) {
+    if let Some(order) = snapshot.orders().get(ui_state.selected_order_uid()) {
         client.orders().move_order(order, new_price)?;
         client.orders().cancel(order)?;
     }

@@ -1,14 +1,14 @@
 # Trade Actions
 
 `MoonClient` provides the normal order-intent API. UI code reads immutable
-order snapshots and sends user actions back to the runtime by passing either the
-visible `&Order` or its UID:
+order snapshots and sends user actions back to the runtime by passing the
+visible `&Order`:
 
 ```rust
 use moonproto::VStopParams;
 
 let Some(snapshot) = client.snapshot() else { return; };
-let Some(order) = snapshot.orders().get(order_uid) else { return; };
+let Some(order) = snapshot.orders().get(ui_state.selected_order_uid()) else { return; };
 
 client.orders().move_order(order, new_price)?;
 client.orders().cancel(order)?;
@@ -37,7 +37,7 @@ does not mutate a snapshot and does not pass `&mut Orders` around.
 
 ```rust
 if let Some(snapshot) = client.snapshot() {
-    if let Some(order) = snapshot.orders().get(order_uid) {
+    if let Some(order) = snapshot.orders().get(ui_state.selected_order_uid()) {
         println!(
             "buy_actual={} buy_qty={} sell_actual={} sell_qty={}",
             order.buy_order.actual_price,
@@ -97,6 +97,11 @@ code.
 `new_order` returns a client-side ticket. Its `request_uid` is the UID written
 into the outgoing command and can be used to correlate the user click with the
 server-created order when the order appears in `snapshot().orders()`.
+
+Order intent handles also accept a raw UID for CLI tools and scripts that only
+have an identifier. Desktop UI should prefer the visible `&Order` it already
+draws; the runtime still resolves that selector against the live order state
+before sending.
 
 ## Init Gate
 
