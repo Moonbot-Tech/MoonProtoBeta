@@ -102,6 +102,7 @@ pub(crate) use init::{connect_and_init, run_init_sequence, InitResult};
 pub use init::{ConnectConfig, ConnectError, InitConfig, InitError, InitialStrategies};
 #[cfg(any(test, feature = "diagnostics"))]
 pub use metrics::ProtocolMetricsSnapshot;
+#[doc(hidden)]
 pub use send_queue::{
     SendPriority, UniqueKey, UK_ARB_PRICES, UK_BALANCE_FULL, UK_BASE_UI_SETTINGS, UK_DEX_SWITCH,
     UK_IMMUNE_CLICKS, UK_LEV_MANAGE_SETTINGS, UK_NONE, UK_ORDER_MOVE, UK_ORDER_STATUS,

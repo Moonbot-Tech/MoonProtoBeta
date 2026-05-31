@@ -156,9 +156,11 @@ pub use client::{
     MoonAccount, MoonBalances, MoonCandles, MoonClient, MoonClientError, MoonClientEvent,
     MoonClientSnapshot, MoonEmulator, MoonEventQueue, MoonEventSink, MoonOrders, MoonSettings,
     MoonStrategies, MoonStreams, MoonTrade, NewOrderParams, NewOrderTicket, OrderSide, OrderTarget,
-    RefreshConfig, SellOrderParams, SendPriority, SplitOrderParams, TradeContextError,
-    TradesStreamMode, TradesSubscription, TransportMode, UniqueKey, VStopParams,
+    RefreshConfig, SellOrderParams, SplitOrderParams, TradeContextError, TradesStreamMode,
+    TradesSubscription, TransportMode, VStopParams,
 };
+#[doc(hidden)]
+pub use client::{SendPriority, UniqueKey};
 pub use commands::engine_api::{
     AuthCheckResponse, DexInfo, ExchangeTypeMask, HyperDexIndex, ServerInfo,
 };
@@ -195,4 +197,6 @@ pub use state::{
     TransferAssetsState,
 };
 pub use time::DelphiTime;
-pub use transport::{MoonKey, ServerMsgHeader};
+pub use transport::MoonKey;
+#[doc(hidden)]
+pub use transport::ServerMsgHeader;
