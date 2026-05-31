@@ -64,8 +64,8 @@ for lifecycle in client.drain_lifecycle_events() {
 // Init is one-time for this Client session; reconnect restore is automatic.
 
 client.streams().subscribe_orderbook("ETHUSDT")?;
-// After an order appears in events/snapshots:
-// client.orders().move_order(order_uid, 50100.0)?; // also accepts &Order
+// After an order appears in events/snapshots, pass the visible &Order:
+// client.orders().move_order(order, 50100.0)?;
 
 if let Some(snapshot) = client.snapshot() {
     println!("orders={}", snapshot.orders().len());

@@ -11,10 +11,10 @@ let Some(snapshot) = client.snapshot() else { return; };
 let Some(order) = snapshot.orders().get(order_uid) else { return; };
 
 client.orders().move_order(order, new_price)?;
-client.orders().cancel(order.uid)?;
+client.orders().cancel(order)?;
 client.orders().update_stops(order, stops)?;
 client.orders().update_vstop(
-    order.uid,
+    order,
     VStopParams {
         enabled: true,
         fixed: false,
@@ -24,7 +24,7 @@ client.orders().update_vstop(
 )?;
 client.orders().set_immune_for_orders([order], true)?;
 client.orders().turn_panic_sell(order, true)?;
-client.orders().request_status(order.uid)?;
+client.orders().request_status(order)?;
 client.orders().switch_panic_sell_by_market("BTCUSDT", true)?;
 ```
 

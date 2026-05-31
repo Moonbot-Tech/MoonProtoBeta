@@ -111,8 +111,8 @@ for lifecycle in client.drain_lifecycle_events() {
 }
 
 client.streams().subscribe_orderbook("ETHUSDT")?;
-// After an order appears in events/snapshots:
-// client.orders().move_order(order_uid, 50100.0)?; // also accepts &Order
+// After an order appears in events/snapshots, pass the visible &Order:
+// client.orders().move_order(order, 50100.0)?;
 
 for event in client.drain_events() {
     println!("event: {event:?}");
@@ -180,18 +180,15 @@ client.trade().join_orders("BTCUSDT", OrderSide::Long)?;
 Existing-order actions are applied to the live `Orders` state first and only
 then converted to protocol commands:
 
-```rust
-client.orders().move_order(order_uid, new_price)?;
-client.orders().cancel(order_uid)?;
-```
-
-Those calls also accept `&Order` from a snapshot, so UI code can act on the
-visible order object without treating the UID as a protocol detail:
+UI code should normally act on the visible `&Order` from a snapshot. Raw UID is
+accepted as a selector fallback, but the runtime still resolves the live order
+before sending:
 
 ```rust
 if let Some(snapshot) = client.snapshot() {
     if let Some(order) = snapshot.orders().get(order_uid) {
         client.orders().move_order(order, new_price)?;
+        client.orders().cancel(order)?;
     }
 }
 ```
@@ -439,7 +436,7 @@ client.trade().new_order(NewOrderParams::new(
     50_000.0,
     0.001,
 ))?;
-client.orders().move_order(order_uid, new_price)?; // or pass &Order from a snapshot
+// Existing-order actions normally use &Order from snapshot.orders().
 ```
 
 The runtime derives `TradeCtx` from `base_currency_code` and `exchange_code`
