@@ -322,11 +322,10 @@ fn outgoing_send_stops_if_changed_matches_delphi_change_gate() {
 #[test]
 // parity: MoonBot Unit1.pas (GUI send-stops; TakeProfit auto-default guard)
 fn send_stops_derives_take_profit_changed() {
-    // U2 (sverka journal_review #14): the trader must never set the
-    // take_profit_changed wire flag by hand. The runtime derives it so the server
-    // never auto-defaults (clobbers) the trader's TP on the SELL transition
-    // (Unit1.pas:18760). Enabling/changing the TP latches the flag true; once set
-    // it stays latched.
+    // Regression guard: the trader must never set the take_profit_changed wire
+    // flag by hand. The runtime derives it so the server never auto-defaults
+    // (clobbers) the trader's TP on the SELL transition (Unit1.pas:18760).
+    // Enabling/changing the TP latches the flag true; once set it stays latched.
     let mut orders = Orders::new();
     orders.apply(order_status_cmd(make_status(
         7,

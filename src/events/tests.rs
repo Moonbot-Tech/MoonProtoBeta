@@ -628,11 +628,10 @@ fn snapshot_carries_session_identity_set_after_init() {
 
 #[test]
 fn identity_snapshot_shares_arc_no_per_publish_clone() {
-    // O3 regression guard (sverka journal_review #14): session identity must be
-    // Arc-shared, not value-cloned on every publish. Two consecutive snapshots
-    // without an identity change must hand out the SAME underlying
-    // ServerInfo/AuthCheckResponse allocation. Before the Arc-wrap this cloned
-    // 6-10 Strings per publish.
+    // Regression guard: session identity must be Arc-shared, not value-cloned
+    // on every publish. Two consecutive snapshots without an identity change
+    // must hand out the same underlying ServerInfo/AuthCheckResponse allocation.
+    // Before the Arc-wrap this cloned 6-10 Strings per publish.
     use crate::commands::engine_api::{AuthCheckResponse, ServerInfo};
 
     let mut d = EventDispatcher::new();
@@ -1934,10 +1933,9 @@ fn trades_datagram_does_not_clone_markets_state_while_snapshot_held() {
 
 #[test]
 fn idle_orders_tick_does_not_clone_orders_while_snapshot_held() {
-    // O1 regression guard (sverka journal_review #14): periodic_orders_tick runs
-    // on every writer maintenance pass. With a published snapshot alive
-    // (refcount >= 2) the old code escalated `CowState<Orders>` to `make_mut` on
-    // EVERY tick — cloning the whole order map even when nothing was due. The
+    // Regression guard: periodic_orders_tick runs on every writer maintenance
+    // pass. With a published snapshot alive (refcount >= 2), a needless
+    // `make_mut` would clone the whole order map even when nothing was due. The
     // read-only dirty-guard (`has_due_tick_work`) must skip that.
     let mut d = EventDispatcher::new();
     seed_event_markets(&mut d, &["BTCUSDT"]);
@@ -1975,12 +1973,12 @@ fn idle_orders_tick_does_not_clone_orders_while_snapshot_held() {
 
 #[test]
 fn trades_datagram_does_not_clone_trades_state_while_snapshot_held() {
-    // O2 regression guard (sverka journal_review #14): TradesState (gap buckets +
-    // recvd bitmap) is gap-recovery diagnostic (INVARIANT §1.7), not part of the
-    // trader-visible read model, so it was removed from EventDispatcherSnapshot.
-    // on_packet_header mutates it on every trades datagram; with TradesState out
-    // of the snapshot its refcount stays 1, so make_mut mutates in place and must
-    // NOT clone the [GapBucket;50] + recvd bitmap even while a snapshot is held.
+    // Regression guard: TradesState (gap buckets + recvd bitmap) is recovery
+    // bookkeeping, not part of the trader-visible read model, so it is kept out
+    // of EventDispatcherSnapshot. on_packet_header mutates it on every trades
+    // datagram; with TradesState out of the snapshot its refcount stays 1, so
+    // make_mut mutates in place and must not clone the gap buckets while a
+    // snapshot is held.
     let mut d = EventDispatcher::new();
     seed_event_markets(&mut d, &["BTCUSDT"]);
     d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
