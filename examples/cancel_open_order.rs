@@ -92,7 +92,7 @@ fn main() {
         return;
     }
 
-    match client.orders().cancel(order.uid) {
+    match client.orders().cancel(&order) {
         Ok(()) => println!("[send] cancel intent queued; listening briefly for order updates..."),
         Err(err) => {
             eprintln!("[send] failed: {err}");

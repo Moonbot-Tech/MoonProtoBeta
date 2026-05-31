@@ -631,30 +631,20 @@ burst uses 200 ms spacing.
 ## Observability
 
 ```rust
-client.is_authorized();
-client.auth_status();
-client.ping_count();
-client.total_sent();
-client.total_recv();
-client.bytes_per_sec_sent();
-client.bytes_per_sec_recv();
-client.round_trip_delay_ms();
-client.actual_pmtu();
-client.sliced_in_flight_count();
-client.sliced_in_flight_blocks();
-client.pending_high_count();
-client.avg_over_heat();
-client.rs();
-client.server_time_delta_days();
-client.server_token();
-client.peer_app_token();
-client.server_info();
+let lifecycle_events = client.drain_lifecycle_events();
+let domain_events = client.drain_events();
+let revision = client.snapshot_revision();
+let snapshot = client.snapshot();
+let subscriptions = client.active_subscriptions();
+let server_info = client.server_info();
+let auth_info = client.auth_info();
 ```
 
-These raw observability methods are on low-level `Client` for diagnostic tools.
-Regular applications observe connection/domain state through `MoonClient`
-events, lifecycle events, immutable snapshots, and request results. For
-multiple independent server connections, create one `MoonClient` per server.
+Regular applications observe connection and domain state through `MoonClient`
+events, lifecycle events, immutable snapshots, active subscription state, and
+request-result events. Low-level packet counters/PMTU/sliced internals belong
+to diagnostics and FireTest, not to the terminal runtime model. For multiple
+independent server connections, create one `MoonClient` per server.
 
 ## Shutdown
 
