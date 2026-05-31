@@ -59,14 +59,8 @@ fn main() {
     if let Some(time) = expiration.system_time() {
         let unix = unix_seconds(time).unwrap_or_default();
         let days = expiration.days_until(SystemTime::now()).unwrap_or_default();
-        println!(
-            "[expiration] unix_seconds={unix} days_until={days} raw_delphi_time={}",
-            expiration.delphi_time()
-        );
+        println!("[expiration] unix_seconds={unix} days_until={days}");
     } else {
-        println!(
-            "[expiration] not reported raw_delphi_time={}",
-            expiration.delphi_time()
-        );
+        println!("[expiration] not reported");
     }
 }
