@@ -5,10 +5,13 @@ order snapshots and sends user actions back to the runtime by passing the
 visible `&Order`:
 
 ```rust
-use moonproto::VStopParams;
+use moonproto::{StopSettings, VStopParams};
 
 let Some(snapshot) = client.snapshot() else { return; };
 let Some(order) = snapshot.orders().get(ui_state.selected_order_uid()) else { return; };
+let stops = StopSettings::disabled()
+    .with_stop_loss(true, false, 2.5, 0.1)
+    .with_take_profit(true, 50_500.0);
 
 client.orders().move_order(order, new_price)?;
 client.orders().cancel(order)?;
@@ -75,19 +78,16 @@ client.trade().limit_close_position("BTCUSDT", OrderSide::Long)?;
 client.trade().penalty("BTCUSDT")?;
 ```
 
-Bulk buy/sell moves keep the Delphi mode enums in typed parameter structs:
+Bulk buy/sell moves use named constructors for the trader-visible mode. The
+runtime still serializes the exact Delphi packet mode internally:
 
 ```rust
-use moonproto::{
-    FixedPosition, MoveAllBuysCmdType, MoveAllBuysParams, ReplaceMultiKind,
-};
+use moonproto::{FixedPosition, MoveAllBuysParams, ReplaceMultiKind};
 
-client.trade().move_all_buys("BTCUSDT", MoveAllBuysParams {
-    cmd_type: MoveAllBuysCmdType::MoveKind,
-    move_kind: ReplaceMultiKind::TopVol,
-    price: 50_100.0,
-    side: FixedPosition::Long,
-})?;
+client.trade().move_all_buys(
+    "BTCUSDT",
+    MoveAllBuysParams::replace_kind(ReplaceMultiKind::TopVol, 50_100.0, FixedPosition::Long),
+)?;
 ```
 
 If Init/BaseCheck route fields are unavailable, these methods return

@@ -57,30 +57,98 @@ pub use trace::{BulkReplaceNotify, CorridorUpdate, OrderTracePoint};
 
 /// Parameters for `TMoveAllSellsCommand`.
 ///
-/// Keeping the option set in a named struct makes `Client::move_all_sells` and
-/// `build_move_all_sells` harder to call with swapped `price` / `zone` / `side`
-/// arguments.
+/// Applications should create this with the named constructors below. The raw
+/// fields mirror the Delphi packet modes and stay visible to crate internals so
+/// the sender can serialize the exact wire command.
 #[derive(Debug, Clone, Copy)]
 pub struct MoveAllSellsParams {
+    #[doc(hidden)]
     pub cmd_type: MoveAllCmdType,
+    #[doc(hidden)]
     pub move_kind: ReplaceMultiKind,
+    #[doc(hidden)]
     pub price: f64,
+    #[doc(hidden)]
     pub price_zone: PriceZone,
+    #[doc(hidden)]
     pub side: FixedPosition,
+}
+
+impl MoveAllSellsParams {
+    /// Move all matching sell orders with a Delphi bulk-replace mode.
+    pub fn replace_kind(move_kind: ReplaceMultiKind, price: f64, side: FixedPosition) -> Self {
+        Self {
+            cmd_type: MoveAllCmdType::MoveKind,
+            move_kind,
+            price,
+            price_zone: PriceZone::default(),
+            side,
+        }
+    }
+
+    /// Move sell orders whose current price is inside `[min_price, max_price]`.
+    pub fn price_zone(min_price: f64, max_price: f64, side: FixedPosition) -> Self {
+        Self {
+            cmd_type: MoveAllCmdType::PriceZone,
+            move_kind: ReplaceMultiKind::None,
+            price: 0.0,
+            price_zone: PriceZone {
+                min_p: min_price,
+                max_p: max_price,
+            },
+            side,
+        }
+    }
+
+    /// Delphi `%`/personal mode for sell-side bulk move.
+    pub fn percent(price: f64, side: FixedPosition) -> Self {
+        Self {
+            cmd_type: MoveAllCmdType::Pers,
+            move_kind: ReplaceMultiKind::None,
+            price,
+            price_zone: PriceZone::default(),
+            side,
+        }
+    }
 }
 
 /// Parameters for `TMoveAllBuysCommand`.
 ///
-/// Buy bulk moves have fewer modes than sell bulk moves: Delphi supports
-/// `MoveKind` and `%` (`Pers`), but not buy-side `PriceZone`. Keeping the wire
-/// options together avoids a public API with several adjacent positional
-/// scalars.
+/// Applications should create this with the named constructors below. Buy bulk
+/// moves have fewer modes than sell bulk moves: Delphi supports `MoveKind` and
+/// `%` (`Pers`), but not buy-side `PriceZone`.
 #[derive(Debug, Clone, Copy)]
 pub struct MoveAllBuysParams {
+    #[doc(hidden)]
     pub cmd_type: MoveAllBuysCmdType,
+    #[doc(hidden)]
     pub move_kind: ReplaceMultiKind,
+    #[doc(hidden)]
     pub price: f64,
+    #[doc(hidden)]
     pub side: FixedPosition,
+}
+
+impl MoveAllBuysParams {
+    /// Move all matching buy orders with a Delphi bulk-replace mode.
+    pub fn replace_kind(move_kind: ReplaceMultiKind, price: f64, side: FixedPosition) -> Self {
+        Self {
+            cmd_type: MoveAllBuysCmdType::MoveKind,
+            move_kind,
+            price,
+            side,
+        }
+    }
+
+    /// Delphi `%`/personal mode for buy-side bulk move.
+    pub fn percent(price: f64, side: FixedPosition) -> Self {
+        Self {
+            cmd_type: MoveAllBuysCmdType::Pers,
+            move_kind: ReplaceMultiKind::None,
+            price,
+            side,
+        }
+    }
 }
 
 /// Parameters for raw `TVStopUpdate` builders.

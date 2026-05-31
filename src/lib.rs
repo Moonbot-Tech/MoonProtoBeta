@@ -166,14 +166,15 @@ pub use commands::engine_api::{
 };
 pub use commands::{
     field_names, ArbConfigCompact, ArbIsolationFlags, ArbPlatformCode, BaseCurrency,
-    ClientSettingsCommand, DelphiBool, ExchangeCode, FieldValue, FixedPosition, LevManage,
-    MoveAllBuysCmdType, MoveAllCmdType, OrderCompact, OrderType, OrderUpdateData,
-    OrderWorkerStatus, PositionType, PriceZone, ReplaceMultiKind, ResetProfitKind, SpotMarketKind,
+    ClientSettingsCommand, ExchangeCode, FieldValue, FixedPosition, LevManage, OrderCompact,
+    OrderType, OrderWorkerStatus, PositionType, ReplaceMultiKind, ResetProfitKind, SpotMarketKind,
     StopSettings, StrategyActiveMode, StrategyDynamicPicklist, StrategyFieldLayout,
     StrategyFieldType, StrategyFieldUiKind, StrategyFields, StrategyKind, StrategySchema,
     StrategySchemaEditorSection, StrategySchemaEditorSectionKind, StrategySchemaField,
     StrategySchemaKind, StrategySnapshot, TokenTags, TriggerAction, AS_CFG2_SIZE, AS_CFG_SIZE,
 };
+#[doc(hidden)]
+pub use commands::{DelphiBool, MoveAllBuysCmdType, MoveAllCmdType, OrderUpdateData, PriceZone};
 // Parameter types named by public high-level handle methods but defined in
 // command submodules (`MoonTrade::move_all_sells`/`move_all_buys`,
 // `MoonCandles::request_coin_card`).

@@ -75,10 +75,10 @@ impl MoonOrders {
     ///
     /// Set the stop-loss / trailing / take-profit values you want; the runtime
     /// only sends a command when they differ from the order's current stops
-    /// (Delphi `SendStopsIfChanged`). The `StopSettings::take_profit_changed`
-    /// flag is **computed by the runtime** on send (it latches "the trader set a
-    /// TP" so the server does not auto-default it) — any value you put there is
-    /// ignored, so it can never be forgotten and silently clobber the TP.
+    /// (Delphi `SendStopsIfChanged`). Build settings with
+    /// `StopSettings::disabled().with_stop_loss(...).with_take_profit(...)`;
+    /// the internal take-profit latch is computed by the runtime on send, so
+    /// application code does not maintain it.
     pub fn update_stops(
         &self,
         order: impl Into<OrderTarget>,
@@ -201,7 +201,10 @@ impl MoonTrade {
         self.send_intent(RuntimeTradeCommandKind::SplitOrder(params))
     }
 
-    /// Send gated `TMoveAllSellsCommand`.
+    /// Move all matching sell orders.
+    ///
+    /// Build `params` with `MoveAllSellsParams` named constructors; the runtime
+    /// still performs the Delphi live-order pre-send gate before queuing.
     pub fn move_all_sells(
         &self,
         market_name: impl Into<String>,
@@ -213,7 +216,10 @@ impl MoonTrade {
         })
     }
 
-    /// Send gated `TMoveAllBuysCommand`.
+    /// Move all matching buy orders.
+    ///
+    /// Build `params` with `MoveAllBuysParams` named constructors; the runtime
+    /// still performs the Delphi live-order pre-send gate before queuing.
     pub fn move_all_buys(
         &self,
         market_name: impl Into<String>,

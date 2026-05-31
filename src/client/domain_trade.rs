@@ -145,8 +145,10 @@ impl Client {
 
     /// `TMoveAllSellsCommand` (CmdId=13), gated like Delphi active-client UI.
     ///
-    /// The move mode, price, zone and side live in [`crate::commands::trade::MoveAllSellsParams`]
-    /// to keep the public API resistant to swapped positional arguments.
+    /// The move mode, price/zone and side live in
+    /// [`crate::commands::trade::MoveAllSellsParams`], normally built through
+    /// named constructors so application code does not assemble packet modes by
+    /// hand.
     #[doc(hidden)]
     pub fn move_all_sells(
         &self,

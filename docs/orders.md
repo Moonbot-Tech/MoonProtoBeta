@@ -99,6 +99,9 @@ prices.
 Order timestamps are Delphi `TDateTime` values on the wire. Use
 `open_time_delphi()`, `close_time_delphi()`, and `create_time_delphi()` on
 `OrderCompact` instead of interpreting raw `f64` fields directly.
+For exchange-order flags, use `is_opened()`, `is_closed()`, `canceled()`, and
+`is_short()` on `OrderCompact`; the underlying packed boolean bytes are a wire
+detail.
 
 `sell_reason` is a typed `SellReason` value. Use
 `order.sell_reason.description()` for a Delphi-compatible UI label, and use
@@ -148,10 +151,13 @@ for normal terminal UI.
 Order actions go through `client.orders()`:
 
 ```rust
-use moonproto::VStopParams;
+use moonproto::{StopSettings, VStopParams};
 
 let Some(snapshot) = client.snapshot() else { return; };
 let Some(order) = snapshot.orders().get(ui_state.selected_order_uid()) else { return; };
+let stops = StopSettings::disabled()
+    .with_stop_loss(true, false, 2.5, 0.1)
+    .with_take_profit(true, 50_500.0);
 
 client.orders().move_order(order, new_price)?;
 client.orders().cancel(order)?;

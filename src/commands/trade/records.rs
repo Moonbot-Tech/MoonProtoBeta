@@ -142,9 +142,13 @@ pub struct OrderCompact {
     pub stop_flag: u8,
     pub partial_done: u8,
     pub leverage: u8,
+    #[doc(hidden)]
     pub is_opened: DelphiBool,
+    #[doc(hidden)]
     pub is_closed: DelphiBool,
+    #[doc(hidden)]
     pub canceled: DelphiBool,
+    #[doc(hidden)]
     pub is_short: DelphiBool,
 }
 
@@ -274,6 +278,22 @@ impl OrderCompact {
         crate::DelphiTime::from_days(self.create_time)
     }
 
+    pub fn is_opened(self) -> bool {
+        self.is_opened.get()
+    }
+
+    pub fn is_closed(self) -> bool {
+        self.is_closed.get()
+    }
+
+    pub fn canceled(self) -> bool {
+        self.canceled.get()
+    }
+
+    pub fn is_short(self) -> bool {
+        self.is_short.get()
+    }
+
     /// Apply `ServerTimeDelta = InitialTime - Now` to time fields.
     ///
     /// Delphi adjusts only valid `TDateTime` values (`> 1`).
@@ -293,21 +313,32 @@ impl OrderCompact {
 /// `TStopSettings` (MarketsU.pas:215), 46-byte packed record.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StopSettings {
+    #[doc(hidden)]
     pub stop_loss_on: DelphiBool,
+    #[doc(hidden)]
     pub sl_fixed: DelphiBool,
+    #[doc(hidden)]
     pub sl_level: f64,
+    #[doc(hidden)]
     pub sl_spread: f64,
+    #[doc(hidden)]
     pub trailing_on: DelphiBool,
+    #[doc(hidden)]
     pub trailing_fixed: DelphiBool,
+    #[doc(hidden)]
     pub trailing_level: f64,
+    #[doc(hidden)]
     pub ts_spread: f64,
+    #[doc(hidden)]
     pub use_take_profit: DelphiBool,
+    #[doc(hidden)]
     pub take_profit: f64,
     /// "Trader explicitly set the take-profit" latch. On the inbound order state
     /// this is the server's value; on outbound stops the runtime computes it (see
     /// `Orders::send_stops_if_changed`) so callers never set it by hand. The
     /// server auto-defaults TP on the SELL transition only while this is false
     /// (Delphi `Unit1.pas:18760`).
+    #[doc(hidden)]
     pub take_profit_changed: DelphiBool,
 }
 
@@ -347,6 +378,80 @@ impl PartialEq for StopSettings {
 }
 
 impl StopSettings {
+    /// Empty/disabled stop settings.
+    pub fn disabled() -> Self {
+        Self::default()
+    }
+
+    /// Configure stop-loss fields.
+    pub fn with_stop_loss(mut self, enabled: bool, fixed: bool, level: f64, spread: f64) -> Self {
+        self.stop_loss_on = DelphiBool::from_bool(enabled);
+        self.sl_fixed = DelphiBool::from_bool(fixed);
+        self.sl_level = level;
+        self.sl_spread = spread;
+        self
+    }
+
+    /// Configure trailing-stop fields.
+    pub fn with_trailing(mut self, enabled: bool, fixed: bool, level: f64, spread: f64) -> Self {
+        self.trailing_on = DelphiBool::from_bool(enabled);
+        self.trailing_fixed = DelphiBool::from_bool(fixed);
+        self.trailing_level = level;
+        self.ts_spread = spread;
+        self
+    }
+
+    /// Configure take-profit fields.
+    ///
+    /// The outbound `take_profit_changed` latch is still computed by the
+    /// runtime against the live order state before send, matching Delphi
+    /// `SendStopsIfChanged`.
+    pub fn with_take_profit(mut self, enabled: bool, take_profit: f64) -> Self {
+        self.use_take_profit = DelphiBool::from_bool(enabled);
+        self.take_profit = take_profit;
+        self
+    }
+
+    pub fn stop_loss_enabled(self) -> bool {
+        self.stop_loss_on.get()
+    }
+
+    pub fn stop_loss_fixed(self) -> bool {
+        self.sl_fixed.get()
+    }
+
+    pub fn stop_loss_level(self) -> f64 {
+        self.sl_level
+    }
+
+    pub fn stop_loss_spread(self) -> f64 {
+        self.sl_spread
+    }
+
+    pub fn trailing_enabled(self) -> bool {
+        self.trailing_on.get()
+    }
+
+    pub fn trailing_fixed(self) -> bool {
+        self.trailing_fixed.get()
+    }
+
+    pub fn trailing_level(self) -> f64 {
+        self.trailing_level
+    }
+
+    pub fn trailing_spread(self) -> f64 {
+        self.ts_spread
+    }
+
+    pub fn take_profit_enabled(self) -> bool {
+        self.use_take_profit.get()
+    }
+
+    pub fn take_profit(self) -> f64 {
+        self.take_profit
+    }
+
     fn from_wire(wire: WireStopSettings) -> Self {
         Self {
             stop_loss_on: DelphiBool::from_byte(wire.stop_loss_on),
