@@ -59,8 +59,11 @@ pub use header::ServerMsgHeader;
 pub(crate) use mac::MacContext;
 pub(crate) use outer_crypt::outer_light_crypt;
 
-/// MoonProto transport key: 16 bytes used by the MAC and outer obfuscation
-/// layer.
+/// MoonProto transport MAC key: 16 bytes used by SipHash-1-3.
+///
+/// The outer obfuscation key is derived one-way from this key and cached in
+/// [`MacContext`]; pack/unpack never pass the raw MAC key into
+/// `outer_light_crypt` on the hot path.
 pub type MoonKey = [u8; 16];
 
 /// Pack one client command into a wire-ready UDP datagram.
@@ -71,7 +74,6 @@ pub type MoonKey = [u8; 16];
 pub(crate) fn pack_client_packet(
     buf: &mut Vec<u8>,
     mac_ctx: &MacContext,
-    mac_key: &MoonKey,
     cmd: u8,
     client_id: u64,
     payload: &[u8],
@@ -90,8 +92,8 @@ pub(crate) fn pack_client_packet(
     let mac = mac_ctx.mac(buf);
     buf[1..5].copy_from_slice(&mac.to_le_bytes());
 
-    // Obfuscation (always, all modes)
-    outer_light_crypt(buf, mac_key);
+    // Obfuscation (always, all modes). Keyed by the one-way obf_key, not mac_key (F1).
+    outer_light_crypt(buf, mac_ctx.obf_key());
 
     extended::wrap_client_packet(buf, normalize_mode(mask_ver), mode_state)
 }
@@ -114,7 +116,7 @@ pub(crate) fn transport_unpack(
     mask_ver: u8,
 ) -> Option<(ServerMsgHeader, Vec<u8>)> {
     let mac_ctx = MacContext::new(mac_key);
-    transport_unpack_with_mac(&mac_ctx, mac_key, raw, mask_ver)
+    transport_unpack_with_mac(&mac_ctx, raw, mask_ver)
 }
 
 /// Hot-path unpack with a cached [`MacContext`]: derive the SipHash keyed initial
@@ -122,11 +124,11 @@ pub(crate) fn transport_unpack(
 /// key-state setup from receive processing; each packet only pays for the MAC
 /// work that depends on its bytes.
 ///
-/// `mac_key` is still required for `outer_light_crypt` (xoroshiro128+ keystream).
+/// The `outer_light_crypt` whitening key lives in the cached [`MacContext`]
+/// (one-way-derived from mac_key), so no separate key argument is needed.
 #[inline]
 pub(crate) fn transport_unpack_with_mac(
     mac_ctx: &MacContext,
-    mac_key: &MoonKey,
     raw: &[u8],
     mask_ver: u8,
 ) -> Option<(ServerMsgHeader, Vec<u8>)> {
@@ -136,8 +138,8 @@ pub(crate) fn transport_unpack_with_mac(
         return None;
     }
 
-    // De-obfuscate (always, all modes)
-    outer_light_crypt(&mut buf, mac_key);
+    // De-obfuscate (always, all modes). Keyed by the one-way obf_key, not mac_key (F1).
+    outer_light_crypt(&mut buf, mac_ctx.obf_key());
 
     // Parse header
     let hdr = ServerMsgHeader::from_bytes(&buf[..header::SERVER_HDR_SIZE])?;
@@ -192,7 +194,7 @@ mod tests {
         packet.extend_from_slice(payload);
         let mac = mac_ctx.mac(&packet);
         packet[1..5].copy_from_slice(&mac.to_le_bytes());
-        outer_light_crypt(&mut packet, mac_key);
+        outer_light_crypt(&mut packet, mac_ctx.obf_key());
         packet
     }
 
@@ -205,6 +207,30 @@ mod tests {
 
         assert_eq!(hdr.cmd, 43);
         assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn raw_mac_key_obfuscation_is_rejected() {
+        let mac_key = [5u8; 16];
+        let mac_ctx = MacContext::new(&mac_key);
+        let payload = b"old-raw-mac-key-obfuscation";
+        let hdr = ServerMsgHeader {
+            rnd: 0,
+            checksum: 0,
+            ver: TRANSPORT_VER,
+            cmd: 77,
+        };
+        let mut packet = Vec::with_capacity(header::SERVER_HDR_SIZE + payload.len());
+        packet.extend_from_slice(&hdr.to_bytes());
+        packet.extend_from_slice(payload);
+        let mac = mac_ctx.mac(&packet);
+        packet[1..5].copy_from_slice(&mac.to_le_bytes());
+
+        // Old broken shape: the MAC is correct, but the whitening uses raw
+        // MacKey instead of MacContext::obf_key(). New unpack must reject it.
+        outer_light_crypt(&mut packet, &mac_key);
+
+        assert!(transport_unpack(&mac_key, &packet, 0).is_none());
     }
 
     #[test]
@@ -228,9 +254,7 @@ mod tests {
         let extra = {
             let mut buf = Vec::new();
             let mac_ctx = MacContext::new(&mac_key);
-            pack_client_packet(
-                &mut buf, &mac_ctx, &mac_key, 44, 123, payload, 2, &mut state,
-            )
+            pack_client_packet(&mut buf, &mac_ctx, 44, 123, payload, 2, &mut state)
         };
         let packet = build_server_packet(&mac_key, 44, payload);
 

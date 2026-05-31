@@ -36,4 +36,4 @@ pub(crate) use aes_gcm::Aes128Gcm;
 pub(crate) use aes_gcm_codec::{
     cipher_from_key, decrypt, decrypt_with_cipher, encrypt, encrypt_with_cipher,
 };
-pub(crate) use keys::{generate_sub_keys, mix_values};
+pub(crate) use keys::{derive_obfuscation_key, generate_sub_keys, mix_values};

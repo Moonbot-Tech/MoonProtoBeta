@@ -141,7 +141,6 @@ impl ProtocolCore<'_> {
         let continue_recv = if let Some((hdr, payload)) =
             crate::transport::transport_unpack_with_mac(
                 &self.client.transport.mac_ctx,
-                &self.client.cfg.mac_key,
                 datagram,
                 self.client.cfg.mask_ver.to_byte(),
             ) {

@@ -322,7 +322,6 @@ impl ProtocolCore<'_> {
                 crate::transport::pack_client_packet(
                     &mut client.transport.send_buf,
                     &client.transport.mac_ctx,
-                    &client.cfg.mac_key,
                     Command::Sliced.to_byte(),
                     client.cfg.client_id,
                     slice,

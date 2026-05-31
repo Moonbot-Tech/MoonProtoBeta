@@ -30,7 +30,7 @@ fn pack_server_packet(mac_key: &MoonKey, cmd: Command, payload: &[u8]) -> Vec<u8
     let mac_ctx = MacContext::new(mac_key);
     let mac = mac_ctx.mac(&buf);
     buf[1..5].copy_from_slice(&mac.to_le_bytes());
-    outer_light_crypt(&mut buf, mac_key);
+    outer_light_crypt(&mut buf, MacContext::new(mac_key).obf_key());
     buf
 }
 

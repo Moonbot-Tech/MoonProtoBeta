@@ -34,7 +34,6 @@ impl Client {
         let extra = crate::transport::pack_client_packet(
             &mut self.transport.send_buf,
             &self.transport.mac_ctx,
-            &self.cfg.mac_key,
             cmd,
             self.cfg.client_id,
             payload,
@@ -61,7 +60,6 @@ impl Client {
         let extra = crate::transport::pack_client_packet(
             &mut self.transport.send_buf,
             &self.transport.mac_ctx,
-            &self.cfg.mac_key,
             cmd.to_byte(),
             self.cfg.client_id,
             payload,

@@ -106,13 +106,30 @@ pub(crate) struct MacContext {
     v1: u64,
     v2: u64,
     v3: u64,
+    // F1: outer-obfuscation key, derived one-way from mac_key so the whitening
+    // keystream (known-plaintext via zero-padded acks) cannot leak the MAC key.
+    obf_key: MoonKey,
 }
 
 impl MacContext {
-    /// Create the context for the given key (derives the four keyed words once).
+    /// Create the context for the given key: derives the four keyed SipHash words
+    /// and the one-way obfuscation key once (see [`obf_key`](Self::obf_key)).
     pub(crate) fn new(key: &MoonKey) -> Self {
         let (v0, v1, v2, v3) = siphash13_init(key);
-        Self { v0, v1, v2, v3 }
+        Self {
+            v0,
+            v1,
+            v2,
+            v3,
+            obf_key: crate::crypto::derive_obfuscation_key(key),
+        }
+    }
+
+    /// Whitening key for `outer_light_crypt`. Derived one-way from `mac_key`, so
+    /// recovering it from the keystream reveals nothing about the MAC key (F1).
+    #[inline]
+    pub(crate) fn obf_key(&self) -> &MoonKey {
+        &self.obf_key
     }
 
     /// Compute the MAC for the data. Hot-path replacement for

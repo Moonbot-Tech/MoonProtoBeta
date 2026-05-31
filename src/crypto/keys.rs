@@ -62,6 +62,24 @@ pub(crate) fn generate_sub_keys(master_key: &MoonKey, server_token: u64) -> (Moo
     (key_false, key_true)
 }
 
+/// Domain separator for the outer-obfuscation key derivation. Must match the
+/// Delphi side: `GenerateSubKey(MacKey, OBFUSCATION_KEY_TOKEN)`.
+const OBFUSCATION_KEY_TOKEN: u64 = 0x4F42_4655_5343_4154; // "OBFUSCAT"
+
+/// Derive the `outer_light_crypt` whitening key from `mac_key` via the SHAKE-128
+/// KDF (same primitive as the session sub-keys).
+///
+/// **Security (F1):** the transport MAC and the obfuscation MUST NOT share a key.
+/// The whitening keystream is exposed on the wire wherever the plaintext is known
+/// (e.g. the zero-padded PMTU acks), and its PRNG (xoroshiro128+) is reversible —
+/// so a shared key would let an on-path attacker recover the MAC key from the
+/// keystream. This one-way derivation breaks that link: recovering the
+/// obfuscation key reveals nothing about `mac_key`, so the SipHash MAC stays
+/// secret even if the whitening is peeled off.
+pub(crate) fn derive_obfuscation_key(mac_key: &MoonKey) -> MoonKey {
+    generate_sub_key(mac_key, OBFUSCATION_KEY_TOKEN)
+}
+
 /// `MixValues` — SHAKE-128 hash of `(key, token1, token2)` with a 5-round XOR-fold,
 /// then assembly of the two u64 halves via addition.
 ///

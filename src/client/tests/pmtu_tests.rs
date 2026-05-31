@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 
 fn dummy_cfg() -> ClientConfig {
     ClientConfig {
@@ -19,7 +19,10 @@ fn dummy_cfg() -> ClientConfig {
 fn unpack_client_packet(mac_key: &MoonKey, raw: &[u8]) -> (u8, Vec<u8>) {
     const CLIENT_HDR_SIZE: usize = 15;
     let mut buf = raw.to_vec();
-    crate::transport::outer_light_crypt(&mut buf, mac_key);
+    crate::transport::outer_light_crypt(
+        &mut buf,
+        crate::transport::MacContext::new(mac_key).obf_key(),
+    );
     let hdr = crate::transport::ClientMsgHeader::from_bytes(&buf).unwrap();
     let saved = [buf[1], buf[2], buf[3], buf[4]];
     buf[1..5].copy_from_slice(&0u32.to_le_bytes());
