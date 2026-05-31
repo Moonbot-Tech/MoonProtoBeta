@@ -75,9 +75,9 @@ pub(crate) fn decrypt_command(
     let mut plaintext = match crypto::decrypt_with_cipher(decode_cipher, encrypted_data, &[]) {
         Some(pt) => pt,
         None => {
-            // GCM tag mismatch / PKCS7 fail — corrupt packet or wrong key.
+            // GCM tag mismatch — corrupt packet or wrong key.
             // Throttling is on the caller; here it's a plain warn target for filtering.
-            warn!(target: "moonproto::crypted", "AES-GCM decrypt failed (tag mismatch or bad padding)");
+            warn!(target: "moonproto::crypted", "AES-GCM decrypt failed (tag mismatch)");
             return None;
         }
     };

@@ -35,14 +35,18 @@ impl ProtocolCore<'_> {
         // compressed payload, not the original item data.
         let (send_cmd, send_data) = Client::maybe_compress(item.cmd, &item.data);
 
-        // MaxSlicedDataSize check (matches IntStruct.pas:1071-1079)
+        // MaxSlicedDataSize check (matches MoonProtoIntStruct.pas).
         let pmtu_for_check_i32 =
             self.client.actual_pmtu as i32 - header_size as i32 - slice_hdr_size as i32;
         if pmtu_for_check_i32 <= 0 {
             return;
         }
         let pmtu_for_check = pmtu_for_check_i32 as usize;
-        let max_sliced_data_size = pmtu_for_check * 256 - 12 - 1; // 12=CryptoHeader, 1=cmd byte
+        let encrypted_fixed_overhead = crypted::CRYPTO_HEADER_SIZE
+            + crypto::IV_SIZE
+            + crypto::GCM_TAG_SIZE
+            + std::mem::size_of::<u8>(); // inner cmd byte in the first slice
+        let max_sliced_data_size = pmtu_for_check * 256 - encrypted_fixed_overhead;
         if send_data.len() >= max_sliced_data_size {
             return; // too large, drop (Delphi logs + exits)
         }

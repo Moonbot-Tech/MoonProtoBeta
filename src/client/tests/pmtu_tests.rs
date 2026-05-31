@@ -572,9 +572,50 @@ fn encrypted_low_batch_size_uses_wire_size_after_crypt() {
 
     let wire_len = u16::from_le_bytes([client.tmp_send_buf[1], client.tmp_send_buf[2]]) as usize;
     assert_eq!(client.tmp_send_buf[0], Command::Crypted.to_byte());
-    assert_eq!(wire_len, 60);
+    assert_eq!(wire_len, 50);
     assert_eq!(client.tmp_send_buf.len(), 3 + wire_len);
     assert_eq!(client.tmp_send_size, 15 + 3 + wire_len);
+}
+
+#[test]
+// parity: MoonBot MoonProtoIntStruct.pas:MaxSlicedDataSize
+fn encrypted_sliced_max_size_counts_full_gcm_overhead() {
+    let mut client = Client::new(dummy_cfg());
+    client.encode_cipher = Some(crypto::cipher_from_key(&[0; 16]));
+    client.actual_pmtu = 100;
+
+    let pmtu = usize::from(client.actual_pmtu) - 15 - 4;
+    let max_sliced_data_size = pmtu * 256
+        - crate::protocol::crypted::CRYPTO_HEADER_SIZE
+        - crate::crypto::IV_SIZE
+        - crate::crypto::GCM_TAG_SIZE
+        - 1;
+
+    let mut accepted = SendItem {
+        data: vec![0xA5; max_sliced_data_size - 1],
+        cmd: Command::UI.to_byte() | COMPRESSED_FLAG,
+        encrypted: true,
+        priority: SendPriority::Sliced,
+        retry_left: 1,
+        max_retries: 5,
+        msg_num: 0,
+        last_sent_at: 0,
+        u_key: UniqueKey::none(),
+    };
+
+    writer(&mut client).create_sliced_and_send(&accepted);
+    assert_eq!(
+        client.sending[0].blocks_count, 256,
+        "max-1 payload still fits exactly into byte MaxBlockNum range"
+    );
+
+    client.sending.clear();
+    accepted.data.push(0xA5);
+    writer(&mut client).create_sliced_and_send(&accepted);
+    assert!(
+        client.sending.is_empty(),
+        "payload at MaxSlicedDataSize is dropped before encrypted 257th slice"
+    );
 }
 
 #[test]

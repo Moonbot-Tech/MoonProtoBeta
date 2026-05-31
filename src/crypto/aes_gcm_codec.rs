@@ -7,7 +7,8 @@ use zerocopy::byteorder::little_endian::{U32 as LeU32, U64 as LeU64};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 static IV_COUNTER: AtomicU64 = AtomicU64::new(1);
-const IV_SIZE: usize = 12;
+pub(crate) const IV_SIZE: usize = 12;
+pub(crate) const GCM_TAG_SIZE: usize = 16;
 
 #[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C, packed)]
@@ -57,7 +58,7 @@ pub(crate) fn cipher_from_key(key: &MoonKey) -> Aes128Gcm {
     Aes128Gcm::new(key.into())
 }
 
-/// AES-128-GCM encrypt with PKCS7 padding — hot path version with a reusable cipher.
+/// AES-128-GCM encrypt without PKCS7 padding — hot path version with a reusable cipher.
 ///
 /// Callers pass the session cipher in, so packet encrypt does not rebuild the
 /// AES key schedule on the hot path.
@@ -72,23 +73,20 @@ pub(crate) fn encrypt_with_cipher(cipher: &Aes128Gcm, plaintext: &[u8], aad: &[u
     };
     let mut iv_bytes = [0u8; IV_SIZE];
     iv_bytes.copy_from_slice(wire_iv.as_bytes());
-    // PKCS7 padding
-    let block_size = 16usize;
-    let padding = block_size - (plaintext.len() % block_size);
-    let cipher_offset = IV_SIZE + 16;
-    let total_len = cipher_offset + plaintext.len() + padding;
+    // AES-GCM is CTR-based: ciphertext length is exactly plaintext length.
+    let cipher_offset = IV_SIZE + GCM_TAG_SIZE;
+    let total_len = cipher_offset + plaintext.len();
     let mut output = Vec::with_capacity(total_len);
     output.extend_from_slice(&iv_bytes);
     output.resize(cipher_offset, 0);
     output.extend_from_slice(plaintext);
-    output.resize(total_len, padding as u8);
     let nonce = Nonce::from_slice(&iv_bytes);
 
-    // Encrypt in-place — `expect` invariant: AES-GCM fails only at a ≥ 16 EiB payload,
-    // which is impossible in MoonProto (PMTU < 8KB → one message).
+    // Encrypt in-place — `expect` invariant: AES-GCM fails only at a ≥ 16 EiB
+    // payload, far beyond MoonProto direct/sliced payload limits.
     let tag = cipher
         .encrypt_in_place_detached(nonce, aad, &mut output[cipher_offset..])
-        .expect("AES-GCM payload < 16 EiB — invariant satisfied by MTU");
+        .expect("AES-GCM payload < 16 EiB — invariant satisfied by protocol limits");
 
     // Output: IV(12) + Tag(16) + Ciphertext
     output[IV_SIZE..cipher_offset].copy_from_slice(tag.as_slice());
@@ -98,13 +96,13 @@ pub(crate) fn encrypt_with_cipher(cipher: &Aes128Gcm, plaintext: &[u8], aad: &[u
 /// AES-128-GCM decrypt with a reusable cipher — hot path version.
 /// See `encrypt_with_cipher` for the cached-cipher context.
 pub(crate) fn decrypt_with_cipher(cipher: &Aes128Gcm, data: &[u8], aad: &[u8]) -> Option<Vec<u8>> {
-    if data.len() < IV_SIZE + 16 {
+    if data.len() < IV_SIZE + GCM_TAG_SIZE {
         return None;
     }
 
     let iv_bytes = &data[0..IV_SIZE];
-    let tag_bytes = &data[IV_SIZE..IV_SIZE + 16];
-    let ciphertext = &data[IV_SIZE + 16..];
+    let tag_bytes = &data[IV_SIZE..IV_SIZE + GCM_TAG_SIZE];
+    let ciphertext = &data[IV_SIZE + GCM_TAG_SIZE..];
 
     if ciphertext.is_empty() {
         return None;
@@ -118,25 +116,14 @@ pub(crate) fn decrypt_with_cipher(cipher: &Aes128Gcm, data: &[u8], aad: &[u8]) -
         .decrypt_in_place_detached(nonce, aad, &mut buf, tag)
         .ok()?;
 
-    // Strip PKCS7 padding
-    let padding = *buf.last()? as usize;
-    if padding == 0 || padding > 16 || padding > buf.len() {
-        return None;
-    }
-    for &b in &buf[buf.len() - padding..] {
-        if b as usize != padding {
-            return None;
-        }
-    }
-    buf.truncate(buf.len() - padding);
     Some(buf)
 }
 
-/// AES-128-GCM encrypt with PKCS7 padding — convenience wrapper for the rare
+/// AES-128-GCM encrypt without PKCS7 padding — convenience wrapper for the rare
 /// cases (handshake) where the cipher is not cached. Each call creates the cipher
 /// anew — acceptable only when called a handful of times per session.
 ///
-/// Output layout: IV(12) + Tag(16) + Ciphertext(padded)
+/// Output layout: IV(12) + Tag(16) + Ciphertext(plaintext length)
 ///
 /// IV construction (byte-exact with Delphi MoonProtoFunc.pas:584-587):
 /// - `R1 = atomic_inc(counter) XOR iv_mask` (8 bytes LE)
@@ -145,8 +132,8 @@ pub(crate) fn encrypt(key: &MoonKey, plaintext: &[u8], aad: &[u8]) -> Vec<u8> {
     encrypt_with_cipher(&cipher_from_key(key), plaintext, aad)
 }
 
-/// AES-128-GCM decrypt, verifies tag, strips PKCS7 padding — convenience wrapper
-/// for handshake. On the hot path use `decrypt_with_cipher`.
+/// AES-128-GCM decrypt, verifies tag, and returns the exact ciphertext length as
+/// plaintext length. On the hot path use `decrypt_with_cipher`.
 pub(crate) fn decrypt(key: &MoonKey, data: &[u8], aad: &[u8]) -> Option<Vec<u8>> {
     decrypt_with_cipher(&cipher_from_key(key), data, aad)
 }
@@ -167,6 +154,18 @@ mod tests {
         let encrypted = encrypt(&key, plaintext, &aad);
         let decrypted = decrypt(&key, &encrypted, &aad).unwrap();
         assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn ciphertext_length_matches_plaintext_without_padding() {
+        let key: MoonKey = [7; 16];
+        for len in [1usize, 15, 16, 17, 31, 32, 33] {
+            let plaintext = vec![0xA5; len];
+            let encrypted = encrypt(&key, &plaintext, &[]);
+            assert_eq!(encrypted.len(), IV_SIZE + GCM_TAG_SIZE + len);
+            let decrypted = decrypt(&key, &encrypted, &[]).unwrap();
+            assert_eq!(decrypted, plaintext);
+        }
     }
 
     #[test]
