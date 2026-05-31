@@ -77,6 +77,7 @@ pub struct TopOfBook {
 pub struct OrderBookSnapshot {
     pub(crate) market_index: u16,
     pub kind: OrderBookKind,
+    #[doc(hidden)]
     pub seq: u16,
     pub buys: Vec<OrderBookLevel>,
     pub sells: Vec<OrderBookLevel>,
@@ -121,10 +122,12 @@ pub enum OrderBookEvent {
     /// code should use `market_name`, `kind`, and `top`, or read the full
     /// applied book from the snapshot by market name.
     Apply {
+        #[doc(hidden)]
         market_index: u16,
         market_name: Option<Arc<str>>,
         kind: OrderBookKind,
         is_full: bool,
+        #[doc(hidden)]
         seq: u16,
         top: TopOfBook,
     },

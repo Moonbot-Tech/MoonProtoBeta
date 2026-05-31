@@ -8,7 +8,12 @@ pub enum TradesEvent {
     /// "new rows are available" signal; it intentionally does not carry an
     /// owned `TradesPacket`, so the hot path does not build a `Vec` only for
     /// the public callback.
-    Applied { packet_num: u16, base_time: f64 },
+    Applied {
+        #[doc(hidden)]
+        packet_num: u16,
+        #[doc(hidden)]
+        base_time: f64,
+    },
     /// A packet-number gap was detected: `[start..=end]` is missing. The
     /// recovery bucket was created; retry is driven by `tick()`.
     #[doc(hidden)]

@@ -89,7 +89,6 @@ pub struct OrderBookLevel {
 }
 
 pub struct OrderBookSnapshot {
-    pub seq: u16,
     pub buys: Vec<OrderBookLevel>,
     pub sells: Vec<OrderBookLevel>,
 }
