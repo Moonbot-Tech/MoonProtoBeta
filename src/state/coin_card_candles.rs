@@ -15,6 +15,7 @@ pub enum CoinCardCandlesEvent {
     Updated {
         market: String,
         kind: DeepHistoryKind,
+        #[doc(hidden)]
         request_uid: u64,
         count: usize,
         revision: u64,
@@ -22,6 +23,7 @@ pub enum CoinCardCandlesEvent {
     UpdateFailed {
         market: String,
         kind: DeepHistoryKind,
+        #[doc(hidden)]
         request_uid: Option<u64>,
         error: String,
     },

@@ -58,12 +58,14 @@ impl From<ExchangeKind> for u8 {
 pub enum TransferAssetsEvent {
     Updated {
         kind: ExchangeKind,
+        #[doc(hidden)]
         request_uid: u64,
         count: usize,
         nonzero_count: usize,
         revision: u64,
     },
     RefreshCompleted {
+        #[doc(hidden)]
         request_id: u64,
         requested: usize,
         updated: usize,
@@ -72,6 +74,7 @@ pub enum TransferAssetsEvent {
     },
     UpdateFailed {
         kind: ExchangeKind,
+        #[doc(hidden)]
         request_uid: Option<u64>,
         error: String,
     },
@@ -80,6 +83,7 @@ pub enum TransferAssetsEvent {
         qty: f64,
         from: ExchangeKind,
         to: ExchangeKind,
+        #[doc(hidden)]
         request_uid: u64,
         revision: u64,
     },

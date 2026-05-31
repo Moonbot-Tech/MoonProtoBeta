@@ -22,20 +22,24 @@ pub struct AccountState {
 #[derive(Debug, Clone, PartialEq)]
 pub enum AccountEvent {
     HedgeModeUpdated {
+        #[doc(hidden)]
         request_uid: u64,
         hedge_mode: bool,
         revision: u64,
     },
     HedgeModeUpdateFailed {
+        #[doc(hidden)]
         request_uid: Option<u64>,
         error: String,
     },
     ApiExpirationUpdated {
+        #[doc(hidden)]
         request_uid: u64,
         expiration: ApiExpirationTime,
         revision: u64,
     },
     ApiExpirationUpdateFailed {
+        #[doc(hidden)]
         request_uid: Option<u64>,
         error: String,
     },
@@ -50,6 +54,7 @@ impl AccountState {
         self.hedge_mode
     }
 
+    #[doc(hidden)]
     pub fn hedge_mode_request_uid(&self) -> Option<u64> {
         self.hedge_mode_request_uid
     }
@@ -58,6 +63,7 @@ impl AccountState {
         self.api_expiration
     }
 
+    #[doc(hidden)]
     pub fn api_expiration_request_uid(&self) -> Option<u64> {
         self.api_expiration_request_uid
     }

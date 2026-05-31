@@ -29,10 +29,12 @@ pub struct CandlesSnapshotApplySummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CandlesSnapshotEvent {
     Ready {
+        #[doc(hidden)]
         request_uid: u64,
         summary: CandlesSnapshotApplySummary,
     },
     Failed {
+        #[doc(hidden)]
         request_uid: Option<u64>,
         error: String,
     },

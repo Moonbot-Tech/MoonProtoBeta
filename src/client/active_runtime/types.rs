@@ -224,7 +224,9 @@ impl MoonEventQueue {
 #[derive(Debug, Clone, PartialEq)]
 pub struct EngineActionTicket {
     pub kind: crate::events::EngineActionKind,
+    #[doc(hidden)]
     pub request_uid: Option<u64>,
+    #[doc(hidden)]
     pub method: crate::commands::EngineMethod,
 }
 
@@ -236,6 +238,7 @@ pub struct EngineActionTicket {
 pub struct CoinCardCandlesTicket {
     pub market: String,
     pub kind: crate::commands::candles::DeepHistoryKind,
+    #[doc(hidden)]
     pub request_uid: Option<u64>,
 }
 
