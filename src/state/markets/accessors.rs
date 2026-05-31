@@ -21,6 +21,7 @@ impl MarketsState {
     ///
     /// This is empty before Init completes and may be stale only while
     /// [`Self::indexes_synchronized`] is false.
+    #[doc(hidden)]
     pub fn market_index_names(&self) -> &[String] {
         self.market_indexes.as_slice()
     }
@@ -44,6 +45,7 @@ impl MarketsState {
     /// Returns `None` while indexes are stale after a server restart. During
     /// that window `EventDispatcher` also gates market-index streams, so regular
     /// consumers do not see trades/orderbook events with an old mapping.
+    #[doc(hidden)]
     pub fn market_name_by_index(&self, m_index: u16) -> Option<&str> {
         if !self.indexes_synchronized {
             return None;
@@ -54,12 +56,14 @@ impl MarketsState {
     }
 
     /// Resolve a server `mIndex` into a stable market handle.
+    #[doc(hidden)]
     pub fn market_by_index(&self, m_index: u16) -> Option<MarketHandle> {
         let name = self.market_name_by_index(m_index)?;
         self.get(name)
     }
 
     /// Resolve a server `mIndex` into an owned market snapshot.
+    #[doc(hidden)]
     pub fn market_snapshot_by_index(&self, m_index: u16) -> Option<Market> {
         self.market_by_index(m_index)
             .map(|handle| handle.snapshot())
@@ -69,6 +73,7 @@ impl MarketsState {
     ///
     /// Uses the canonical server-index mapping rather than the `markets` vector
     /// position, because this is the index carried by stream packets.
+    #[doc(hidden)]
     pub fn market_index_by_name(&self, market_name: &str) -> Option<u16> {
         if !self.indexes_synchronized {
             return None;
@@ -80,6 +85,7 @@ impl MarketsState {
     ///
     /// The price lives on the `Market` (Delphi `TMarket`); it is returned as a copy under a
     /// short read-lock, like [`MarketHandle::balance_position`].
+    #[doc(hidden)]
     pub fn price_by_index(&self, m_index: u16) -> Option<MarketPrice> {
         let idx = self.local_pos_for_server_index(m_index)?;
         self.markets.get(idx).map(|handle| handle.with(|m| m.price))

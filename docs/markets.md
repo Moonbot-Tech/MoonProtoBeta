@@ -235,12 +235,11 @@ markets.market_count();
 markets.corr_count();
 ```
 
-Server-index helpers such as `market_index_by_name`, `market_name_by_index`, and
-`price_by_index` are diagnostic protocol tools. Normal UI code keeps a
-`MarketHandle` or reads by market name. In the normal `MoonClient` path, trades
-and orderbook events are gated until fresh indexes are rebuilt by cold-init
-`GetMarketsList` or refreshed through `GetMarketsIndexes` after reconnect/server
-restart.
+Server-index mapping is runtime/diagnostic protocol state. Normal UI code keeps
+a `MarketHandle` or reads by market name. In the normal `MoonClient` path,
+trades and orderbook events are gated until fresh indexes are rebuilt by
+cold-init `GetMarketsList` or refreshed through `GetMarketsIndexes` after
+reconnect/server restart.
 
 ## TokenTags
 
@@ -370,9 +369,9 @@ is internal to the active library. User code should react to
 `MarketsEvent::NewMarketsAdded { names }`, which is emitted only after
 `GetMarketsList` actually inserted the named markets into `MarketsState`.
 
-`UpdateMarketsList` carries server `mIndex` values. Price updates and
-`price_by_index` resolve those indexes through the current `GetMarketsIndexes`
-mapping, so stale mappings after a server restart are not used.
+`UpdateMarketsList` carries server `mIndex` values. Price updates resolve those
+indexes through the current `GetMarketsIndexes` mapping, so stale mappings after
+a server restart are not used.
 
 `MarketsState::last_markets_list_apply_timing()` is diagnostics only. In test
 or `--features diagnostics` builds it records coarse total/loop timing for the
