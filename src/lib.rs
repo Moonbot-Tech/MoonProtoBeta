@@ -166,12 +166,13 @@ pub use commands::engine_api::{
 };
 pub use commands::{
     field_names, ArbConfigCompact, ArbIsolationFlags, ArbPlatformCode, BaseCurrency,
-    ClientSettingsCommand, ExchangeCode, FieldValue, FixedPosition, LevManage, OrderCompact,
-    OrderType, OrderWorkerStatus, PositionType, ReplaceMultiKind, ResetProfitKind, SpotMarketKind,
-    StopSettings, StrategyActiveMode, StrategyDynamicPicklist, StrategyFieldLayout,
+    ClientSettingsCommand, ExchangeCode, FieldValue, FixedPosition, JoinSellKind, LevManage,
+    OrderCompact, OrderType, OrderWorkerStatus, PositionType, ReplaceMultiKind, ResetProfitKind,
+    SpotMarketKind, StopSettings, StrategyActiveMode, StrategyDynamicPicklist, StrategyFieldLayout,
     StrategyFieldType, StrategyFieldUiKind, StrategyFields, StrategyKind, StrategySchema,
     StrategySchemaEditorSection, StrategySchemaEditorSectionKind, StrategySchemaField,
-    StrategySchemaKind, StrategySnapshot, TokenTags, TriggerAction, AS_CFG2_SIZE, AS_CFG_SIZE,
+    StrategySchemaKind, StrategySnapshot, TempBlacklistEntry, TokenTags, TriggerAction,
+    AS_CFG2_SIZE, AS_CFG_SIZE,
 };
 #[doc(hidden)]
 pub use commands::{DelphiBool, MoveAllBuysCmdType, MoveAllCmdType, OrderUpdateData, PriceZone};

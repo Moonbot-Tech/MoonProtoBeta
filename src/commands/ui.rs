@@ -247,6 +247,59 @@ impl EmuTradePoint {
 //  Subcommand payloads
 // =============================================================================
 
+/// User-facing join-sells mode stored in
+/// [`ClientSettingsCommand::join_sell_kind`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinSellKind {
+    None,
+    FixedPrice,
+    FixedProfit,
+    Unknown(u8),
+}
+
+impl JoinSellKind {
+    pub fn from_byte(value: u8) -> Self {
+        match value {
+            0 => Self::None,
+            1 => Self::FixedPrice,
+            2 => Self::FixedProfit,
+            other => Self::Unknown(other),
+        }
+    }
+
+    pub fn to_byte(self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::FixedPrice => 1,
+            Self::FixedProfit => 2,
+            Self::Unknown(value) => value,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::FixedPrice => "Fixed Price",
+            Self::FixedProfit => "Fixed Profit",
+            Self::Unknown(_) => "Unknown",
+        }
+    }
+}
+
+/// One temporary coin-blacklist row from [`ClientSettingsCommand`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TempBlacklistEntry<'a> {
+    pub symbol: &'a str,
+    /// Remaining blacklist duration in Delphi days.
+    pub remaining_days: f64,
+}
+
+impl TempBlacklistEntry<'_> {
+    pub fn remaining_hours(self) -> f64 {
+        self.remaining_days * 24.0
+    }
+}
+
 /// CmdId=1 `TClientSettingsCommand` — full MoonBot UI/settings snapshot.
 ///
 /// Many fields are append-only soft-read fields: depending on server version,
@@ -254,15 +307,17 @@ impl EmuTradePoint {
 /// tail from current `cfg`; in the Active Lib path this is handled by
 /// `UICommand::parse_with_client_settings_fallback`.
 ///
-/// `Default` gives the same ergonomic starting point as Delphi
-/// `TClientSettingsCommand.Create`: create defaults, change the fields the UI
-/// owns, then send the snapshot through the high-level active client.
+/// Normal terminal code edits the retained settings snapshot and sends the
+/// whole snapshot back through the high-level active client. `Default` is mainly
+/// for tests/tools, not for a live configured terminal session.
 /// ```ignore
-/// let mut settings = ClientSettingsCommand::default();
-/// settings.x_sell = 3;
-/// settings.use_g_take_profit = true;
-/// settings.g_take_profit = 1.5;
-/// client.send_settings(settings)?;
+/// if let Some(current) = &snapshot.settings().client_settings {
+///     let mut settings = current.clone();
+///     settings.x_sell = 3;
+///     settings.use_g_take_profit = true;
+///     settings.g_take_profit = 1.5;
+///     client.settings().send(settings);
+/// }
 /// ```
 /// `uid` is `0` by default. High-level send helpers write a fresh wire UID and
 /// use Delphi's fixed settings UKey slot for queue deduplication. Set this
@@ -316,6 +371,79 @@ pub struct ClientSettingsCommand {
     pub join_sell_kind: u8,
     /// Compact `ArbConfig` form, not a raw Delphi record.
     pub arb_config: ArbConfigCompact,
+}
+
+impl ClientSettingsCommand {
+    /// Effective take-profit percentage shown by the main sell control.
+    ///
+    /// Mirrors terminal state after Delphi `ApplySettingsFromServer` calls
+    /// `UpdateFixedButtons`: fixed-sell mode uses the selected `SPrice[sbNum]`
+    /// preset, normal mode uses `x_sell`, and `x_sell == 0` falls back to scalp
+    /// mode (`x_sell_scalp / 50`).
+    pub fn effective_take_profit_percent(&self) -> f64 {
+        if self.fixed_sell_mode {
+            self.selected_fixed_sell_percent()
+        } else if self.x_sell > 0 {
+            let mut value = f64::from(self.x_sell);
+            if self.x_tmode {
+                value *= 10.0;
+            }
+            value.min(900.0)
+        } else {
+            f64::from(self.x_sell_scalp) / 50.0
+        }
+    }
+
+    /// Delphi visible percentage for a 1-based fixed-sell preset button.
+    pub fn fixed_sell_preset_percent(&self, slot_1_based: usize) -> Option<f64> {
+        if !(1..=6).contains(&slot_1_based) {
+            return None;
+        }
+        let value = f64::from(self.s_price[slot_1_based - 1]);
+        Some(if self.x_tmode { value * 10.0 } else { value })
+    }
+
+    /// Fixed-sell presets shown as the six sell-price buttons.
+    pub fn fixed_sell_presets(&self) -> &[f32; 6] {
+        &self.s_price
+    }
+
+    /// Delphi-compatible 1-based fixed-sell slot number, clamped to `1..=6`.
+    pub fn selected_fixed_sell_slot(&self) -> usize {
+        usize::from(self.sb_num.clamp(1, 6))
+    }
+
+    /// Raw current fixed-sell preset value selected by [`Self::selected_fixed_sell_slot`].
+    pub fn selected_fixed_sell_price(&self) -> f32 {
+        self.s_price[self.selected_fixed_sell_slot() - 1]
+    }
+
+    /// Delphi visible percentage for the currently selected fixed-sell preset.
+    pub fn selected_fixed_sell_percent(&self) -> f64 {
+        self.fixed_sell_preset_percent(self.selected_fixed_sell_slot())
+            .unwrap_or(0.0)
+    }
+
+    /// Typed join-sells mode for the multi-order "M" control.
+    pub fn join_sell_mode(&self) -> JoinSellKind {
+        JoinSellKind::from_byte(self.join_sell_kind)
+    }
+
+    /// Set the join-sells mode while preserving the exact Delphi byte on wire.
+    pub fn set_join_sell_mode(&mut self, mode: JoinSellKind) {
+        self.join_sell_kind = mode.to_byte();
+    }
+
+    /// Temporary blacklist rows as UI entries instead of parallel wire arrays.
+    pub fn temp_blacklist_entries(&self) -> impl Iterator<Item = TempBlacklistEntry<'_>> {
+        self.temp_bl_symbols
+            .iter()
+            .zip(self.temp_bl_times.iter())
+            .map(|(symbol, remaining_days)| TempBlacklistEntry {
+                symbol,
+                remaining_days: *remaining_days,
+            })
+    }
 }
 
 /// CmdId=3 `TStratStartStopCommand`. Boolean IsStart.

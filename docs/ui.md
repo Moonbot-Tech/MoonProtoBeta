@@ -235,6 +235,31 @@ stop/trailing/take-profit settings, iceberg flags, order-signing flag, coin
 blacklist fields, manual strategy id, stop-market settings, AutoStart blobs,
 hotkey sell prices, multi-order join mode, and `ArbConfigCompact`.
 
+Normal UI code clones the retained snapshot, changes the fields behind one UI
+page/control, and sends the whole snapshot back:
+
+```rust
+if let Some(current) = &snapshot.settings().client_settings {
+    let mut settings = current.clone();
+    settings.use_g_take_profit = true;
+    settings.g_take_profit = 2.5;
+    client.settings().send(settings);
+}
+```
+
+Useful helpers:
+
+| UI area | API |
+|---|---|
+| Main sell / scalp / fixed-sell display value | `effective_take_profit_percent()` |
+| Six fixed sell buttons | `fixed_sell_presets()`, `fixed_sell_preset_percent(slot)`, `selected_fixed_sell_slot()`, `selected_fixed_sell_percent()` |
+| Temporary blacklist rows | `temp_blacklist_entries()` |
+| Multi-order sell join combo | `JoinSellKind`, `join_sell_mode()`, `set_join_sell_mode(...)` |
+
+`fixed_sell_price` is not the best source for drawing the selected fixed-sell
+button: MoonBot derives the active fixed price from `s_price[sb_num]` after
+applying settings. Use the fixed-sell helpers for UI display.
+
 AutoStart blobs are opaque byte arrays with fixed public sizes:
 
 ```rust

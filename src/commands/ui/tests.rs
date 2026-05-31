@@ -552,6 +552,52 @@ fn client_settings_roundtrip_full() {
 }
 
 #[test]
+fn client_settings_ui_helpers_match_delphi_meaning() {
+    let mut settings = ClientSettingsCommand {
+        x_sell: 50,
+        x_sell_scalp: 10,
+        x_tmode: true,
+        fixed_sell_mode: false,
+        fixed_sell_price: 12.0,
+        s_price: [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        sb_num: 9,
+        join_sell_kind: 2,
+        temp_bl_symbols: vec!["DOGE".to_string(), "SHIB".to_string()],
+        temp_bl_times: vec![0.5, 0.25],
+        ..ClientSettingsCommand::default()
+    };
+
+    assert_eq!(settings.effective_take_profit_percent(), 500.0);
+    settings.x_sell = 0;
+    assert_eq!(settings.effective_take_profit_percent(), 0.2);
+    settings.fixed_sell_mode = true;
+    assert_eq!(settings.effective_take_profit_percent(), 60.0);
+
+    assert_eq!(settings.selected_fixed_sell_slot(), 6);
+    assert_eq!(settings.selected_fixed_sell_price(), 6.0);
+    assert_eq!(settings.selected_fixed_sell_percent(), 60.0);
+    assert_eq!(settings.fixed_sell_preset_percent(2), Some(20.0));
+    assert_eq!(settings.fixed_sell_preset_percent(0), None);
+    assert_eq!(
+        settings.fixed_sell_presets(),
+        &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    );
+
+    assert_eq!(settings.join_sell_mode(), JoinSellKind::FixedProfit);
+    settings.set_join_sell_mode(JoinSellKind::FixedPrice);
+    assert_eq!(settings.join_sell_kind, 1);
+    assert_eq!(JoinSellKind::from_byte(7).to_byte(), 7);
+    assert_eq!(JoinSellKind::FixedProfit.label(), "Fixed Profit");
+
+    let entries: Vec<_> = settings.temp_blacklist_entries().collect();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].symbol, "DOGE");
+    assert_eq!(entries[0].remaining_hours(), 12.0);
+    assert_eq!(entries[1].symbol, "SHIB");
+    assert_eq!(entries[1].remaining_hours(), 6.0);
+}
+
+#[test]
 fn client_settings_soft_tail_uses_delphi_cfg_fallback() {
     let mut raw = Vec::new();
     raw.push(CMD_CLIENT_SETTINGS);

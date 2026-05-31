@@ -66,6 +66,6 @@ pub use trade::{
 #[doc(hidden)]
 pub use trades_stream::{parse_watcher_fills, Trade, TradeSection, TradesPacket, WatcherFill};
 pub use ui::{
-    ArbConfigCompact, ClientSettingsCommand, LevManage, ResetProfitKind, SpotMarketKind,
-    TriggerAction, AS_CFG2_SIZE, AS_CFG_SIZE,
+    ArbConfigCompact, ClientSettingsCommand, JoinSellKind, LevManage, ResetProfitKind,
+    SpotMarketKind, TempBlacklistEntry, TriggerAction, AS_CFG2_SIZE, AS_CFG_SIZE,
 };
