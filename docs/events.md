@@ -77,9 +77,7 @@ fn handle_event(event: Event) {
         Event::CandlesSnapshot(candles_event) => handle_candles_ready(candles_event),
         Event::Strat(strat_event) => handle_strategy_event(strat_event),
         Event::Settings(settings_event) => handle_settings_event(settings_event),
-        Event::EngineResponse(resp) if !resp.success => {
-            show_engine_error(resp.error_code, &resp.error_msg);
-        }
+        Event::EngineAction(action) => handle_engine_action(action),
         Event::ServerLog { time, msg } => append_server_log(time, msg),
         _ => {}
     }
@@ -146,14 +144,14 @@ pub enum Event {
     Strat(StratEvent),
     Settings(SettingsEvent),
     Markets(MarketsEvent),
-    EngineResponse(EngineResponse),
+    EngineAction(EngineActionEvent),
     ServerLog { time: f64, msg: String },
 }
 ```
 
-Low-level diagnostic builds may also receive hidden raw/parse-failure events.
-They are for FireTest/protocol dumps only; they are not a recovery mechanism or
-normal application control flow.
+Low-level diagnostic builds may also receive hidden raw/parse-failure/raw Engine
+API response events. They are for FireTest/protocol dumps only; they are not a
+recovery mechanism or normal application control flow.
 
 `TradesEvent::Applied` is a signal that retained trade/history state has been
 updated. Read actual rows from `MarketHistoryReaders`.

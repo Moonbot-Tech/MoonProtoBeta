@@ -219,8 +219,8 @@ impl MoonEventQueue {
 
 /// Ticket returned after Active Lib has queued a non-blocking Engine API action.
 ///
-/// The server result arrives later as [`crate::events::Event::EngineAction`] and
-/// as the underlying [`crate::events::Event::EngineResponse`].
+/// The server result arrives later as [`crate::events::Event::EngineAction`].
+/// Retained state is updated through the matching domain events/snapshots.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EngineActionTicket {
     pub kind: crate::events::EngineActionKind,

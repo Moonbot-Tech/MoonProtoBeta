@@ -195,8 +195,8 @@ if let Some(snapshot) = client.snapshot() {
 
 Regular UI code reads maintained state and uses non-blocking Active Lib intents.
 Mutations return an `EngineActionTicket` after queuing the request, and
-completion arrives later as `Event::EngineAction` plus the underlying
-`Event::EngineResponse`.
+completion arrives later as `Event::EngineAction`. Retained state updates arrive
+through the matching domain snapshots/events.
 
 ```rust
 client.account().refresh_hedge_mode()?;

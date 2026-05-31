@@ -253,6 +253,10 @@ pub enum Event {
     Markets(MarketsEvent),
     /// Engine API response that was not consumed by the pending-response
     /// registry.
+    ///
+    /// Normal applications use typed domain events and `EngineAction`. This raw
+    /// response is kept for diagnostics/custom tooling only.
+    #[doc(hidden)]
     EngineResponse(EngineResponse),
     /// Server-side log message (`MPC_LogMsg`): `time:TDateTime + msg:UTF-8 rest`.
     ServerLog { time: f64, msg: String },

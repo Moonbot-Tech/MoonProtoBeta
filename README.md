@@ -163,7 +163,8 @@ See `docs/active_lib.md` for the maintained-state contract.
 
 Engine API helpers that mutate server/exchange state also run through the owned
 runtime and return immediately after queuing the intent. Completion arrives as
-`Event::EngineAction` / `Event::EngineResponse`. Examples:
+`Event::EngineAction`, while retained state is updated through the matching
+domain snapshots/events. Examples:
 `client.account().set_leverage(...)`, `client.account().set_hedge_mode(...)`,
 `client.account().cancel_all_orders(...)`, `client.account().confirm_risk_limit(...)`,
 and `client.balances().transfer_asset(...)`.
