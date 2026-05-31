@@ -5316,11 +5316,13 @@ fn fire_test_active_library_health() {
     pump_pair_for(&mut a, &mut b, Duration::from_millis(200));
     a.assert_coin_card_candles_healthy(&cfg.market, FIRETEST_COIN_CARD_KIND);
     b.assert_coin_card_candles_healthy(&cfg.market, FIRETEST_COIN_CARD_KIND);
+    let a_stats = a.snapshot();
+    let b_stats = b.snapshot();
     assert!(
-        a.server_logs + b.server_logs > 0,
+        a_stats.server_logs + b_stats.server_logs > 0,
         "FireTest did not receive any encrypted server LogMsg events: A=[{}] B=[{}]",
-        a.summary(),
-        b.summary()
+        a_stats.summary(),
+        b_stats.summary()
     );
     log_protocol_cpu_pair("final", &a, &b);
     write_strategy_info_dump(FireProfile::Full, &cfg, &[("A", &a), ("B", &b)]);
