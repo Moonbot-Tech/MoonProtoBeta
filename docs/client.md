@@ -170,10 +170,9 @@ active session:
 ```rust
 use moonproto::{NewOrderParams, OrderSide};
 
-let ticket = client.trade().new_order(
+let _ticket = client.trade().new_order(
     NewOrderParams::new("BTCUSDT", OrderSide::Long, 50_000.0, 0.001),
 )?;
-println!("queued new-order request uid={}", ticket.request_uid);
 client.trade().join_orders("BTCUSDT", OrderSide::Long)?;
 ```
 
@@ -441,8 +440,9 @@ client.trade().new_order(NewOrderParams::new(
 
 The runtime derives `TradeCtx` from `base_currency_code` and `exchange_code`
 learned during Init/BaseCheck. `new_order` also returns `NewOrderTicket`; keep
-`ticket.request_uid` if the UI wants to correlate a click with the later
-server-created order.
+it only when the UI wants to correlate a click with the later server-created
+order. Normal order tables should read the created order from
+`snapshot().orders()`.
 
 ## Engine API Requests
 

@@ -5,7 +5,11 @@ use super::MoonKey;
 ///
 /// MoonProto transport MAC: SipHash-1-3 keyed with `MacKey`, output truncated to
 /// the low 32 bits. This is a keyed tag, not a checksum: without `MacKey`, an
-/// injected or relabelled datagram cannot produce a valid transport tag.
+/// injected or relabelled datagram cannot produce a valid transport tag. The
+/// outer whitening keystream is keyed by a SEPARATE one-way key (see
+/// `derive_obfuscation_key`), not `MacKey` itself — so exposing keystream via
+/// known-plaintext (e.g. zero-padded PMTU acks) does not reveal `MacKey`, and the
+/// MAC stays a real boundary.
 ///
 /// The 32-bit width is deliberate and is not the authority boundary: forging a
 /// tag without `MacKey` is a 2^32 brute force — a keyed PRF, so observed

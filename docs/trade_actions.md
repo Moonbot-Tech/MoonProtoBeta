@@ -67,11 +67,10 @@ BaseCheck:
 ```rust
 use moonproto::{NewOrderParams, OrderSide};
 
-let ticket = client.trade().new_order(
+let _ticket = client.trade().new_order(
     NewOrderParams::new("BTCUSDT", OrderSide::Long, 50_000.0, 0.001)
         .with_strategy_id(strategy_id),
 )?;
-println!("queued new-order request uid={}", ticket.request_uid);
 
 client.trade().join_orders("BTCUSDT", OrderSide::Long)?;
 client.trade().limit_close_position("BTCUSDT", OrderSide::Long)?;
@@ -94,9 +93,9 @@ If Init/BaseCheck route fields are unavailable, these methods return
 `MoonClientError::TradeContext` instead of exposing `TradeCtx` to application
 code.
 
-`new_order` returns a client-side ticket. Its `request_uid` is the UID written
-into the outgoing command and can be used to correlate the user click with the
-server-created order when the order appears in `snapshot().orders()`.
+`new_order` returns a client-side ticket for optional click-to-order
+correlation. Normal order tables should treat the order snapshot as the source
+of truth and redraw from `snapshot().orders()`.
 
 Order intent handles also accept a raw UID for CLI tools and scripts that only
 have an identifier. Desktop UI should prefer the visible `&Order` it already

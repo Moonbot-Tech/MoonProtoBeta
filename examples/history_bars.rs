@@ -69,8 +69,8 @@ fn main() {
     };
 
     println!(
-        "[request] candles market={} kind={:?} uid={:?}",
-        ticket.market, ticket.kind, ticket.request_uid
+        "[request] candles market={} kind={:?}",
+        ticket.market, ticket.kind
     );
     let deadline = Instant::now() + Duration::from_secs(15);
     let candles = loop {
