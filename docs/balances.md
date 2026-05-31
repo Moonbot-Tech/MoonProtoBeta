@@ -25,10 +25,7 @@ a separate balance row. This mirrors Delphi: balance packets mutate the live
 `BalancesState` remains the account-level/low-level balance view:
 
 - global account totals in BTC equivalent;
-- a secondary decoded per-market table for account/diagnostic panels;
 - per-market epoch tracking so stale incremental rows are ignored.
-
-Rows are keyed by market name, for example `"BTCUSDT"`.
 
 Transferable wallet assets are a different state model. They are not chart
 position fields. Use `client.balances().refresh_transfer_assets()` and
@@ -175,10 +172,10 @@ that is the UI-safe point equivalent to Delphi `WaitUpdCount = 0`. Use
 
 ## Diagnostic Rows
 
-The decoded per-market balance rows are still available for protocol tools and
-account tables through `snapshot().balances()`. They are not the chart/order UI
-surface. For selected-market UI, keep a `MarketHandle` and read
-`balance_position()`: it is the same state Delphi mutates on `TMarket`.
+Per-market `BalanceItem` rows are a protocol parser input, not the public
+terminal state. Active Lib applies them to `Market` immediately, the same way
+Delphi mutates `TMarket` in `ApplyBalanceItem`. For selected-market UI, keep a
+`MarketHandle` and read `balance_position()`.
 
 Delphi behavior is preserved when applying `max_value`: a zero or near-zero
 incoming value does not erase a previously known non-zero value on the live
@@ -207,5 +204,5 @@ Normal UI state is:
 - `snapshot().balances().global()` for account totals;
 - `snapshot().transfer_assets()` for transferable wallet assets.
 
-The decoded secondary balance table is intentionally exposed only through
-accessors and should stay out of chart/order hot paths.
+Raw balance packet rows stay internal to the parser/apply path and should stay
+out of chart/order hot paths.

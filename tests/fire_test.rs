@@ -1303,11 +1303,11 @@ impl Session {
             .and_then(|snapshot| snapshot.strategy_snapshot(strategy_id).cloned())
     }
 
-    fn send_strategy_snapshot_batch(&mut self, strategies: &[StrategySnapshot]) {
+    fn sync_local_strategies(&mut self, strategies: &[StrategySnapshot]) {
         self.client
             .strategies()
-            .send_snapshot_batch(strategies.to_vec())
-            .expect("MoonClient strategy snapshot batch must queue");
+            .sync_local_strategies(strategies.to_vec())
+            .expect("MoonClient local strategies sync must queue");
     }
 
     fn send_new_order(
@@ -5211,7 +5211,7 @@ fn fire_test_active_library_health() {
         original_settings.x_sell,
         mutated_settings.x_sell
     );
-    a.send_strategy_snapshot_batch(std::slice::from_ref(&mutated_strategy));
+    a.sync_local_strategies(std::slice::from_ref(&mutated_strategy));
     a.client
         .settings()
         .send(mutated_settings.clone())
@@ -5234,7 +5234,7 @@ fn fire_test_active_library_health() {
         original_field_value.clone(),
         2,
     );
-    a.send_strategy_snapshot_batch(std::slice::from_ref(&restored_strategy));
+    a.sync_local_strategies(std::slice::from_ref(&restored_strategy));
     a.client
         .settings()
         .send(original_settings.clone())

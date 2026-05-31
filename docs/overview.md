@@ -41,7 +41,7 @@ let cfg = ClientConfig::new("127.0.0.1", 3000, keys.master_key, keys.mac_key);
 let init = InitConfig {
     initial_strategies: Some(InitialStrategies::new(
         0,
-        Vec::new(), // replace with your local strategy list if the app has one
+        Vec::new(), // pass the current local strategy list if the app has one
     )),
     subscribe_trades: Some(TradesStreamMode::TradesOnly),
     subscribe_orderbooks: vec!["BTCUSDT".to_string()],
@@ -101,7 +101,8 @@ for event in client.drain_events() {
 - Keeps chart-visible market state on the selected market/history model:
   balance/position/liquidation fields live on `Market`, arb prices live in
   `MarketHandle::arb_slot`, and retained trades/5m candles are available through
-  `snapshot.market_history_readers(market)` when trades storage is enabled.
+  `snapshot.market_history_readers_for(&market_handle)` when trades storage is
+  enabled.
 - Maintains per-client `ServerTimeDelta` for order timestamps.
 - Runs the Delphi-style process-level NTP syncer by default with
   `ClientConfig::new` (`pool.ntp.org`). Use `with_ntp_host` to override the

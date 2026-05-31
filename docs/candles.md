@@ -21,8 +21,9 @@ client.streams().subscribe_trades_for(TradesStreamMode::TradesOnly, ["BTCUSDT"])
 
 // Later, after events/snapshot refresh:
 let Some(state) = client.snapshot() else { return; };
+let Some(market) = state.markets().get("BTCUSDT") else { return; };
 
-if let Some(readers) = state.market_history_readers("BTCUSDT") {
+if let Some(readers) = state.market_history_readers_for(&market) {
     if let Some(candles) = readers.candles_5m {
         let mut last = Vec::new();
         candles.copy_last(200, &mut last);
@@ -35,7 +36,7 @@ The in-progress candle is exposed through the derived snapshot. It is separate
 from the sealed 5m ring, matching Delphi's live chart bar:
 
 ```rust
-if let Some(derived) = state.market_history_derived_snapshot_now("BTCUSDT") {
+if let Some(derived) = state.market_history_derived_snapshot_now_for(&market) {
     if let Some(live) = derived.current_candle {
         draw_live_candle(live.open(), live.high(), live.low(), live.close(), live.volume());
     }
@@ -94,10 +95,8 @@ for event in client.drain_events() {
 }
 
 if let Some(snapshot) = client.snapshot() {
-    if let Some(rows) = snapshot
-        .coin_card_candles()
-        .get("BTCUSDT", DeepHistoryKind::Hour4)
-    {
+    let Some(market) = snapshot.markets().get("BTCUSDT") else { return; };
+    if let Some(rows) = snapshot.coin_card_candles_for(&market, DeepHistoryKind::Hour4) {
         println!("rows={}", rows.len());
     }
 }

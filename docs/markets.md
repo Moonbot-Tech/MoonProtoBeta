@@ -104,8 +104,10 @@ is internal to the active library. User code should react to
 `price_by_index` resolve those indexes through the current `GetMarketsIndexes`
 mapping, so stale mappings after a server restart are not used.
 
-`MarketsState::last_markets_list_apply_timing()` is diagnostics only. It always
-records coarse total/loop timing for the latest active `GetMarketsList` apply.
+`MarketsState::last_markets_list_apply_timing()` is diagnostics only. In test
+or `--features diagnostics` builds it records coarse total/loop timing for the
+latest active `GetMarketsList` apply; regular builds return `None` and do not
+pay for these timer reads.
 Per-row read/apply attribution is intentionally absent from production code:
 thousands of timer calls inside the market/CorrMarket loops distort the CPU
 path they are supposed to measure.
@@ -133,18 +135,18 @@ let markets = state.markets();
 
 if let Some(market) = markets.get("BTCUSDT") {
     let pos = market.balance_position();
+    let price = market.price();
+    let tail = market.trade_state();
     market.with(|market| {
         println!("tick={} max_lev={}", market.tick_size(), market.max_leverage);
     });
-    println!("liq={}", pos.liq_price);
-}
-
-if let Some(price) = markets.price("BTCUSDT") {
     println!(
-        "bid={} ask={} mark={} funding_ms={:?}",
+        "liq={} bid={} ask={} mark={} last_trade={} funding_ms={:?}",
+        pos.liq_price,
         price.bid,
         price.ask,
         price.mark_price,
+        tail.last_trade_price,
         price.funding_time_delphi().unix_millis()
     );
 }
@@ -159,10 +161,13 @@ Balance and position packets update these same live `Market` objects. For chart
 UI this is the normal path: keep the selected `MarketHandle` and read fields
 such as `pos_size`, `pos_price`, `liq_price`, `leverage_x`, `asset_balance`,
 `total_profit_*`, and `max_value` from `balance_position()`. `BalancesState` is the account
-totals / low-level row view, not the primary per-market UI object.
+totals view, not the primary per-market UI object.
 
 For chart overlays that only need position fields, `MarketHandle::balance_position`
 returns a small copy without cloning the whole market object.
+For price/funding/mark-price and live trade-tail overlays, use
+`MarketHandle::price()` and `MarketHandle::trade_state()` on the same retained
+handle instead of resolving the market name again.
 
 Arbitrage relay packets also apply to the live market. Use
 `MarketHandle::arb_slot(ArbPlatformCode::...)` or
@@ -311,14 +316,15 @@ BaseCurrency::USDC;
 BaseCurrency::EMPTY;
 BaseCurrency::UNKNOWN;
 
-let raw = market.futures_type.to_byte();
-let value = BaseCurrency::from_byte(raw);
+let label = market.futures_type.name();
 ```
 
 Known constants cover the currently named server values. Unknown future values
 are preserved as their original byte instead of being collapsed to
 `BaseCurrency::UNKNOWN`. For older servers that do not provide this field,
 `Market::futures_type` is `BaseCurrency::EMPTY`.
+Use `BaseCurrency::name()` for UI labels; `to_byte()` / `from_byte()` are for
+protocol diagnostics and roundtrip tests.
 
 `Market::listed_type()` returns the Delphi `TListedOnExchange`
 post-processing result for `GetMarketsList`: `BaseCurrency::EMPTY` means

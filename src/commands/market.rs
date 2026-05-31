@@ -136,7 +136,7 @@ impl std::fmt::Debug for ExchangeCode {
 /// writes `Ord(m.FuturesType)`. Keep the raw byte instead of collapsing unknown
 /// future ordinals to `BC_Unknown`, so parse + write preserves the exact wire
 /// value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BaseCurrency(u8);
 
 impl BaseCurrency {
@@ -174,6 +174,53 @@ impl BaseCurrency {
 
     pub const fn to_byte(self) -> u8 {
         self.0
+    }
+
+    pub const fn is_known(self) -> bool {
+        self.0 <= Self::UNKNOWN.0
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::BTC => "BTC",
+            Self::USDT => "USDT",
+            Self::ETH => "ETH",
+            Self::BNB => "BNB",
+            Self::AUD => "AUD",
+            Self::TUSD => "TUSD",
+            Self::BRL => "BRL",
+            Self::USDH => "USDH",
+            Self::USDC => "USDC",
+            Self::FDUSD => "FDUSD",
+            Self::AEUR => "AEUR",
+            Self::USD => "USD",
+            Self::TRX => "TRX",
+            Self::RUB => "RUB",
+            Self::EUR => "EUR",
+            Self::HTX => "HTX",
+            Self::USDD => "USDD",
+            Self::IDR => "IDR",
+            Self::DOGE => "DOGE",
+            Self::TRY => "TRY",
+            Self::USDE => "USDE",
+            Self::NEXT2 => "NEXT2",
+            Self::NEXT3 => "NEXT3",
+            Self::NEXT4 => "NEXT4",
+            Self::NEXT5 => "NEXT5",
+            Self::EMPTY => "EMPTY",
+            Self::UNKNOWN => "UNKNOWN",
+            _ => "Unknown",
+        }
+    }
+}
+
+impl std::fmt::Debug for BaseCurrency {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_known() {
+            f.write_str(self.name())
+        } else {
+            write!(f, "Unknown({})", self.0)
+        }
     }
 }
 

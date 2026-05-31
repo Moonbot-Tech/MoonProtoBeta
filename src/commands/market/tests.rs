@@ -456,7 +456,11 @@ fn base_currency_preserves_raw_delphi_ordinal_byte() {
     assert_eq!(BaseCurrency::from_byte(8), BaseCurrency::USDC);
     assert_eq!(BaseCurrency::from_byte(25), BaseCurrency::EMPTY);
     assert_eq!(BaseCurrency::from_byte(26), BaseCurrency::UNKNOWN);
+    assert_eq!(BaseCurrency::USDT.name(), "USDT");
+    assert_eq!(format!("{:?}", BaseCurrency::USDC), "USDC");
     assert_eq!(BaseCurrency::from_byte(99).to_byte(), 99);
+    assert_eq!(BaseCurrency::from_byte(99).name(), "Unknown");
+    assert_eq!(format!("{:?}", BaseCurrency::from_byte(99)), "Unknown(99)");
     assert_ne!(
         BaseCurrency::from_byte(99),
         BaseCurrency::UNKNOWN,

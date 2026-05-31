@@ -60,6 +60,11 @@ pub(super) enum UiRuntimeCommand {
     SwitchDex(String),
     SwitchSpot(crate::commands::ui::SpotMarketKind),
     LevManage(crate::commands::ui::LevManage),
+    EmuTrades {
+        market_index: u16,
+        base_time: f64,
+        points: Vec<crate::commands::ui::EmuTradePoint>,
+    },
     TriggerManage {
         action: u8,
         all_markets: bool,

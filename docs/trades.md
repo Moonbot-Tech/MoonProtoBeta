@@ -52,7 +52,8 @@ for event in client.drain_events() {
         match trade_event {
             TradesEvent::Applied { packet_num, .. } => {
                 let Some(state) = client.snapshot() else { continue; };
-                let Some(readers) = state.market_history_readers("BTCUSDT") else { continue; };
+                let Some(market) = state.markets().get("BTCUSDT") else { continue; };
+                let Some(readers) = state.market_history_readers_for(&market) else { continue; };
                 let Some(reader) = readers.futures_trades else { continue; };
 
                 let cursor = cursor.get_or_insert_with(|| reader.cursor_from_now());
@@ -92,7 +93,8 @@ Read retained history from the latest snapshot:
 
 ```rust
 let Some(snapshot) = client.snapshot() else { return; };
-let Some(readers) = snapshot.market_history_readers("BTCUSDT") else { return; };
+let Some(market) = snapshot.markets().get("BTCUSDT") else { return; };
+let Some(readers) = snapshot.market_history_readers_for(&market) else { return; };
 
 if let Some(reader) = readers.futures_trades {
     let mut last = Vec::new();
@@ -216,8 +218,9 @@ Read derived state from the snapshot:
 
 ```rust
 let Some(snapshot) = client.snapshot() else { return; };
+let Some(market) = snapshot.markets().get("BTCUSDT") else { return; };
 
-if let Some(derived) = snapshot.market_history_derived_snapshot_now("BTCUSDT") {
+if let Some(derived) = snapshot.market_history_derived_snapshot_now_for(&market) {
     draw_volume(derived.trade_volumes.five_minutes);
     draw_delta(derived.deltas.one_hour);
 }

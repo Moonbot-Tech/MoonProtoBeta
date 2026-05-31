@@ -329,6 +329,11 @@ fn handle_ui_command(client: &mut Client, cmd: UiRuntimeCommand) {
         UiRuntimeCommand::SwitchDex(dex_name) => client.ui_switch_dex(&dex_name),
         UiRuntimeCommand::SwitchSpot(spot) => client.ui_switch_spot(spot.to_byte()),
         UiRuntimeCommand::LevManage(cmd) => client.ui_lev_manage(&cmd),
+        UiRuntimeCommand::EmuTrades {
+            market_index,
+            base_time,
+            points,
+        } => client.ui_emu_trades(market_index, base_time, &points),
         UiRuntimeCommand::TriggerManage {
             action,
             all_markets,
@@ -367,13 +372,9 @@ fn handle_strategy_snapshot_batch(
         );
         return false;
     };
+    let server_epoch = dispatcher.mark_local_strategies_changed();
     dispatcher.set_local_strategies(&strategies);
-    client.strat_send_snapshot_batch(
-        dispatcher.local_strategy_epoch(),
-        false,
-        &schema,
-        &strategies,
-    );
+    client.strat_send_snapshot_batch(server_epoch, false, &schema, &strategies);
     true
 }
 

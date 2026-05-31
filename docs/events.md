@@ -81,7 +81,6 @@ fn handle_event(event: Event) {
             show_engine_error(resp.error_code, &resp.error_msg);
         }
         Event::ServerLog { time, msg } => append_server_log(time, msg),
-        Event::ParseFailed { cmd, len, .. } => log_parse_failure(cmd, len),
         _ => {}
     }
 }
@@ -97,16 +96,15 @@ initialized.
 
 ```rust
 let Some(state) = client.snapshot() else { return; };
+let Some(market) = state.markets().get("BTCUSDT") else { return; };
 
 for order in state.orders().iter() {
     redraw_order(order);
 }
 
-if let Some(price) = state.markets().price("BTCUSDT") {
-    redraw_price(price.bid, price.ask);
-}
+market.with(|market| redraw_price(market.price.bid, market.price.ask));
 
-if let Some(book) = state.order_book("BTCUSDT", OrderBookKind::Futures) {
+if let Some(book) = state.order_book_for(&market, OrderBookKind::Futures) {
     redraw_book(&book.buys, &book.sells);
 }
 ```
@@ -150,21 +148,19 @@ pub enum Event {
     Markets(MarketsEvent),
     EngineResponse(EngineResponse),
     ServerLog { time: f64, msg: String },
-    Raw { cmd: Command, payload: Vec<u8> },
-    ParseFailed { cmd: Command, len: usize, payload: Vec<u8> },
 }
 ```
 
-Normal UI code usually handles the typed domain events and ignores `Raw` /
-`ParseFailed`. `ParseFailed` includes the failed bytes so diagnostics can dump
-exact payloads; it is not a recovery mechanism for application code.
+Low-level diagnostic builds may also receive hidden raw/parse-failure events.
+They are for FireTest/protocol dumps only; they are not a recovery mechanism or
+normal application control flow.
 
 `TradesEvent::Applied` is a signal that retained trade/history state has been
 updated. Read actual rows from `MarketHistoryReaders`.
 
 `CandlesSnapshotEvent::Ready` is emitted after the initial full 5m candles
 snapshot has been processed by the history worker. At that point
-`market_history_readers(market).candles_5m` already sees the retained rows.
+`market_history_readers_for(&market).candles_5m` already sees the retained rows.
 
 `ArbEvent` is only a change signal/summary. Delphi writes incoming arb data into
 `TMarket.ArbSlots` / `TMarket.ArbNow`; Active Lib does the same, so UI code reads
@@ -217,7 +213,10 @@ retained history worker. UI code reads per-market rings from snapshots:
 ```rust
 if let Some(readers) = client
     .snapshot()
-    .and_then(|state| state.market_history_readers("BTCUSDT"))
+    .and_then(|state| {
+        let market = state.markets().get("BTCUSDT")?;
+        state.market_history_readers_for(&market)
+    })
 {
     if let Some(reader) = readers.futures_trades {
         let mut rows = Vec::new();

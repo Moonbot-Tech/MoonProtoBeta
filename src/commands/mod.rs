@@ -25,8 +25,6 @@ pub(crate) mod trade;
 pub(crate) mod trades_stream;
 pub(crate) mod ui;
 
-// Re-exports
-pub use balance::BalanceItem;
 #[doc(hidden)]
 pub use balance::BalanceUpdate;
 // CoinCard candle data model (public) plus the low-level chunk parser/aggregator
@@ -45,7 +43,8 @@ pub use market::{
 pub use order_book::{OrderBookUpdate, OrderLevel};
 pub use strategy_schema::{
     StrategyDynamicPicklist, StrategyFieldLayout, StrategyFieldType, StrategyFieldUiKind,
-    StrategySchema, StrategySchemaField, StrategySchemaKind,
+    StrategySchema, StrategySchemaEditorSection, StrategySchemaEditorSectionKind,
+    StrategySchemaField, StrategySchemaKind,
 };
 pub use strategy_serializer::{
     field_names, FieldValue, StrategyActiveMode, StrategyFields, StrategyKind, StrategySnapshot,

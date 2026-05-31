@@ -23,7 +23,7 @@ impl EventDispatcher {
         self.local_strategy_epoch
     }
 
-    /// Replace the library-owned strategy list before init.
+    /// Set the library-owned strategy list before init.
     ///
     /// This is the normal active-library path. The dispatcher stores the full
     /// decoded snapshots, feeds the post-init strategy snapshot, answers server

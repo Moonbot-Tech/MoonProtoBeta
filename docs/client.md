@@ -96,7 +96,7 @@ use moonproto::{ConnectConfig, InitConfig, InitialStrategies, MoonClient, Trades
 let client = MoonClient::connect(cfg, ConnectConfig::new(InitConfig {
     initial_strategies: Some(InitialStrategies::new(
         0,
-        Vec::new(), // replace with your local strategy list if the app has one
+        Vec::new(), // pass the current local strategy list if the app has one
     )),
     subscribe_trades: Some(TradesStreamMode::TradesOnly),
     subscribe_orderbooks: vec!["BTCUSDT".to_string()],
@@ -389,7 +389,8 @@ init spine consumes that marker, waits up to `34 * 300ms` for
 `AuthDone`, sends BaseCheck once, and if it still fails retries it 10 times with
 `2000ms` pauses. The high-level UI wrappers that match Delphi
 `ServerUpdateSent` behavior call the marker automatically:
-`settings().request_version_update`, `settings().switch_dex`, and
+`settings().request_release_update`, `settings().request_version_update`,
+`settings().switch_dex`, and
 `settings().switch_spot`.
 
 Domain pushes received before init completion are ignored in every client run
@@ -611,10 +612,6 @@ other domain commands queue nothing. Neither path has a local capacity cap.
 Order actions with Delphi-local side effects, such as replace/cancel/panic,
 stop/VStop, and immune clicks, are intents on `client.orders()`. The runtime
 owner applies them to live `Orders` before queueing protocol commands.
-
-`Command` is not a closed Rust enum; it preserves unknown raw channel
-identifiers. Use `Command::from_byte(raw)` and `cmd.to_byte()` when building
-low-level tools.
 
 ## Periodic Refresh
 

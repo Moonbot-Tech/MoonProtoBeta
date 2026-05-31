@@ -5,7 +5,8 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use crate::commands::market::{
-    ArbPlatformCode, Market, MarketArbNowEntry, MarketArbSlot, PositionType,
+    ArbPlatformCode, Market, MarketArbNowEntry, MarketArbSlot, MarketPrice, MarketTradeState,
+    PositionType,
 };
 use crate::commands::trade::OrderType;
 
@@ -36,6 +37,16 @@ impl MarketHandle {
         f(&market)
     }
 
+    /// Canonical market name for this stable handle.
+    ///
+    /// Terminal UI usually resolves a market once and keeps `MarketHandle`, just
+    /// like Delphi keeps a `TMarket` reference. This accessor lets higher-level
+    /// read helpers use that handle without forcing another name lookup in UI
+    /// code.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
     /// Return an owned snapshot for code that does not want to hold a handle.
     pub fn snapshot(&self) -> Market {
         self.with(Clone::clone)
@@ -48,6 +59,16 @@ impl MarketHandle {
     /// position size, leverage, and PnL.
     pub fn balance_position(&self) -> MarketBalancePosition {
         self.with(MarketBalancePosition::from_market)
+    }
+
+    /// Copy the live price row used by chart, funding, and mark-price UI.
+    pub fn price(&self) -> MarketPrice {
+        self.with(|market| market.price)
+    }
+
+    /// Copy the Delphi `TMarket` live trade-tail state.
+    pub fn trade_state(&self) -> MarketTradeState {
+        self.with(|market| market.trade_tail)
     }
 
     /// Copy one arbitrage slot by platform code.

@@ -63,22 +63,25 @@ applied/failed events.
 
 ## Reading Current Book
 
-For rendering the full current book, read it from the latest snapshot by market
-name:
+For rendering the full current book, keep the selected `MarketHandle` and read
+from the latest snapshot through that handle:
 
 ```rust
 use moonproto::state::OrderBookKind;
 
 let Some(state) = client.snapshot() else { return; };
+let Some(market) = state.markets().get("BTCUSDT") else { return; };
 
-if let Some(book) = state.order_book("BTCUSDT", OrderBookKind::Futures) {
+if let Some(book) = state.order_book_for(&market, OrderBookKind::Futures) {
     draw_orderbook(&book.buys, &book.sells);
 }
 
-if let Some(top) = state.top_of_book("BTCUSDT", OrderBookKind::Futures) {
+if let Some(top) = state.top_of_book_for(&market, OrderBookKind::Futures) {
     draw_top(top.bid, top.ask);
 }
 ```
+
+Use `OrderBookKind::as_str()` for stable UI/log labels.
 
 UI-relevant fields on the applied current book:
 

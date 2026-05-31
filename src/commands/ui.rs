@@ -164,6 +164,36 @@ const EMU_TRADE_POINT_SIZE: usize = std::mem::size_of::<WireEmuTradePoint>();
 const _: [(); 6] = [(); EMU_TRADE_POINT_SIZE];
 
 impl EmuTradePoint {
+    /// Emulated buy tick at `time_delta_ms` after the command base time.
+    pub fn buy(time_delta_ms: u16, price: f32) -> Self {
+        Self {
+            time_delta_ms,
+            price: price.abs(),
+        }
+    }
+
+    /// Emulated sell tick at `time_delta_ms` after the command base time.
+    ///
+    /// Delphi encodes sell side by storing a negative `Price` in the packed
+    /// point. Keeping that sign convention in the public constructor lets UI
+    /// drawing code build the exact wire shape without exposing raw bytes.
+    pub fn sell(time_delta_ms: u16, price: f32) -> Self {
+        Self {
+            time_delta_ms,
+            price: -price.abs(),
+        }
+    }
+
+    /// Whether this point represents a sell-side tick.
+    pub fn is_sell(self) -> bool {
+        self.price.is_sign_negative()
+    }
+
+    /// Absolute trade price independent of side.
+    pub fn abs_price(self) -> f32 {
+        self.price.abs()
+    }
+
     #[cfg(test)]
     fn from_wire(wire: WireEmuTradePoint) -> Self {
         Self {

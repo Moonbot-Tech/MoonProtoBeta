@@ -29,25 +29,10 @@ strategy field metadata from the server instead of carrying a hardcoded copy of
 Delphi `TStrategy` UI metadata. If the schema response is missing, malformed,
 or cannot be decompressed, Init fails and the domain gate does not open.
 
-Low-level strategy command parsing follows Delphi tail rules. Fixed fields in
-`TStratSnapshot`, `TStratDelete`, and `TStratSellPriceUpdate` use
-`TMemoryStream.Read` semantics after a valid header, so missing scalar bytes are
-zero-filled. `TStratDelete.FolderPath` is a strict `ReadBuffer` string: if the
-folder-path length/body is present but incomplete, the whole command is
-rejected. For `TStratSchema` / `TStratSnapshot`, a declared data size larger
-than the remaining bytes becomes an empty/malformed payload, matching Delphi's
-`Data=nil` guard.
-
-Inside the compressed `TStrategySerializer` payload, strategy string field
-values are not `ReadBuffer` strings. Delphi reads the `Word` length, allocates a
-`TBytes` of that exact length, and then calls `Stream.Read`; if the body is
-short, the returned string keeps the available bytes and zero-filled tail. The
-Rust parser mirrors that deterministic part and also treats skipped known-field
-type mismatches like Delphi `SkipFieldByTypeID`: a truncated skipped value is
-consumed up to EOF instead of rejecting the whole snapshot. Truncated serializer
-dictionaries and incomplete scalar/header locals are still rejected by Rust,
-because the exact Delphi effect can depend on uninitialized locals or stale
-`NameBuf` bytes in malformed payloads.
+Low-level parser edge cases are intentionally kept out of the application model.
+Normal terminal code observes decoded `StratsState`, `StrategySnapshot`, and
+`StrategySchema`; malformed or future-version protocol payloads are handled by
+the runtime without asking UI code to parse packet tails.
 
 ## Reading Strategy State
 
@@ -103,9 +88,10 @@ decoders, but normal applications should read `state.strategy_snapshot(...)` or
 
 ## Strategy Schema
 
-The schema is the decoded body of Delphi `StrategySchemaBuilder.BuildStrategySchemaBlob`.
-It is sent by the server as `TStratSchema.Data`: raw DEFLATE bytes containing a
-little-endian binary schema.
+The schema is built by the server from the live Delphi strategy metadata and
+decoded by Active Lib during Init. Terminal UI code reads the decoded
+`StrategySchema`; it does not need a hardcoded Rust copy of Delphi strategy
+fields.
 
 Public read API:
 
@@ -143,16 +129,52 @@ for field in &schema.fields {
 - `dynamic_picklist`: `UseHookStrategy` means local MoonHook strategies with an
   empty first item; `ComboStart` / `ComboEnd` mean all local strategies.
 
+`ChannelName` is intentionally not a schema picklist. The Delphi schema exports
+it as a plain string because its suggestions come from runtime terminal
+configuration, not from strategy RTTI/schema data. A terminal may add its own UI
+suggestions for that field, but Active Lib does not hardcode them.
+
 Use `field.visible_for_kind(raw_ordinal)` or
 `field.visible_for_strategy_kind(kind)` for visibility checks. The internal
 bitmask used by the serializer is not part of the public UI schema surface.
+For strategy editors, prefer the ready-made Delphi-shaped views:
+
+```rust
+let kind = strategy.kind();
+for section in schema.editor_sections_for_strategy_kind(kind) {
+    draw_section_header(&section.title);
+    for field in section.fields {
+        draw_strategy_field(field);
+    }
+}
+```
+
+`editor_sections_for_kind` / `editor_sections_for_strategy_kind` preserve
+Delphi editor grouping. Layout markers are carried over following fields until
+the next marker, so terminal UI does not need to know that `sgComment`,
+`sgFilterClass`, and `sgChapterClass` are stored only on the first field of a
+section.
+
+Dynamic combo fields can also build their current values from the retained
+strategy list:
+
+```rust
+if let Some(source) = &field.dynamic_picklist {
+    let values = source.values_from_snapshots(state.strategy_snapshots());
+    draw_combo_values(values);
+}
+```
+
+This mirrors the Delphi editor sources: `UseHookStrategy` gives an empty item
+plus local MoonHook strategy names, while `ComboStart` / `ComboEnd` give all
+local strategy names.
 
 Schema TypeIDs use the same value model as strategy snapshots:
 
 ```rust
 use moonproto::{
     StrategyDynamicPicklist, StrategyFieldLayout, StrategyFieldType,
-    StrategyFieldUiKind, StrategySchema,
+    StrategyFieldUiKind, StrategySchema, StrategySchemaEditorSection,
 };
 ```
 
@@ -170,7 +192,7 @@ pub struct StrategyInfo {
     pub sell_price: f64,
     pub checked: bool,
     pub prev_checked: bool,
-    pub folder_path: String,
+    pub folder_path: Arc<str>,
 }
 ```
 
@@ -260,10 +282,13 @@ written into outgoing `TStratSnapshot.ServerEpoch` for both post-init strategy
 snapshot send and answers to `TStratSnapshotRequest`; it is not the remote
 server epoch learned from incoming snapshots. If the application reloads its
 whole local strategy list after `MoonClient::connect`, use
-`client.strategies().send_snapshot_batch(strategies)`. The runtime updates the
-library-owned local list and sends the Delphi `TStratSnapshot` batch from the
-same schema that Init fetched from the server. The call queues intent and
-returns immediately; server echo/update arrives later through `Event::Strat`.
+`client.strategies().sync_local_strategies(strategies)`. The application still
+owns the strategy editor/persistence; this call tells Active Lib that the local
+list changed. Active Lib increments its Delphi `cfg.ServerStratEpoch` analogue,
+updates the runtime-owned copy used for future server snapshot requests, and
+publishes the current list from the same schema that Init fetched from the
+server. The call queues intent and returns immediately; server echo/update
+arrives later through `Event::Strat`.
 
 ## Strategy Fields
 
@@ -383,17 +408,18 @@ applications should prefer `MoonClient` helpers so the library-owned strategy
 state stays authoritative. Checked-state echo messages are inbound only; client
 code must not send them.
 
-To replace the whole local strategy list after startup, use the same
-active-library strategy handle:
+When the terminal's local strategy list changes after startup, synchronize the
+current list through the same active-library strategy handle:
 
 ```rust
 client
     .strategies()
-    .send_snapshot_batch(load_current_strategies())?;
+    .sync_local_strategies(load_current_strategies())?;
 ```
 
-This is still an Active Lib intent, not a raw protocol call: the runtime owns
-the local list used for future `TStratSnapshotRequest` replies.
+This is still an Active Lib intent, not a raw protocol call: "local strategies
+changed; synchronize them". The runtime advances the local strategy epoch and
+keeps the list used for future `TStratSnapshotRequest` replies.
 
 Strategy snapshot serialization mirrors Delphi `TStrategySerializer` lengths:
 field-name and folder-path dictionary entries use a `Byte` length and write
@@ -417,7 +443,7 @@ as a wrongly typed field.
 
 The runtime owns the local strategy list used for future server snapshot
 requests. If the application reloads strategies after startup, call
-`client.strategies().send_snapshot_batch(...)`; do not try to intercept the
+`client.strategies().sync_local_strategies(...)`; do not try to intercept the
 server request path yourself. If the server asks before schema has arrived, the
 runtime requests `TStratSchema` and sends the pending snapshot after
 `SchemaApplied`, so it never serializes a non-empty strategy list from a stale

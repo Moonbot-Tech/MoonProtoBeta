@@ -31,7 +31,7 @@
 //! let init = InitConfig {
 //!     initial_strategies: Some(InitialStrategies::new(
 //!         0,
-//!         Vec::new(), // replace with your local strategy list if the app has one
+//!         Vec::new(), // pass the current local strategy list if the app has one
 //!     )),
 //!     subscribe_trades: Some(TradesStreamMode::TradesOnly),
 //!     subscribe_orderbooks: vec!["BTCUSDT".to_string()],
@@ -102,8 +102,6 @@
 //!   EventSink adapters, snapshots, and high-level intents.
 //! - [`events`] — typed [`Event`] values and the read-only
 //!   [`MoonStateSnapshot`].
-//! - [`commands`] — protocol value types re-exported by the high-level API;
-//!   direct parser/builder use is for diagnostics and internal tests.
 //! - [`state`] — Active Lib read models: Orders / OrderBooks / Trades /
 //!   Balances / Strats / Settings / Markets.
 //! - [`key_import`] — parser for base64 MoonBot exported keys.
@@ -142,8 +140,8 @@ pub mod time;
 
 // Low-level wire machinery: kept crate-internal. The high-level API
 // (`client` / `events` / `state`) is the application model; the byte-level
-// layers below are an implementation detail. Specific types the public API
-// needs (`MoonKey`, `Command`, `TransportMode`, …) are re-exported below.
+// layers below are an implementation detail. User-facing configuration/state
+// types stay re-exported below; raw channel ids are hidden for diagnostics.
 mod compression;
 mod crypto;
 mod protocol;
@@ -156,27 +154,27 @@ pub use client::{
     ActiveSubscriptions, ClientConfig, ClosePositionParams, CoinCardCandlesTicket, ConnectConfig,
     ConnectError, EngineActionTicket, InitConfig, InitError, InitialStrategies, LifecycleEvent,
     MoonAccount, MoonBalances, MoonCandles, MoonClient, MoonClientError, MoonClientEvent,
-    MoonClientSnapshot, MoonEventQueue, MoonEventSink, MoonOrders, MoonSettings, MoonStrategies,
-    MoonStreams, MoonTrade, NewOrderParams, NewOrderTicket, OrderSide, OrderTarget, RefreshConfig,
-    SellOrderParams, SendPriority, SplitOrderParams, TradeContextError, TradesStreamMode,
-    TradesSubscription, TransportMode, UniqueKey, VStopParams,
+    MoonClientSnapshot, MoonEmulator, MoonEventQueue, MoonEventSink, MoonOrders, MoonSettings,
+    MoonStrategies, MoonStreams, MoonTrade, NewOrderParams, NewOrderTicket, OrderSide, OrderTarget,
+    RefreshConfig, SellOrderParams, SendPriority, SplitOrderParams, TradeContextError,
+    TradesStreamMode, TradesSubscription, TransportMode, UniqueKey, VStopParams,
 };
 pub use commands::engine_api::{
     AuthCheckResponse, DexInfo, ExchangeTypeMask, HyperDexIndex, ServerInfo,
 };
 pub use commands::{
     field_names, ArbConfigCompact, ArbIsolationFlags, ArbPlatformCode, BaseCurrency,
-    ClientSettingsCommand, DelphiBool, ExchangeCode, FieldValue, FixedPosition, ImmuneItem,
-    LevManage, MoveAllBuysCmdType, MoveAllCmdType, OrderCompact, OrderType, OrderUpdateData,
+    ClientSettingsCommand, DelphiBool, ExchangeCode, FieldValue, FixedPosition, LevManage,
+    MoveAllBuysCmdType, MoveAllCmdType, OrderCompact, OrderType, OrderUpdateData,
     OrderWorkerStatus, PositionType, PriceZone, ReplaceMultiKind, ResetProfitKind, SpotMarketKind,
     StopSettings, StrategyActiveMode, StrategyDynamicPicklist, StrategyFieldLayout,
     StrategyFieldType, StrategyFieldUiKind, StrategyFields, StrategyKind, StrategySchema,
-    StrategySchemaField, StrategySchemaKind, StrategySnapshot, TokenTags, TriggerAction,
-    AS_CFG2_SIZE, AS_CFG_SIZE,
+    StrategySchemaEditorSection, StrategySchemaEditorSectionKind, StrategySchemaField,
+    StrategySchemaKind, StrategySnapshot, TokenTags, TriggerAction, AS_CFG2_SIZE, AS_CFG_SIZE,
 };
 // Parameter types named by public high-level handle methods but defined in
 // command submodules (`MoonTrade::move_all_sells`/`move_all_buys`,
-// `MoonCandles::request_coin_card`, UI emulation helpers).
+// `MoonCandles::request_coin_card`).
 pub use commands::candles::{DeepHistoryKind, DeepPrice};
 pub use commands::trade::{MoveAllBuysParams, MoveAllSellsParams};
 pub use commands::ui::EmuTradePoint;
@@ -190,6 +188,7 @@ pub use key_import::{
     import_key, parse_key_info, ImportedIpVersion, ImportedKeyFormat, ImportedKeyInfo,
     ImportedKeys, ImportedNetworkConfig,
 };
+#[doc(hidden)]
 pub use protocol::Command;
 pub use state::{
     CoinCardCandlesEvent, CoinCardCandlesState, ExchangeKind, TransferAssetsEvent,

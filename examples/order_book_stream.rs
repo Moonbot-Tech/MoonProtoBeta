@@ -11,14 +11,6 @@ use moonproto::Event;
 
 mod common;
 
-fn book_kind_name(kind: u8) -> &'static str {
-    match kind {
-        0 => "futures",
-        1 => "spot",
-        _ => "unknown",
-    }
-}
-
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
@@ -75,26 +67,14 @@ fn main() {
                         println!(
                             "[book] market={} kind={} full={} seq={} top_bid={} top_ask={}",
                             name,
-                            book_kind_name(kind.as_u8()),
+                            kind.as_str(),
                             is_full,
                             seq,
                             bid,
                             ask
                         );
                     }
-                    OrderBookEvent::Ignored {
-                        market_index,
-                        kind,
-                        seq,
-                        reason,
-                    } => {
-                        println!(
-                            "[book] ignored idx={} kind={} seq={} reason={reason:?}",
-                            market_index,
-                            book_kind_name(kind.as_u8()),
-                            seq
-                        );
-                    }
+                    OrderBookEvent::Ignored { .. } => {}
                     OrderBookEvent::RequestFullNeeded { .. } => {}
                 }
             }

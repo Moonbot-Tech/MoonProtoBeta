@@ -99,6 +99,19 @@ fn emu_trade_point_uses_private_wire_struct() {
 }
 
 #[test]
+fn emu_trade_point_public_constructors_encode_side() {
+    let buy = EmuTradePoint::buy(10, -100.5);
+    assert_eq!(buy.time_delta_ms, 10);
+    assert_eq!(buy.abs_price(), 100.5);
+    assert!(!buy.is_sell());
+
+    let sell = EmuTradePoint::sell(20, 101.25);
+    assert_eq!(sell.time_delta_ms, 20);
+    assert_eq!(sell.abs_price(), 101.25);
+    assert!(sell.is_sell());
+}
+
+#[test]
 fn emu_trades_roundtrip() {
     let points = vec![
         EmuTradePoint {
@@ -123,6 +136,16 @@ fn emu_trades_roundtrip() {
         }
         _ => panic!("wrong variant"),
     }
+}
+
+#[test]
+fn emu_trades_builder_never_wraps_word_count() {
+    let points = vec![EmuTradePoint::buy(0, 1.0); usize::from(u16::MAX) + 1];
+    let raw = build_emu_trades(3, 42, 45123.5, &points);
+    let count_pos = 11 + 2 + 8;
+    let count = u16::from_le_bytes([raw[count_pos], raw[count_pos + 1]]);
+    assert_eq!(count, u16::MAX);
+    assert_eq!(raw.len(), count_pos + 2 + usize::from(u16::MAX) * 6);
 }
 
 #[test]
@@ -334,22 +357,6 @@ fn word_count_builders_write_only_declared_wrapped_count() {
         UICommand::StratStartStopV2(s) => {
             assert!(s.is_start);
             assert_eq!(s.items, vec![items[0]]);
-        }
-        _ => panic!("wrong variant"),
-    }
-
-    let points = vec![
-        EmuTradePoint {
-            time_delta_ms: 123,
-            price: -77.5,
-        };
-        65_537
-    ];
-    let raw = build_emu_trades(3, 42, 45123.5, &points);
-    assert_eq!(raw.len(), 11 + 2 + 8 + 2 + 6);
-    match UICommand::parse(&raw).unwrap() {
-        UICommand::EmuTrades(e) => {
-            assert_eq!(e.points, vec![points[0]]);
         }
         _ => panic!("wrong variant"),
     }

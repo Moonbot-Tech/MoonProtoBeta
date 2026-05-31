@@ -1,8 +1,9 @@
 //! Read-only Active Lib state snapshot for application callbacks.
 
 use super::*;
+use crate::commands::candles::{DeepHistoryKind, DeepPrice};
 use crate::commands::strategy_serializer::StrategySnapshot;
-use crate::state::{OrderBookKind, OrderBookSnapshot, TopOfBook};
+use crate::state::{MarketHandle, OrderBookKind, OrderBookSnapshot, TopOfBook};
 
 /// Immutable read-model copy published by `MoonClient`.
 ///
@@ -55,10 +56,28 @@ impl EventDispatcherSnapshot {
         self.order_books.book(market_index, kind)
     }
 
+    /// Current applied orderbook for a stable market handle.
+    ///
+    /// This is the Delphi-shaped chart path: UI resolves a market once, keeps
+    /// the handle, and reads retained state through it instead of repeating
+    /// string/protocol-index lookups in hot render code.
+    pub fn order_book_for(
+        &self,
+        market: &MarketHandle,
+        kind: OrderBookKind,
+    ) -> Option<&OrderBookSnapshot> {
+        self.order_book(market.name(), kind)
+    }
+
     /// Best bid/ask from the current applied orderbook for a market name.
     pub fn top_of_book(&self, market_name: &str, kind: OrderBookKind) -> Option<TopOfBook> {
         self.order_book(market_name, kind)
             .map(OrderBookSnapshot::top)
+    }
+
+    /// Best bid/ask from the current applied orderbook for a stable market handle.
+    pub fn top_of_book_for(&self, market: &MarketHandle, kind: OrderBookKind) -> Option<TopOfBook> {
+        self.top_of_book(market.name(), kind)
     }
 
     /// Read-only account-level state.
@@ -92,6 +111,15 @@ impl EventDispatcherSnapshot {
     /// Demand-driven CoinCard candles by market/history kind.
     pub fn coin_card_candles(&self) -> &crate::state::CoinCardCandlesState {
         &self.coin_card_candles
+    }
+
+    /// Demand-driven CoinCard candles for a stable market handle.
+    pub fn coin_card_candles_for(
+        &self,
+        market: &MarketHandle,
+        kind: DeepHistoryKind,
+    ) -> Option<&[DeepPrice]> {
+        self.coin_card_candles.get(market.name(), kind)
     }
 
     /// Read-only strategy state.
@@ -139,6 +167,14 @@ impl EventDispatcherSnapshot {
         self.market_history.as_ref()?.try_readers(market_name)
     }
 
+    /// Retained history readers for a stable market handle.
+    pub fn market_history_readers_for(
+        &self,
+        market: &MarketHandle,
+    ) -> Option<MarketHistoryReaders> {
+        self.market_history_readers(market.name())
+    }
+
     /// Current rolling volume snapshot for one market, if retained storage is active.
     pub fn market_history_rolling_volumes(
         &self,
@@ -148,6 +184,15 @@ impl EventDispatcherSnapshot {
         self.market_history
             .as_ref()?
             .try_rolling_volumes(market_name, now_time)
+    }
+
+    /// Current rolling volume snapshot for a stable market handle.
+    pub fn market_history_rolling_volumes_for(
+        &self,
+        market: &MarketHandle,
+        now_time: f64,
+    ) -> Option<RollingTradeVolumeSnapshot> {
+        self.market_history_rolling_volumes(market.name(), now_time)
     }
 
     /// Current rolling volume snapshot at a typed Delphi time.
@@ -167,6 +212,15 @@ impl EventDispatcherSnapshot {
         self.market_history_rolling_volumes_at(market_name, crate::DelphiTime::now())
     }
 
+    /// Current rolling volume snapshot for a stable market handle using the
+    /// local system clock.
+    pub fn market_history_rolling_volumes_now_for(
+        &self,
+        market: &MarketHandle,
+    ) -> Option<RollingTradeVolumeSnapshot> {
+        self.market_history_rolling_volumes_for(market, crate::DelphiTime::now().as_days())
+    }
+
     /// Current derived analytics snapshot for one market, if retained storage is active.
     pub fn market_history_derived_snapshot(
         &self,
@@ -176,6 +230,15 @@ impl EventDispatcherSnapshot {
         self.market_history
             .as_ref()?
             .try_derived_snapshot(market_name, now_time)
+    }
+
+    /// Current derived analytics snapshot for a stable market handle.
+    pub fn market_history_derived_snapshot_for(
+        &self,
+        market: &MarketHandle,
+        now_time: f64,
+    ) -> Option<MarketDerivedSnapshot> {
+        self.market_history_derived_snapshot(market.name(), now_time)
     }
 
     /// Current derived analytics snapshot at a typed Delphi time.
@@ -193,6 +256,15 @@ impl EventDispatcherSnapshot {
         market_name: &str,
     ) -> Option<MarketDerivedSnapshot> {
         self.market_history_derived_snapshot_at(market_name, crate::DelphiTime::now())
+    }
+
+    /// Current derived analytics snapshot for a stable market handle using the
+    /// local system clock.
+    pub fn market_history_derived_snapshot_now_for(
+        &self,
+        market: &MarketHandle,
+    ) -> Option<MarketDerivedSnapshot> {
+        self.market_history_derived_snapshot_for(market, crate::DelphiTime::now().as_days())
     }
 }
 

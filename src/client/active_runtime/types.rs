@@ -290,6 +290,12 @@ pub enum MoonClientError {
     RequestDisconnected,
     /// Session route fields required by market-level trade actions are missing.
     TradeContext(TradeContextError),
+    /// Retained state required to build a high-level command is not ready yet.
+    StateUnavailable(&'static str),
+    /// A user-facing market name could not be resolved to the active market map.
+    UnknownMarket(String),
+    /// A UI emulator command cannot fit Delphi's `Word Count` wire field.
+    TooManyEmuTradePoints(usize),
     /// The runtime thread stopped, panicked, or its command channel is closed.
     RuntimeStopped,
 }
@@ -301,6 +307,14 @@ impl std::fmt::Display for MoonClientError {
             Self::RequestTimeout => write!(f, "MoonProto request timed out"),
             Self::RequestDisconnected => write!(f, "MoonProto request channel disconnected"),
             Self::TradeContext(err) => write!(f, "{err}"),
+            Self::StateUnavailable(reason) => write!(f, "MoonProto state is unavailable: {reason}"),
+            Self::UnknownMarket(market) => write!(f, "MoonProto market is unknown: {market}"),
+            Self::TooManyEmuTradePoints(count) => {
+                write!(
+                    f,
+                    "MoonProto emulated trade command has too many points: {count}"
+                )
+            }
             Self::RuntimeStopped => write!(f, "MoonProto runtime is stopped"),
         }
     }
@@ -311,7 +325,11 @@ impl std::error::Error for MoonClientError {
         match self {
             Self::Connect(err) => Some(err),
             Self::TradeContext(err) => Some(err),
-            Self::RequestTimeout | Self::RequestDisconnected => None,
+            Self::RequestTimeout
+            | Self::RequestDisconnected
+            | Self::StateUnavailable(_)
+            | Self::UnknownMarket(_)
+            | Self::TooManyEmuTradePoints(_) => None,
             Self::RuntimeStopped => None,
         }
     }

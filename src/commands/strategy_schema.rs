@@ -10,8 +10,8 @@ use std::io::Read;
 use flate2::read::DeflateDecoder;
 
 use super::strategy_serializer::{
-    FieldValue, StrategyKind, TID_BOOL, TID_BYTE, TID_DOUBLE, TID_INT32, TID_INT64, TID_SINGLE,
-    TID_STRING, TID_UINT32, TID_UINT64, TID_WORD,
+    FieldValue, StrategyKind, StrategySnapshot, TID_BOOL, TID_BYTE, TID_DOUBLE, TID_INT32,
+    TID_INT64, TID_SINGLE, TID_STRING, TID_UINT32, TID_UINT64, TID_WORD,
 };
 use super::strict_read::{
     read_f32, read_f64, read_i32, read_i64, read_str16, read_str8, read_u16, read_u32, read_u64,
@@ -40,6 +40,28 @@ pub struct StrategySchema {
     pub format_version: u8,
     pub kinds: Vec<StrategySchemaKind>,
     pub fields: Vec<StrategySchemaField>,
+}
+
+/// One visible editor section for one strategy kind.
+///
+/// Delphi starts with the `Main` chapter, then `sgComment` starts a new main
+/// chapter and `sgFilterClass` / `sgChapterClass` start nested sections. The
+/// layout marker exists only on the first field of the section; this view
+/// carries the current section over following fields so UI code does not have
+/// to rediscover Delphi's editor grouping rules.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StrategySchemaEditorSection<'a> {
+    pub main_chapter: &'a str,
+    pub title: String,
+    pub kind: StrategySchemaEditorSectionKind<'a>,
+    pub fields: Vec<&'a StrategySchemaField>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrategySchemaEditorSectionKind<'a> {
+    MainChapter,
+    FilterClass { value: &'a str },
+    ChapterClass { chapter: &'a str, value: &'a str },
 }
 
 /// One `TStrategyKind` entry from the schema kind table.
@@ -164,6 +186,36 @@ pub enum StrategyDynamicPicklist {
     FieldName(String),
 }
 
+impl StrategyDynamicPicklist {
+    /// Build the Delphi dynamic picklist from the current local strategy list.
+    ///
+    /// `UseHookStrategy` gets an empty item first, then local MoonHook strategy
+    /// names. `ComboStart` / `ComboEnd` get all local strategy names. Unknown
+    /// future dynamic sources return an empty list so UI can fall back to edit.
+    pub fn values_from_snapshots<'a, I>(&self, strategies: I) -> Vec<String>
+    where
+        I: IntoIterator<Item = &'a StrategySnapshot>,
+    {
+        match self {
+            Self::HookStrategies => {
+                let mut out = vec![String::new()];
+                out.extend(
+                    strategies
+                        .into_iter()
+                        .filter(|strategy| strategy.kind() == StrategyKind::MOON_HOOK)
+                        .filter_map(|strategy| strategy.strategy_name().map(str::to_string)),
+                );
+                out
+            }
+            Self::AllStrategies => strategies
+                .into_iter()
+                .filter_map(|strategy| strategy.strategy_name().map(str::to_string))
+                .collect(),
+            Self::FieldName(_) => Vec::new(),
+        }
+    }
+}
+
 impl StrategySchema {
     /// Parse raw-deflate `TStratSchema.Data`.
     pub fn parse_compressed(deflate_bytes: &[u8]) -> Option<Self> {
@@ -271,6 +323,122 @@ impl StrategySchema {
 
     pub fn field(&self, name: &str) -> Option<&StrategySchemaField> {
         self.fields.iter().find(|f| f.name == name)
+    }
+
+    /// Visible fields for one raw `TStrategyKind` ordinal in Delphi field order.
+    pub fn fields_for_kind(&self, kind: u8) -> impl Iterator<Item = &StrategySchemaField> {
+        self.fields
+            .iter()
+            .filter(move |field| field.visible_for_kind(kind))
+    }
+
+    /// Visible fields for one typed strategy kind in Delphi field order.
+    pub fn fields_for_strategy_kind(
+        &self,
+        kind: StrategyKind,
+    ) -> impl Iterator<Item = &StrategySchemaField> {
+        self.fields_for_kind(kind.to_byte())
+    }
+
+    /// Delphi editor sections for one raw `TStrategyKind` ordinal.
+    ///
+    /// This walks every schema field, including hidden layout-marker fields, so
+    /// a hidden marker still moves the current section for later visible fields.
+    /// That matches `TStratForm` editor construction: section state is driven by
+    /// RTTI field order, then visible rows are placed into the current section.
+    pub fn editor_sections_for_kind(&self, kind: u8) -> Vec<StrategySchemaEditorSection<'_>> {
+        let mut sections = Vec::new();
+        let mut seed = StrategySchemaEditorSectionSeed::main();
+        let mut active_index: Option<usize> = None;
+
+        for field in &self.fields {
+            if let Some(next_seed) = seed.next_for_layout(&field.layout) {
+                seed = next_seed;
+                active_index = None;
+            }
+
+            if !field.visible_for_kind(kind) {
+                continue;
+            }
+
+            let idx = match active_index {
+                Some(idx) => idx,
+                None => {
+                    sections.push(seed.to_section());
+                    let idx = sections.len() - 1;
+                    active_index = Some(idx);
+                    idx
+                }
+            };
+            sections[idx].fields.push(field);
+        }
+
+        sections
+    }
+
+    /// Delphi editor sections for one typed strategy kind.
+    pub fn editor_sections_for_strategy_kind(
+        &self,
+        kind: StrategyKind,
+    ) -> Vec<StrategySchemaEditorSection<'_>> {
+        self.editor_sections_for_kind(kind.to_byte())
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StrategySchemaEditorSectionSeed<'a> {
+    main_chapter: &'a str,
+    kind: StrategySchemaEditorSectionKind<'a>,
+}
+
+impl<'a> StrategySchemaEditorSectionSeed<'a> {
+    fn main() -> Self {
+        Self {
+            main_chapter: "Main",
+            kind: StrategySchemaEditorSectionKind::MainChapter,
+        }
+    }
+
+    fn next_for_layout(
+        self,
+        layout: &'a StrategyFieldLayout,
+    ) -> Option<StrategySchemaEditorSectionSeed<'a>> {
+        match layout {
+            StrategyFieldLayout::None => None,
+            StrategyFieldLayout::Comment(title) => Some(Self {
+                main_chapter: title,
+                kind: StrategySchemaEditorSectionKind::MainChapter,
+            }),
+            StrategyFieldLayout::FilterClass(value) => Some(Self {
+                main_chapter: self.main_chapter,
+                kind: StrategySchemaEditorSectionKind::FilterClass { value },
+            }),
+            StrategyFieldLayout::ChapterClass { value, chapter } => Some(Self {
+                main_chapter: self.main_chapter,
+                kind: StrategySchemaEditorSectionKind::ChapterClass { chapter, value },
+            }),
+        }
+    }
+
+    fn title(self) -> String {
+        match self.kind {
+            StrategySchemaEditorSectionKind::MainChapter => self.main_chapter.to_string(),
+            StrategySchemaEditorSectionKind::FilterClass { value } => {
+                format!("Filters / {value}")
+            }
+            StrategySchemaEditorSectionKind::ChapterClass { chapter, value } => {
+                format!("{chapter} / {value}")
+            }
+        }
+    }
+
+    fn to_section(self) -> StrategySchemaEditorSection<'a> {
+        StrategySchemaEditorSection {
+            main_chapter: self.main_chapter,
+            title: self.title(),
+            kind: self.kind,
+            fields: Vec::new(),
+        }
     }
 }
 
@@ -456,6 +624,114 @@ mod tests {
             Some(StrategyDynamicPicklist::HookStrategies)
         );
         assert_eq!(dynamic.visible_kind_ordinals, vec![20]);
+
+        let kind1_names = schema
+            .fields_for_kind(1)
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kind1_names,
+            vec!["StrategyName", "AcceptCommands", "SignalType"]
+        );
+
+        let sections = schema.editor_sections_for_kind(20);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].main_chapter, "Main");
+        assert_eq!(sections[0].title, "Main / General");
+        assert_eq!(
+            sections[0]
+                .fields
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["StrategyName", "SignalType", "UseHookStrategy"]
+        );
+    }
+
+    #[test]
+    fn editor_sections_follow_hidden_layout_markers() {
+        let mut raw = Vec::new();
+        raw.push(SCHEMA_FORMAT_VERSION);
+        raw.push(2); // kind_count
+        raw.push(1);
+        str8(&mut raw, "One");
+        raw.push(2);
+        str8(&mut raw, "Two");
+        raw.extend_from_slice(&3u16.to_le_bytes());
+
+        str8(&mut raw, "First");
+        raw.push(TID_STRING);
+        raw.push(UI_EDIT);
+        raw.push(0b0000_0011);
+
+        str8(&mut raw, "HiddenComment");
+        raw.push(TID_STRING);
+        raw.push((LA_COMMENT << 2) | UI_EDIT);
+        str8(&mut raw, "Hidden Main");
+        raw.push(0b0000_0001);
+
+        str8(&mut raw, "VisibleAfter");
+        raw.push(TID_STRING);
+        raw.push(UI_EDIT);
+        raw.push(0b0000_0010);
+
+        let schema = StrategySchema::parse_plain(&raw).unwrap();
+        let sections = schema.editor_sections_for_kind(2);
+        assert_eq!(sections.len(), 2);
+        assert_eq!(sections[0].title, "Main");
+        assert_eq!(
+            sections[0]
+                .fields
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["First"]
+        );
+        assert_eq!(sections[1].title, "Hidden Main");
+        assert_eq!(
+            sections[1]
+                .fields
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["VisibleAfter"]
+        );
+    }
+
+    #[test]
+    fn dynamic_picklist_values_match_delphi_editor_sources() {
+        use crate::commands::strategy_serializer::{field_names, StrategyFields};
+        use std::sync::Arc;
+
+        fn strategy(kind: StrategyKind, name: &str) -> StrategySnapshot {
+            let mut fields = StrategyFields::new();
+            fields.insert(
+                field_names::STRATEGY_NAME,
+                FieldValue::String(name.to_string()),
+            );
+            StrategySnapshot {
+                strategy_id: 1,
+                strategy_ver: 0,
+                last_date: 0,
+                checked: false,
+                kind: kind.to_byte(),
+                path: Arc::from(""),
+                fields,
+            }
+        }
+
+        let hook = strategy(StrategyKind::MOON_HOOK, "Hook A");
+        let listing = strategy(StrategyKind::NEW_LISTING, "Listing A");
+        let strategies = vec![hook, listing];
+
+        assert_eq!(
+            StrategyDynamicPicklist::HookStrategies.values_from_snapshots(&strategies),
+            vec!["".to_string(), "Hook A".to_string()]
+        );
+        assert_eq!(
+            StrategyDynamicPicklist::AllStrategies.values_from_snapshots(&strategies),
+            vec!["Hook A".to_string(), "Listing A".to_string()]
+        );
     }
 
     #[test]

@@ -34,8 +34,10 @@ impl Client {
     ///
     /// `data` is only the `TStratSnapshot.Data` blob. The method adds the required
     /// Delphi fields: `ServerEpoch`, `ClientMaxLastDate`, `Size`, and `Full`.
-    /// Use [`Client::strat_send_snapshot_batch`] when the application has decoded
-    /// `StrategySnapshot` values rather than a prebuilt serializer payload.
+    /// Diagnostic/tools path can use [`Client::strat_send_snapshot_batch`] when
+    /// they already hold decoded `StrategySnapshot` values rather than a
+    /// prebuilt serializer payload. Regular applications use
+    /// `MoonClient::strategies().sync_local_strategies(...)`.
     #[doc(hidden)]
     pub fn strat_send_snapshot_payload(
         &self,

@@ -65,11 +65,24 @@ pub struct Order {
     pub vstop_level: f64,
     pub vstop_vol: f64,
     pub panic_sell: bool,
+    pub is_moon_shot: bool,
+    pub corridor_price_down: f32,
+    pub corridor_price_up: f32,
     pub immune_for_clicks: bool,
     pub is_short: bool,
     pub sell_reason: SellReason,
     pub strat_id: u64,
+    pub db_id: i32,
+    pub from_cache: bool,
     pub emulator_mode: bool,
+    pub pending_cancel: bool,
+    pub bulk_replace_buy: bool,
+    pub bulk_replace_sell: bool,
+    pub buy_trace_line: Option<OrderTraceLine>,
+    pub sell_trace_line: Option<OrderTraceLine>,
+    pub job_is_done: bool,
+    pub cancel_request: bool,
+    pub server_forced_remove: bool,
 }
 ```
 
@@ -91,6 +104,17 @@ Order timestamps are Delphi `TDateTime` values on the wire. Use
 `order.sell_reason.description()` for a Delphi-compatible UI label, and use
 `to_byte()` only in low-level protocol diagnostics.
 
+Field groups for terminal UI:
+
+| UI area | Read from |
+|---|---|
+| order table identity/routing | `uid`, `market_name`, `currency`, `platform`, `strat_id`, `db_id`, `from_cache`, `emulator_mode`, `is_short` |
+| lifecycle/status columns | `status.name()`, `status.is_terminal()`, `job_is_done`, `cancel_request`, `server_forced_remove` |
+| exchange-side buy/sell details | `buy_order`, `sell_order` (`actual_price`, `mean_price`, `quantity`, `quantity_remaining`, `leverage`, times) |
+| local user intents | `buy_price`, `sell_price`, `pending_cancel`, `bulk_replace_buy`, `bulk_replace_sell`, `immune_for_clicks`, `panic_sell` |
+| stops/VStop editor | `stops`, `vstop_on`, `vstop_fixed`, `vstop_level`, `vstop_vol` |
+| chart overlays | `is_moon_shot`, `corridor_price_down/up`, `buy_trace_line`, `sell_trace_line` |
+
 ## Status
 
 ```rust
@@ -108,14 +132,16 @@ impl OrderWorkerStatus {
     pub const SellDone: Self;
     pub const SellAlmostDone: Self;
 
-    pub const fn from_byte(raw: u8) -> Self;
-    pub const fn to_byte(self) -> u8;
+    pub const fn name(self) -> &'static str;
+    pub const fn is_known(self) -> bool;
+    pub const fn is_terminal(self) -> bool;
 }
 ```
 
 `OrderWorkerStatus::is_terminal()` returns true for final states. Unknown future
-status bytes are preserved instead of being rejected; use
-`OrderWorkerStatus::from_byte(raw)` / `to_byte()` only in protocol tools.
+status bytes are preserved instead of being rejected. Raw
+`OrderWorkerStatus::from_byte(raw)` / `to_byte()` exist for protocol tools, not
+for normal terminal UI.
 
 ## Actions
 
@@ -140,6 +166,7 @@ client.orders().update_vstop(
     },
 )?;
 client.orders().turn_panic_sell(order, true)?;
+client.orders().set_immune_for_orders([order], true)?;
 client.orders().request_status(order)?;
 ```
 

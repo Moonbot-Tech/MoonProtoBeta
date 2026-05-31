@@ -15,8 +15,8 @@ use crate::commands::market::PositionType;
 use crate::commands::ui::SpotMarketKind;
 use commands::{RuntimeCommand, StratRuntimeCommand, UiRuntimeCommand};
 pub use handles::{
-    MoonAccount, MoonBalances, MoonCandles, MoonOrders, MoonSettings, MoonStrategies, MoonStreams,
-    MoonTrade, OrderTarget,
+    MoonAccount, MoonBalances, MoonCandles, MoonEmulator, MoonOrders, MoonSettings, MoonStrategies,
+    MoonStreams, MoonTrade, OrderTarget,
 };
 use runtime_loop::runtime_loop;
 pub use types::{
@@ -379,6 +379,11 @@ impl MoonClient {
         MoonSettings { client: self }
     }
 
+    /// Chart-trade emulator command API.
+    pub fn emulator(&self) -> MoonEmulator<'_> {
+        MoonEmulator { client: self }
+    }
+
     /// Demand-driven candle request API.
     pub fn candles(&self) -> MoonCandles<'_> {
         MoonCandles { client: self }
@@ -738,6 +743,20 @@ impl MoonClient {
         self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::LevManage(cmd)))
     }
 
+    /// Send emulated chart trades (`TEmuTradesCommand`).
+    pub(crate) fn send_emulated_trades(
+        &self,
+        market_index: u16,
+        base_time: f64,
+        points: Vec<crate::commands::ui::EmuTradePoint>,
+    ) -> Result<(), MoonClientError> {
+        self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::EmuTrades {
+            market_index,
+            base_time,
+            points,
+        }))
+    }
+
     /// Send a trigger-management command (`TTriggerManageCommand`).
     pub(crate) fn manage_triggers(
         &self,
@@ -793,8 +812,8 @@ impl MoonClient {
         }))
     }
 
-    /// Replace the Active Lib local strategy list and send a Delphi
-    /// `TStratSnapshot` batch to the server.
+    /// Synchronize the Active Lib local strategy list after a terminal edit and
+    /// send a Delphi `TStratSnapshot` batch to the server.
     ///
     /// The runtime uses the live strategy schema fetched during Init, so callers
     /// do not carry serializer field hardcode. The call only queues the intent;

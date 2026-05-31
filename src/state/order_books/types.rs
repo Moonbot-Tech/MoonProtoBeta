@@ -32,6 +32,14 @@ impl OrderBookKind {
             _ => None,
         }
     }
+
+    /// Stable lowercase label for UI logs and examples.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Futures => "futures",
+            Self::Spot => "spot",
+        }
+    }
 }
 
 /// Internal cache key: `(market_index, raw book_kind)`.

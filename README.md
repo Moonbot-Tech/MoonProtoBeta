@@ -118,7 +118,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ConnectConfig::new(InitConfig {
             initial_strategies: Some(InitialStrategies::new(
                 0,
-                Vec::new(), // replace with your local strategy list if the app has one
+                Vec::new(), // pass the current local strategy list if the app has one
             )),
             subscribe_trades: Some(TradesStreamMode::TradesOnly),
             subscribe_orderbooks: vec!["BTCUSDT".to_string()],

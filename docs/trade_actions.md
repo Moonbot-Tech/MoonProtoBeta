@@ -22,7 +22,7 @@ client.orders().update_vstop(
         volume: 12.0,
     },
 )?;
-client.orders().set_immune(items)?;
+client.orders().set_immune_for_orders([order], true)?;
 client.orders().turn_panic_sell(order, true)?;
 client.orders().request_status(order.uid)?;
 client.orders().switch_panic_sell_by_market("BTCUSDT", true)?;
@@ -118,8 +118,8 @@ reconnect keeps the session state alive automatically.
   Delphi replace-then-cancel path.
 - `update_stops` and `update_vstop` compare against previous local values and
   send only when something changed.
-- `set_immune` updates only found active local orders and sends nothing if no
-  target order exists.
+- `set_immune_for_orders` updates only found active local orders and sends
+  nothing if no target order exists.
 - panic-sell methods update live local panic flags before sending.
 - `client.trade().new_order`, join/split/close/sell/penalty commands derive
   `TradeCtx` from the session route and do not require caller-supplied protocol

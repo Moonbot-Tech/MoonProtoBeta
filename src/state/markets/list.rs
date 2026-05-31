@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+#[cfg(any(test, feature = "diagnostics"))]
 use std::time::Instant;
 
 use crate::commands::candles::current_local_time_shift_minutes;
@@ -9,7 +10,9 @@ use crate::commands::market::{
     read_corr_market, read_market_with_local_shift, EngineStreamReader, Market, MarketsListResponse,
 };
 
-use super::{MarketHandle, MarketsEvent, MarketsListApplyTiming, MarketsState};
+#[cfg(any(test, feature = "diagnostics"))]
+use super::MarketsListApplyTiming;
+use super::{MarketHandle, MarketsEvent, MarketsState};
 
 impl MarketsState {
     /// Apply the `emk_GetMarketsList` response.
@@ -135,7 +138,7 @@ impl MarketsState {
         ver: u16,
         local_shift_minutes: f64,
     ) -> Option<MarketsEvent> {
-        let total_start = Instant::now();
+        let total_start = timing_mark();
         let first_create_markets = self.markets.is_empty();
         let new_market_found = self.markets_list_refresh_needed;
         let allow_new_markets = first_create_markets || new_market_found;
@@ -152,7 +155,7 @@ impl MarketsState {
         let mut pending_markets: Option<Vec<MarketHandle>> = None;
         let mut pending_handles_by_name: Option<HashMap<String, MarketHandle>> = None;
         let mut any_market_added = false;
-        let market_loop_start = Instant::now();
+        let market_loop_start = timing_mark();
         for _ in 0..count {
             let market = read_market_with_local_shift(&mut r, ver, local_shift_minutes)?;
             if rebuild_server_indexes {
@@ -190,14 +193,14 @@ impl MarketsState {
         }
         let market_loop_ns = elapsed_ns_u64(market_loop_start);
 
-        let index_rebuild_start = Instant::now();
+        let index_rebuild_start = timing_mark();
         if rebuild_server_indexes {
             self.replace_market_indexes_cow(incoming_server_names);
             self.indexes_synchronized = true;
         }
         let index_rebuild_ns = elapsed_ns_u64(index_rebuild_start);
 
-        let corr_loop_start = Instant::now();
+        let corr_loop_start = timing_mark();
         let corr_count = r.read_count()?;
         for _ in 0..corr_count {
             let cm = read_corr_market(&mut r)?;
@@ -205,21 +208,36 @@ impl MarketsState {
         }
         let corr_loop_ns = elapsed_ns_u64(corr_loop_start);
 
-        let ref_passes_start = Instant::now();
+        let ref_passes_start = timing_mark();
         self.check_corr_markets();
         self.check_currency_ref_markets();
         let ref_passes_ns = elapsed_ns_u64(ref_passes_start);
         self.markets_list_refresh_needed = false;
-        self.last_markets_list_timing = Some(MarketsListApplyTiming {
-            payload_len: data.len(),
-            market_count: count,
-            corr_count,
-            total_ns: elapsed_ns_u64(total_start),
+        #[cfg(not(any(test, feature = "diagnostics")))]
+        let _ = (
+            total_start,
             market_loop_ns,
             index_rebuild_ns,
             corr_loop_ns,
             ref_passes_ns,
-        });
+        );
+        #[cfg(any(test, feature = "diagnostics"))]
+        {
+            self.last_markets_list_timing = Some(MarketsListApplyTiming {
+                payload_len: data.len(),
+                market_count: count,
+                corr_count,
+                total_ns: elapsed_ns_u64(total_start),
+                market_loop_ns,
+                index_rebuild_ns,
+                corr_loop_ns,
+                ref_passes_ns,
+            });
+        }
+        #[cfg(not(any(test, feature = "diagnostics")))]
+        {
+            self.last_markets_list_timing = None;
+        }
 
         Some(MarketsEvent::MarketsListReplaced {
             count: self.markets.len(),
@@ -331,6 +349,29 @@ fn seed_price_funding_from_market(handle: &MarketHandle) {
     });
 }
 
-fn elapsed_ns_u64(start: Instant) -> u64 {
+#[cfg(any(test, feature = "diagnostics"))]
+type TimingMark = Instant;
+
+#[cfg(not(any(test, feature = "diagnostics")))]
+#[derive(Clone, Copy)]
+struct TimingMark;
+
+#[cfg(any(test, feature = "diagnostics"))]
+fn timing_mark() -> TimingMark {
+    Instant::now()
+}
+
+#[cfg(not(any(test, feature = "diagnostics")))]
+fn timing_mark() -> TimingMark {
+    TimingMark
+}
+
+#[cfg(any(test, feature = "diagnostics"))]
+fn elapsed_ns_u64(start: TimingMark) -> u64 {
     start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
+#[cfg(not(any(test, feature = "diagnostics")))]
+fn elapsed_ns_u64(_start: TimingMark) -> u64 {
+    0
 }

@@ -163,7 +163,7 @@ pub(crate) fn build_emu_trades(
     base_time: f64,
     points: &[EmuTradePoint],
 ) -> Vec<u8> {
-    let count = points.len() as u16;
+    let count = points.len().min(usize::from(u16::MAX)) as u16;
     let count_usize = usize::from(count);
     let mut out = Vec::with_capacity(11 + 2 + 8 + 2 + count_usize * 6);
     write_header(&mut out, CMD_EMU_TRADES, uid);

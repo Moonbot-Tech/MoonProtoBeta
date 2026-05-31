@@ -259,11 +259,13 @@ pub enum Event {
     /// Server-side log message (`MPC_LogMsg`): `time:TDateTime + msg:UTF-8 rest`.
     ServerLog { time: f64, msg: String },
     /// Raw payload for channels the dispatcher does not parse.
+    #[doc(hidden)]
     Raw { cmd: Command, payload: Vec<u8> },
     /// Payload parsing failed.
     ///
     /// `payload` is cloned only on failure so live diagnostics can dump the
     /// exact bytes that failed to parse without adding work to the normal path.
+    #[doc(hidden)]
     ParseFailed {
         cmd: Command,
         len: usize,

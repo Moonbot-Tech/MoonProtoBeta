@@ -98,8 +98,30 @@ impl MoonOrders {
         self.send_intent(RuntimeCommandKind::UpdateVStop { uid, params })
     }
 
-    /// Apply click-immune intent for found active orders.
-    pub fn set_immune(
+    /// Apply click-immune intent to selected orders.
+    ///
+    /// The UI passes visible order rows (or their UIDs) plus the desired flag.
+    /// Active Lib resolves the live order state and sends only orders that are
+    /// still active, matching Delphi's click-immunity behavior.
+    pub fn set_immune_for_orders<I, T>(&self, orders: I, value: bool) -> Result<(), MoonClientError>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OrderTarget>,
+    {
+        let items = orders
+            .into_iter()
+            .map(|order| crate::commands::trade::ImmuneItem {
+                uid: order.into().uid(),
+                value,
+            })
+            .collect::<Vec<_>>();
+        if items.is_empty() {
+            return Ok(());
+        }
+        self.set_immune(items)
+    }
+
+    fn set_immune(
         &self,
         items: Vec<crate::commands::trade::ImmuneItem>,
     ) -> Result<(), MoonClientError> {
@@ -488,13 +510,17 @@ impl MoonSettings<'_> {
         self.client.send_settings(settings)
     }
 
-    /// Request a MoonBot version update.
+    /// Request the normal release update flow.
+    pub fn request_release_update(&self) -> Result<(), MoonClientError> {
+        self.client.request_version_update("", true)
+    }
+
+    /// Request a named beta/test version update.
     pub fn request_version_update(
         &self,
         version_name: impl Into<String>,
-        is_release: bool,
     ) -> Result<(), MoonClientError> {
-        self.client.request_version_update(version_name, is_release)
+        self.client.request_version_update(version_name, false)
     }
 
     /// Switch DEX mode.
@@ -525,9 +551,82 @@ impl MoonSettings<'_> {
 
     /// Send a trigger-management command (`TTriggerManageCommand`, CmdId 10).
     ///
-    /// `markets` are server market indexes (`mIndex`); `keys` are trigger key
-    /// numbers. [`TriggerAction::Set`](crate::TriggerAction::Set) arms the listed
-    /// triggers, [`TriggerAction::Clear`](crate::TriggerAction::Clear) clears them.
+    /// `market_names` are regular terminal market names. The runtime resolves
+    /// them to the current server indexes when the command is queued, matching
+    /// Delphi UI code: users select `TMarket` objects, and `mIndex` is only the
+    /// final wire detail.
+    pub fn manage_triggers_for_markets<I, S>(
+        &self,
+        action: crate::commands::ui::TriggerAction,
+        market_names: I,
+        keys: &[u16],
+    ) -> Result<(), MoonClientError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let indexes = resolve_market_indexes(self.client, market_names)?;
+        self.client
+            .manage_triggers(action.to_byte(), false, indexes, keys.to_vec())
+    }
+
+    /// Arm trigger keys for selected markets.
+    pub fn set_triggers_for_markets<I, S>(
+        &self,
+        market_names: I,
+        keys: &[u16],
+    ) -> Result<(), MoonClientError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.manage_triggers_for_markets(
+            crate::commands::ui::TriggerAction::Set,
+            market_names,
+            keys,
+        )
+    }
+
+    /// Clear trigger keys for selected markets.
+    pub fn clear_triggers_for_markets<I, S>(
+        &self,
+        market_names: I,
+        keys: &[u16],
+    ) -> Result<(), MoonClientError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.manage_triggers_for_markets(
+            crate::commands::ui::TriggerAction::Clear,
+            market_names,
+            keys,
+        )
+    }
+
+    /// Arm trigger keys for all current markets.
+    pub fn set_triggers_for_all(&self, keys: &[u16]) -> Result<(), MoonClientError> {
+        self.client.manage_triggers(
+            crate::commands::ui::TriggerAction::Set.to_byte(),
+            true,
+            Vec::new(),
+            keys.to_vec(),
+        )
+    }
+
+    /// Clear trigger keys for all current markets.
+    pub fn clear_triggers_for_all(&self, keys: &[u16]) -> Result<(), MoonClientError> {
+        self.client.manage_triggers(
+            crate::commands::ui::TriggerAction::Clear.to_byte(),
+            true,
+            Vec::new(),
+            keys.to_vec(),
+        )
+    }
+
+    /// Low-level diagnostic helper for callers that already have server market
+    /// indexes. Regular terminal code should use the market-name helpers above.
+    #[doc(hidden)]
     pub fn manage_triggers(
         &self,
         action: crate::commands::ui::TriggerAction,
@@ -560,6 +659,94 @@ impl MoonSettings<'_> {
     ) -> Result<(), MoonClientError> {
         self.client.notify_arb_activation(valid_until.as_days())
     }
+}
+
+/// Chart-trade emulator command handle.
+///
+/// This is the high-level path matching Delphi's draw-tool emulator: terminal
+/// code selects a market, builds `EmuTradePoint` values from chart points, and
+/// Active Lib resolves the current server index before sending
+/// `TEmuTradesCommand`.
+pub struct MoonEmulator<'a> {
+    pub(super) client: &'a MoonClient,
+}
+
+impl MoonEmulator<'_> {
+    /// Send emulated trades for a retained market handle.
+    pub fn send_trades_for_market(
+        &self,
+        market: &crate::state::MarketHandle,
+        base_time: crate::DelphiTime,
+        points: &[crate::EmuTradePoint],
+    ) -> Result<(), MoonClientError> {
+        self.send_trades(market.name(), base_time, points)
+    }
+
+    /// Send emulated trades by terminal market name.
+    ///
+    /// Empty `points` is a no-op, matching Delphi UI code which only sends the
+    /// command after a drawn pencil produced at least one valid point. Sell side
+    /// is encoded by `EmuTradePoint::sell`.
+    pub fn send_trades(
+        &self,
+        market_name: impl AsRef<str>,
+        base_time: crate::DelphiTime,
+        points: &[crate::EmuTradePoint],
+    ) -> Result<(), MoonClientError> {
+        if points.is_empty() {
+            return Ok(());
+        }
+        if points.len() > usize::from(u16::MAX) {
+            return Err(MoonClientError::TooManyEmuTradePoints(points.len()));
+        }
+        let market_index = resolve_market_index(self.client, market_name.as_ref())?;
+        self.client
+            .send_emulated_trades(market_index, base_time.as_days(), points.to_vec())
+    }
+}
+
+fn resolve_market_index(client: &MoonClient, market_name: &str) -> Result<u16, MoonClientError> {
+    let snapshot = client.snapshot().ok_or(MoonClientError::StateUnavailable(
+        "market map is not published yet",
+    ))?;
+    let markets = snapshot.markets();
+    if !markets.indexes_synchronized() {
+        return Err(MoonClientError::StateUnavailable(
+            "market indexes are not synchronized",
+        ));
+    }
+    markets
+        .market_index_by_name(market_name)
+        .ok_or_else(|| MoonClientError::UnknownMarket(market_name.to_string()))
+}
+
+fn resolve_market_indexes<I, S>(
+    client: &MoonClient,
+    market_names: I,
+) -> Result<Vec<u16>, MoonClientError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let snapshot = client.snapshot().ok_or(MoonClientError::StateUnavailable(
+        "market map is not published yet",
+    ))?;
+    let markets = snapshot.markets();
+    if !markets.indexes_synchronized() {
+        return Err(MoonClientError::StateUnavailable(
+            "market indexes are not synchronized",
+        ));
+    }
+
+    let mut indexes = Vec::new();
+    for market in market_names {
+        let market = market.as_ref();
+        let index = markets
+            .market_index_by_name(market)
+            .ok_or_else(|| MoonClientError::UnknownMarket(market.to_string()))?;
+        indexes.push(index);
+    }
+    Ok(indexes)
 }
 
 /// Demand-driven candle request handle.
@@ -602,8 +789,8 @@ impl MoonStrategies<'_> {
         self.client.strat_delete(strategy_id, folder_path)
     }
 
-    /// Replace the Active Lib local strategy list and send a snapshot batch.
-    pub fn send_snapshot_batch(
+    /// Synchronize the application's current local strategy list.
+    pub fn sync_local_strategies(
         &self,
         strategies: Vec<crate::commands::strategy_serializer::StrategySnapshot>,
     ) -> Result<(), MoonClientError> {

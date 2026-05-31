@@ -233,6 +233,7 @@ mod tests {
     use super::*;
     use crate::commands::engine_api::ServerInfo;
     use crate::commands::market::{BaseCurrency, ExchangeCode};
+    use crate::commands::strategy_serializer::{FieldValue, StrategyFields, StrategySnapshot};
     use crate::commands::trade::TradeCommand;
 
     fn dummy_cfg() -> ClientConfig {
@@ -260,6 +261,52 @@ mod tests {
             ..Default::default()
         });
         client
+    }
+
+    fn write_str8(out: &mut Vec<u8>, value: &str) {
+        out.push(value.len() as u8);
+        out.extend_from_slice(value.as_bytes());
+    }
+
+    fn apply_comment_strategy_schema(dispatcher: &mut crate::events::EventDispatcher) {
+        use flate2::write::DeflateEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        let mut body = Vec::new();
+        body.push(crate::commands::strategy_schema::SCHEMA_FORMAT_VERSION);
+        body.push(1); // kind_count
+        body.push(1); // kind ordinal
+        write_str8(&mut body, "Kind1");
+        body.extend_from_slice(&1u16.to_le_bytes()); // field_count
+        write_str8(&mut body, "Comment");
+        body.push(crate::commands::strategy_serializer::TID_STRING);
+        body.push(0);
+        body.push(1); // visible for kind 1
+
+        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&body).unwrap();
+        let data = encoder.finish().unwrap();
+
+        let mut payload = Vec::new();
+        payload.push(8); // TStratSchema
+        payload.extend_from_slice(&crate::commands::registry::CURRENT_PROTO_CMD_VER.to_le_bytes());
+        payload.extend_from_slice(&1u64.to_le_bytes());
+        payload.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        payload.extend_from_slice(&data);
+
+        let mut out = Vec::new();
+        dispatcher.dispatch_into(Command::Strat, &payload, 0, &mut out);
+        assert!(out.iter().any(|ev| {
+            matches!(
+                ev,
+                crate::events::Event::Strat(crate::state::StratEvent::SchemaApplied {
+                    kind_count: 1,
+                    field_count: 1,
+                    ..
+                })
+            )
+        }));
     }
 
     #[test]
@@ -440,6 +487,59 @@ mod tests {
         assert_eq!(pending.auto_candles.len(), 1);
         let new_uid = pending.auto_candles[0].uid;
         assert!(client.pending_api.pending_candles.contains_key(&new_uid));
+    }
+
+    #[test]
+    fn post_connect_strategy_sync_advances_local_epoch_before_snapshot_send() {
+        let mut client = ready_client();
+        let mut dispatcher = crate::events::EventDispatcher::new();
+        let mut pending = RuntimePending::default();
+        apply_comment_strategy_schema(&mut dispatcher);
+        dispatcher.set_local_strategy_epoch(41);
+
+        let mut fields = StrategyFields::new();
+        fields.insert("Comment", FieldValue::String("edited".to_string()));
+        let strategy = StrategySnapshot {
+            strategy_id: 0x5157,
+            strategy_ver: 3,
+            last_date: 1234,
+            checked: true,
+            kind: 1,
+            path: "Local".into(),
+            fields,
+        };
+
+        assert!(handle_command(
+            &mut client,
+            &mut dispatcher,
+            RuntimeCommand::StrategySnapshotBatch(vec![strategy.clone()]),
+            &mut pending,
+        ));
+        assert_eq!(
+            dispatcher.local_strategy_epoch(),
+            42,
+            "Delphi increments cfg.ServerStratEpoch before sending an edited local snapshot"
+        );
+
+        let (sliced, high, low) = client.take_send_queues_for_test();
+        let item = sliced
+            .into_iter()
+            .chain(high)
+            .chain(low)
+            .find(|item| item.cmd == Command::Strat.to_byte())
+            .expect("strategy snapshot command must be queued");
+        let crate::commands::strat::StratCommand::Snapshot(snapshot) =
+            crate::commands::strat::StratCommand::parse(&item.data)
+                .expect("queued strategy snapshot must parse")
+        else {
+            panic!("expected TStratSnapshot");
+        };
+        assert_eq!(snapshot.server_epoch, 42);
+        assert_eq!(snapshot.client_max_last_date, strategy.last_date);
+        let batch = crate::commands::strategy_serializer::parse_strategy_batch(&snapshot.data)
+            .expect("strategy snapshot payload must parse");
+        assert_eq!(batch.strategies.len(), 1);
+        assert_eq!(batch.strategies[0].strategy_id, strategy.strategy_id);
     }
 
     #[test]

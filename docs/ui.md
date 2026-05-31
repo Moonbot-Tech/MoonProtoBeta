@@ -67,20 +67,31 @@ for event in client.drain_events() {
 Regular applications send UI commands through `MoonClient`:
 
 ```rust
-use moonproto::{ClientSettingsCommand, SpotMarketKind};
+use moonproto::SpotMarketKind;
 
 client.settings().refresh()?;
-client.settings().send(ClientSettingsCommand::default())?;
+if let Some(mut settings) = client
+    .snapshot()
+    .and_then(|state| state.settings().client_settings.clone())
+{
+    settings.x_sell = true;
+    client.settings().send(settings)?;
+}
 client.settings().set_mm_orders_subscription(true)?;
-client.settings().request_version_update("", true)?;            // release update button
-client.settings().request_version_update("MoonBot-7", false)?;  // test/beta version name
+client.settings().request_release_update()?;             // release update button
+client.settings().request_version_update("MoonBot-7")?;  // test/beta version name
 client.settings().switch_dex("Main")?;
 client.settings().switch_spot(SpotMarketKind::Crypto)?;
+client.settings().set_triggers_for_markets(["BTCUSDT", "ETHUSDT"], &[1, 7])?;
+client.settings().clear_triggers_for_all(&[3])?;
 ```
 
-Internal protocol tools build the same wire payloads through the crate-private
-UI command module; normal application code should use the high-level method
-names above.
+`settings().send(...)` sends a full settings snapshot. Normal UI code edits the
+latest snapshot received from the server; constructing a fresh
+`ClientSettingsCommand::default()` is useful for tests/tools, not for an already
+configured terminal session. Internal protocol tools build the same wire
+payloads through the crate-private UI command module; normal application code
+should use the high-level method names above.
 
 For strategy start/stop with an explicit checked-state delta, normal UI code
 uses `MoonClient`. The runtime owns strategy checked-state and sends only items
@@ -101,29 +112,82 @@ subscription content and MM-order display are two separate user intents.
 
 ### Version Update
 
-`request_version_update(version_name, is_release)` asks the server to start the
-MoonBot update flow. It sends the version name and whether the release channel
-should be used.
+`request_release_update()` asks the server to start the normal release update
+flow. `request_version_update(version_name)` asks for a named beta/test build.
 
 This is a remote-update command, not a passive "current client version"
 notification. The two normal UI uses are:
 
-- update button: sends `VersionName=""`, `IsRelease=true`;
-- beta/test install command: sends a version name such as `MoonBot-7` with
-  `IsRelease=false` after application-side validation/normalization.
+- update button: call `request_release_update()`;
+- beta/test install command: call `request_version_update("MoonBot-7")` after
+  application-side validation/normalization.
 
 When the server accepts this command, it also broadcasts the update request back
 to connected clients. The Rust library does not download or restart the
 application; it sends/parses the command and exposes an inbound request as
 `SettingsEvent::VersionUpdate`.
 
-`request_version_update`, `switch_dex`, and `switch_spot` are typed UI domain
-commands and are gated by Init. Low-level diagnostic tools that send the same
-payload by hand are responsible for preserving the matching `ServerUpdateSent`
-side effect.
+Version update, `switch_dex`, and `switch_spot` are typed UI domain commands
+and are gated by Init. Low-level diagnostic tools that send the same payload by
+hand are responsible for preserving the matching `ServerUpdateSent` side
+effect.
 
 Low-level builders remain internal diagnostics/compatibility machinery; normal
 applications should use the typed methods above.
+
+### Chart Trade Emulator
+
+The chart emulator is a normal UI feature, matching MoonBot's pencil
+`EmulateTrades` mode. Terminal code builds emulated trade points from drawn
+chart points and sends them through `client.emulator()`. The caller uses a
+market name or a retained `MarketHandle`; Active Lib resolves the current server
+market index internally.
+
+```rust
+use moonproto::{DelphiTime, EmuTradePoint};
+
+let Some(state) = client.snapshot() else { return Ok(()); };
+let Some(sol) = state.markets().get("SOLUSDT") else { return Ok(()); };
+
+let base_time = DelphiTime::now();
+let points = [
+    EmuTradePoint::buy(0, 142.10),
+    EmuTradePoint::sell(750, 142.05),
+    EmuTradePoint::buy(1_500, 142.22),
+];
+
+client
+    .emulator()
+    .send_trades_for_market(&sol, base_time, &points)?;
+```
+
+`EmuTradePoint` follows the Delphi wire meaning: `time_delta_ms` is a `u16`
+millisecond delta from `base_time`, and sell points are encoded as negative
+prices. Use `EmuTradePoint::buy` / `EmuTradePoint::sell` instead of writing that
+sign convention by hand. Empty point arrays are ignored, the same way Delphi UI
+does not send an emulator command if the drawn pencil produced no valid points.
+
+### Trigger Management
+
+Terminal code selects markets by name or by a retained `MarketHandle`; it should
+not pass server `mIndex` values. The high-level trigger helpers resolve current
+market indexes inside Active Lib when the command is queued:
+
+```rust
+client
+    .settings()
+    .set_triggers_for_markets(["BTCUSDT", "ETHUSDT"], &[1, 2, 3])?;
+
+client
+    .settings()
+    .clear_triggers_for_markets(["SOLUSDT"], &[7])?;
+
+client.settings().set_triggers_for_all(&[1])?;
+client.settings().clear_triggers_for_all(&[1, 2])?;
+```
+
+The hidden raw-index helper exists only for protocol diagnostics and parity
+tests.
 
 Inbound listing notifications are internal to the active library. They force an
 immediate listing refresh, but they are not emitted as settings events. User
