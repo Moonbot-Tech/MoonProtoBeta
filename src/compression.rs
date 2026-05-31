@@ -15,6 +15,12 @@
 
 type Offsets = [usize; 4096];
 
+// A compressed MoonProto command still travels as one direct or Sliced command.
+// Sliced block numbers are u8 and PMTU is u16, so even the theoretical maximum
+// envelope is under 16 MiB. Real bulk data (5m candles) is chunked well below
+// that; larger SynLZ destlen values are malformed input, not useful payload.
+pub(crate) const MAX_DECOMPRESSED_SIZE: usize = ((u16::MAX as usize) - 15 - 4) * 256 - 12 - 1;
+
 // Thread-local scratch buffer for SynLZ decompress (32 KB = `[usize; 4096]` × 8 bytes).
 //
 // Previously: `Box::new([0; 4096])` per call (~30 ns alloc + ~10 ns free).
@@ -83,7 +89,13 @@ pub(crate) fn synlz_decompress(src: &[u8]) -> Option<Vec<u8>> {
         first_word as usize
     };
 
-    let mut dst = vec![0u8; out_size];
+    if out_size > MAX_DECOMPRESSED_SIZE {
+        return None;
+    }
+
+    let mut dst = Vec::new();
+    dst.try_reserve_exact(out_size).ok()?;
+    dst.resize(out_size, 0);
 
     // Use the thread-local scratch buffer for offsets (32 KB). Reset is mandatory:
     // Delphi creates clean scratch for each decode, and a stale offset can
@@ -456,13 +468,19 @@ mod tests {
     }
 
     #[test]
-    fn synlz_decompress_has_no_rust_only_one_mb_cap() {
+    fn synlz_decompress_accepts_protocol_payload_above_one_mib() {
         let plain = vec![0x5a; 1024 * 1024 + 1];
         let compressed = synlz_compress(&plain);
 
         let decoded = synlz_decompress(&compressed)
-            .expect("Delphi MPDecompress allocates DestSize without a 1 MiB cap");
+            .expect("SynLZ cap must not be the old arbitrary 1 MiB limit");
 
         assert_eq!(decoded, plain);
+    }
+
+    #[test]
+    fn synlz_decompress_rejects_declared_size_above_protocol_cap() {
+        let bomb_header = [0xFF, 0xFF, 0xFF, 0xFF];
+        assert!(synlz_decompress(&bomb_header).is_none());
     }
 }

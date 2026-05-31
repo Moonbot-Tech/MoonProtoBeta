@@ -52,12 +52,6 @@ mod outer_crypt;
 
 use log::warn;
 
-// The transport layer is deliberately narrow: authenticate and shape datagrams,
-// then hand payload bytes to the session/domain layers. High-rate public market
-// data and recovery traffic do not need the same treatment as state-changing
-// commands; the AES-GCM command gate above this layer is where order/account
-// integrity is enforced.
-
 pub(crate) use extended::ClientTransportModeState;
 pub(crate) use header::{ClientMsgHeader, TRANSPORT_VER};
 // `ServerMsgHeader` is re-exported from the crate root (`moonproto::ServerMsgHeader`).
@@ -105,19 +99,10 @@ pub(crate) fn pack_client_packet(
 /// Unpack a received UDP datagram. Verifies MAC and version.
 /// Returns (header, payload) or None if invalid.
 ///
-/// `#[inline]` is required because this is the receive path for all incoming UDP
-/// packets and a hot path (~10K pps at peak). It is called from
-/// `moonproto::client::run` across the crate boundary; without inlining LLVM
-/// cannot optimize it together with the caller. The body is medium-sized, but the
-/// alternative (`lto = "fat"`) makes development builds much slower. Do not
-/// remove.
-///
-/// B-V2-02 fix: this used to allocate twice: `raw.to_vec()` plus
-/// `buf[SERVER_HDR_SIZE..].to_vec()`. It now performs one allocation for
-/// `mask_ver = 0`; the payload is produced with `drain(..hdr_size)`, which moves
-/// bytes inside the already allocated `Vec` without a second allocation. At
-/// 10K pps this saves 10K alloc/dealloc pairs per second and about 5-15 MB/s of
-/// allocator pressure.
+/// The returned payload reuses the same owned buffer after header removal, so
+/// the common V0 receive path does not allocate a second `Vec` for payload bytes.
+/// At high packet rates that keeps receive-side allocator work tied to real
+/// payload ownership instead of copying bytes only to hand them to the parser.
 // Convenience wrapper that builds a fresh `MacContext` per call. Production uses
 // `transport_unpack_with_mac` with a cached context; this one-shot form is kept
 // for the transport unit tests and as the documented simple entry point.
@@ -132,8 +117,10 @@ pub(crate) fn transport_unpack(
     transport_unpack_with_mac(&mac_ctx, mac_key, raw, mask_ver)
 }
 
-/// Hot-path unpack with a cached [`MacContext`]: reuse the SipHash keyed initial
-/// state instead of deriving it again for each packet.
+/// Hot-path unpack with a cached [`MacContext`]: derive the SipHash keyed initial
+/// state once per client and reuse it for every datagram. This removes repeated
+/// key-state setup from receive processing; each packet only pays for the MAC
+/// work that depends on its bytes.
 ///
 /// `mac_key` is still required for `outer_light_crypt` (xoroshiro128+ keystream).
 #[inline]
@@ -155,8 +142,8 @@ pub(crate) fn transport_unpack_with_mac(
     // Parse header
     let hdr = ServerMsgHeader::from_bytes(&buf[..header::SERVER_HDR_SIZE])?;
 
-    // Verify MAC through the cached context. Restore checksum bytes after the
-    // calculation (B-01 mini-fix: one allocation instead of two).
+    // Verify MAC through the cached context. Patch and restore checksum bytes in
+    // place, so MAC verification does not allocate scratch memory per datagram.
     let orig_checksum = hdr.checksum;
     let saved_csum_bytes = [buf[1], buf[2], buf[3], buf[4]];
     buf[1..5].copy_from_slice(&0u32.to_le_bytes());
@@ -174,7 +161,8 @@ pub(crate) fn transport_unpack_with_mac(
         return None;
     }
 
-    // B-V2-02: draining the header moves the remaining bytes to the front without a second allocation.
+    // Move payload bytes to the front inside the existing buffer. This avoids a
+    // second Vec while keeping the parser-facing payload contiguous.
     buf.drain(..header::SERVER_HDR_SIZE);
     Some((hdr, buf))
 }

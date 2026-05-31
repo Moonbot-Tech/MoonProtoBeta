@@ -5,10 +5,10 @@ impl Client {
     /// and `mp_compress` yielded savings ≥ 5% (`mp_compress` itself returns None otherwise).
     /// Matches Delphi `TMoonProtoDataToSend.Create` (MoonProtoIntStruct.pas:661-672).
     ///
-    /// Audit #3 (audit_delphi_deviation): returns `Cow<'_, [u8]>` instead of `Vec<u8>`.
-    /// Previously we did an unconditional `data.to_vec()` even when compression did not apply —
-    /// 1 alloc per H/L/Sliced packet sent. In Delphi `TMemoryStream` is passed by reference,
-    /// zero copies. Now `Cow::Borrowed` when uncompressed → zero alloc.
+    /// Returns `Cow`: uncompressed packets borrow the caller payload and allocate
+    /// nothing; only the compressed path owns a new buffer. Outbound send queues
+    /// therefore avoid `to_vec()` when the original bytes can be put on the wire
+    /// as-is, matching Delphi's pass-by-reference stream path.
     pub(crate) fn maybe_compress<'a>(cmd: u8, data: &'a [u8]) -> (u8, std::borrow::Cow<'a, [u8]>) {
         if cmd & COMPRESSED_FLAG == 0 && data.len() > MIN_SIZE_TO_COMPRESS {
             if let Some(compressed) = compression::mp_compress(data) {

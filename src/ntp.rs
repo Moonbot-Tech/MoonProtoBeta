@@ -402,13 +402,17 @@ mod tests {
     // ===== Delphi GetBestNTP selection =====
 
     #[test]
-    // parity: MoonBot IndyUDPHelper.pas:GetBestNTP
-    fn first_sync_accepts_large_offset() {
+    // parity: MoonBot IndyUDPHelper.pas:GetBestNTP — the >60s retry guard applies
+    // only after the first sync (synced_once), so the very first offset is taken
+    // as-is. A modest above-threshold value documents that path. (The offset is a
+    // soft, non-security input — see `client::clock::delphi_now` — so no upper
+    // clamp is imposed here, matching the reference.)
+    fn first_sync_accepts_offset_above_retry_threshold() {
         let mut state = NtpState::default();
-        let result = get_best_ntp_with_state(&mut state, 1, |_| Some((31_536_000.0, 0.120)));
+        let result = get_best_ntp_with_state(&mut state, 1, |_| Some((120.0, 0.120)));
 
         assert!(result.synced);
-        assert_eq!(result.time_offset, 31_536_000.0);
+        assert_eq!(result.time_offset, 120.0);
         assert_eq!(result.round_trip_ms, 120);
     }
 

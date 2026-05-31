@@ -269,11 +269,9 @@ pub struct Client {
     app_token: u64,
     encode_key: MoonKey,
     decode_key: MoonKey,
-    /// B-V2-03 fix: cached AES-128-GCM cipher for encode (encrypt direction).
-    /// Refreshed together with `encode_key` at handshake. `Aes128Gcm::new` is
-    /// expensive (key schedule expansion, ~100 bytes of work) — it used to run
-    /// for every encrypted packet (thousands of times/sec). Now it runs once per
-    /// session.
+    /// Cached AES-128-GCM cipher for encode direction. Handshake refreshes it
+    /// with `encode_key`, so encrypted packets do not rebuild the AES key
+    /// schedule on the send hot path.
     encode_cipher: Option<crate::crypto::Aes128Gcm>,
 
     _start: Instant,

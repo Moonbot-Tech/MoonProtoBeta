@@ -3,15 +3,21 @@ use super::MoonKey;
 /// SipHash-1-3 keyed PRF (`c = 1` compression round, `d = 3` finalization
 /// rounds), 128-bit key = MacKey, output truncated to the low 32 bits.
 ///
-/// This is the MoonProto transport MAC: Delphi `SipHash13` / `CalculateMac32`
-/// (`MoonProtoFunc.pas:290-341`). It replaced the previous HMAC-CRC32c. A keyed
-/// MAC (not a plain checksum) is what stops an attacker from forging the
-/// transport — without the MacKey a relabelled/injected datagram cannot carry a
-/// valid 32-bit tag. `u64` words are read little-endian, matching x86 native.
+/// MoonProto transport MAC: SipHash-1-3 keyed with `MacKey`, output truncated to
+/// the low 32 bits. This is a keyed tag, not a checksum: without `MacKey`, an
+/// injected or relabelled datagram cannot produce a valid transport tag.
 ///
-/// `#[inline]` is mandatory: the MAC is verified on every received packet and
-/// built on every sent packet, across a cross-crate call boundary. Audit B-V2-04.
-///
+/// The 32-bit width is deliberate and is not the authority boundary: forging a
+/// tag without `MacKey` is a 2^32 brute force — a keyed PRF, so observed
+/// (message, tag) pairs do not help forge a new one (unlike a linear checksum) —
+/// not a one-shot. Forgery is bounded by the 32-bit output, not the round count,
+/// so the truncated SipHash-1-3 is sufficient. Commands that move
+/// money/orders/strategies are authenticated separately by AES-128-GCM (128-bit
+/// tag + replay window). Defeating this tag would only alter the public market
+/// feed that the client *displays* (it executes nothing off it); that effect is
+/// transient, and sustaining it requires also dropping the live feed — i.e.
+/// denying availability, the dominant harm (loss of position control ->
+/// liquidation).
 /// One SipHash round (`SIPROUND`), operating in place on the four state words.
 macro_rules! sipround {
     ($v0:ident, $v1:ident, $v2:ident, $v3:ident) => {{

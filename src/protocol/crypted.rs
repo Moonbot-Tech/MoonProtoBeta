@@ -64,9 +64,9 @@ impl CryptoHeader {
 /// Returns (cmd, payload, want_ack) or None if decryption/replay fails.
 /// Matches TMoonProtoClient.DeCrypt exactly.
 ///
-/// `decode_cipher` — cached `Aes128Gcm` (B-V2-03), built from
-/// `MPKeys[not ServerSide]`. For the client (ServerSide=false) this is `MPKeys[true]`.
-/// Stored in `Client::decode_cipher` and updated on handshake.
+/// `decode_cipher` is the cached `Aes128Gcm`, built from `MPKeys[not ServerSide]`.
+/// For the client (ServerSide=false) this is `MPKeys[true]`. It is stored in
+/// `Client::decode_cipher` and updated on handshake.
 pub(crate) fn decrypt_command(
     decode_cipher: &Aes128Gcm,
     encrypted_data: &[u8],

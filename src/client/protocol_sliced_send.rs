@@ -72,7 +72,6 @@ impl ProtocolCore<'_> {
             plaintext.extend_from_slice(&crypto_hdr);
             plaintext.extend_from_slice(send_data.as_ref());
 
-            // B-V2-03: use the cached cipher from Client.
             let Some(cipher) = self.client.encode_cipher.as_ref() else {
                 error!(target: "moonproto::crypto", "encrypt H-prio called before handshake — packet dropped");
                 return;
@@ -211,19 +210,16 @@ impl ProtocolCore<'_> {
         let path_delay =
             (retry_round_trip_delay as f64 * client.trip_delay_k + 10.0).round() as i64;
         let cycle_time_ms = 5.0f64.max(client.actual_sleep_time).min(15.0);
-        // B-19: * 0.001 instead of / 1000.0 (FDIV → FMUL on hot retry path).
-        // Delphi uses `round(Client.CanSendRate * CycleTimeMS / 1000.0)`,
-        // so keep rounding instead of truncating on the hot retry boundary.
+        // Retry pacing runs every send tick. Use `* 0.001` instead of `/ 1000.0`
+        // so the hot budget calculation avoids floating-point division while
+        // preserving the same rounded byte limit.
         let client_limit = (client.can_send_rate as f64 * cycle_time_ms * 0.001).round() as usize;
         let mut bytes_sent_at_once: usize = 0;
         client.last_checked_slices = cur_tm;
 
-        // Audit #2 (audit_delphi_deviation): indices instead of clone. Previously each
-        // retransmitted block was copied into `to_send: Vec<Vec<u8>>` — 200 alloc/sec
-        // under congestion (10 active Sliced × 20 blocks × 2 retries/sec × ~500B).
-        // Now we store `(sending_idx, block_num)` (16 bytes) and send by reference.
-        // Matches Delphi `SendCommand(Client, MPC_Sliced, Piece.data)` where Piece.data is a
-        // `TMemoryStream` by reference (zero copies).
+        // Queue indices, not cloned blocks. Retransmits send by reference from
+        // the retained Sliced object, matching Delphi's Piece.data stream path
+        // and avoiding a Vec allocation/copy per retransmitted block.
         let mut to_send_indices: Vec<(usize, usize)> = Vec::new();
         let mut to_remove = Vec::new();
 

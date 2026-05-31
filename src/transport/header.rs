@@ -58,11 +58,6 @@ pub(crate) struct ClientMsgHeader {
     pub(crate) client_id: u64,
 }
 
-// The small header parsers/serializers are called per-packet across a cross-crate
-// boundary. `#[inline]` is mandatory — without it LLVM won't inline cross-crate (it would
-// need lto=fat, which breaks fast dev builds). The body is ≤ 7-15 bytes of copies, code-bloat
-// when inlined into callers is minimal. Audit B-V2-04. Do NOT remove.
-
 impl ServerMsgHeader {
     /// Parse a server-to-client header from the beginning of `data`.
     ///
@@ -149,12 +144,7 @@ impl ClientMsgHeader {
     }
 }
 
-/// Obfuscation seed byte (`Rnd`) for the wire header.
-///
-/// Byte-exact with Delphi `MoonProtoCommon.pas:383,447 Rnd := Random(255)`:
-/// Delphi `Random(255)` returns `0..254`, so the wire never carries `Rnd = 255`
-/// from a Delphi client. The range is matched here so a passive observer profiling
-/// the plaintext seed byte cannot distinguish this client from Delphi.
+/// Obfuscation seed byte (`Rnd`) for the wire header — a uniform random byte.
 ///
 /// Source: `rand::thread_rng()` is rand 0.8 `ReseedingRng<ChaCha12Core, OsRng>`
 /// (a ChaCha12 CSPRNG reseeded from the OS), not a weak PRNG. It replaces the old
@@ -163,7 +153,7 @@ impl ClientMsgHeader {
 #[inline]
 fn rand_byte() -> u8 {
     use rand::Rng;
-    rand::thread_rng().gen_range(0u8..255)
+    rand::thread_rng().gen()
 }
 
 #[cfg(test)]

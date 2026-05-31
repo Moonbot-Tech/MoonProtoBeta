@@ -4,7 +4,6 @@ impl Client {
     // ====================================================================
     //  High-level Strat wrappers (Command::Strat, encrypted=true)
     //  Cover the Delphi MClient.SendStratCmd(T*Command.Create(...)) semantics.
-    //  Audit docs_api B-02: there were 5 build_* functions without Client wrappers.
     // ====================================================================
 
     /// Send `TStratSchemaRequest` (Strat CmdId=7, High).

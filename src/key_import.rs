@@ -90,7 +90,7 @@ pub struct ImportedKeyInfo {
 /// This type is `Copy` because all fields are small value types. Applications
 /// can pass the imported keys into one or more `ClientConfig` builders without
 /// needing explicit clones.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct ImportedKeys {
     /// AES-GCM master key used by the MoonProto session handshake.
     pub master_key: MoonKey,
@@ -98,6 +98,17 @@ pub struct ImportedKeys {
     pub mac_key: MoonKey,
     filled: bool,
     container_version: u8,
+}
+
+impl std::fmt::Debug for ImportedKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImportedKeys")
+            .field("master_key", &"<REDACTED>")
+            .field("mac_key", &"<REDACTED>")
+            .field("filled", &self.filled)
+            .field("container_version", &self.container_version)
+            .finish()
+    }
 }
 
 impl ImportedKeys {

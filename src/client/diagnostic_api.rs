@@ -182,13 +182,11 @@ impl Client {
     //  BytesPerSec — O(1) EMA counter (port of Delphi AddBytesCount)
     // ====================================================================
     //
-    // Audit #5 (audit_delphi_deviation): previously a `VecDeque<(i64,u64)>` sliding
-    // window was used. At a peak of 50K pps incoming, the VecDeque grew to ~500K entries × 16B = 8MB
-    // for recv alone (+ another 8MB for sent). Plus 100K push_back/pop_front ops/sec.
-    //
-    // Delphi solves this in 24 bytes (3×u64) + 1 if + 1 add per packet — a byte-exact port of
-    // `MoonProtoUDPClient.pas:113-138 AddBytesCount`. EMA formula: `ema = ema*9/10 + bucket`,
-    // which in steady state yields `ema = 10*bytes_per_sec` (hence the division by 10 in the getter).
+    // No sliding window on the packet hot path: three u64 counters plus one
+    // branch/add match Delphi `AddBytesCount`. At high packet rates this avoids
+    // a growing VecDeque and the push/pop churn that would otherwise compete
+    // with protocol work. EMA formula: `ema = ema*9/10 + bucket`, which in
+    // steady state yields `ema = 10*bytes_per_sec` (hence /10 in the getter).
 
     pub(crate) fn track_sent(&mut self, bytes: u64, ts_ms: i64) {
         self.metrics.bps_sent.add(bytes, ts_ms);

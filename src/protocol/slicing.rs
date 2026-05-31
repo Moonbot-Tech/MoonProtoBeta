@@ -191,12 +191,10 @@ impl SlicedData {
         if !self.is_complete() {
             return None;
         }
-        // B-V2-09/B-V2-14: receive pieces live in one dense buffer plus
-        // BlockNum->span metadata. Iterating only to the highest actually
-        // received BlockNum preserves the same sorted-by-BlockNum effect as
-        // Delphi's sorted slice list, including malformed BlockNum >
-        // MaxBlockNum cases, without scanning the unused tail on every
-        // assembly.
+        // Receive pieces live in one dense buffer plus BlockNum->span metadata.
+        // Iterating only to the highest received BlockNum preserves the same
+        // sorted-by-BlockNum effect as Delphi's sorted slice list, including
+        // malformed BlockNum > MaxBlockNum cases, without scanning unused slots.
         let total = self.block_payloads.len();
         let mut cmd = 0u8;
         let mut saw_block_zero = false;

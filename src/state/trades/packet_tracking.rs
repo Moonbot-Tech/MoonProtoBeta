@@ -142,6 +142,25 @@ impl TradesState {
     pub(crate) fn on_packet_header(&mut self, packet_num: u16, now_ms: i64) -> TradesPacketEffects {
         let mut events = TradesPacketEffects::new();
 
+        // Packet-number tracking is best-effort loss recovery, not anti-replay.
+        // Delivery is unordered and unreliable: a delayed/missing packet is
+        // re-sent by the server (TradesResendResponse -> on_packet_resend) and
+        // applied on arrival; a duplicate is applied too — for a feed, "see it
+        // late" beats dropping it or waiting for strict order.
+        // Anti-replay is not warranted here:
+        //  - thin client: nothing is executed off the feed, so a replay only
+        //    affects display — a stale tail is overwritten by the next live
+        //    packet, at most leaving cosmetic duplicate rows in the local trade
+        //    history; no executable price or account state changes;
+        //  - a sustained effect would also require dropping the live feed (an
+        //    availability denial — the dominant harm), which a window cannot stop;
+        //  - packet_num is a u16 that wraps within seconds on a live stream, and
+        //    the feed carries no wider authenticated counter; across the wrap a
+        //    replayed number is indistinguishable from a legitimately recurring
+        //    one, so a window would either drop real packets or miss the replay.
+        // Replay of account-state commands is handled separately by the crypted
+        // slider (its msg_num is a non-wrapping u64 inside AEAD).
+
         // === First packet OR long pause → reset ===
         let pause_detected = self.trades_started
             && self.last_packet_time_ms != 0

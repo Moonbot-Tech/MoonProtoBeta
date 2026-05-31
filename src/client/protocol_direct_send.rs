@@ -71,7 +71,6 @@ impl ProtocolCore<'_> {
             plaintext.extend_from_slice(&crypto_hdr);
             plaintext.extend_from_slice(&eff_data);
 
-            // B-V2-03: cached cipher.
             let Some(cipher) = self.client.encode_cipher.as_ref() else {
                 error!(target: "moonproto::crypto", "encrypt batch called before handshake — packet dropped");
                 return;
@@ -146,8 +145,8 @@ impl ProtocolCore<'_> {
         let (eff_cmd, eff_data) = Client::maybe_compress(item.cmd, &item.data);
 
         // Encrypt if needed
-        // Audit #3: wire_data becomes a Cow — for the unencrypted path we keep it
-        // borrowed (zero alloc); for encrypted it is Owned (encrypt always returns a Vec).
+        // Unencrypted payloads stay borrowed; encrypted payloads own the AES-GCM
+        // output buffer. This keeps the direct-send public path zero-alloc.
         let (wire_cmd, wire_data): (u8, std::borrow::Cow<'_, [u8]>) = if item.encrypted {
             let msg_num = self
                 .client
@@ -163,7 +162,6 @@ impl ProtocolCore<'_> {
             let mut plaintext = Vec::with_capacity(12 + eff_data.len());
             plaintext.extend_from_slice(&crypto_hdr);
             plaintext.extend_from_slice(&eff_data);
-            // B-V2-03: cached cipher.
             let cipher = match self.client.encode_cipher.as_ref() {
                 Some(c) => c,
                 None => {

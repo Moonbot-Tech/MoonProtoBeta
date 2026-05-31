@@ -61,9 +61,21 @@ pub(crate) fn delphi_now_raw() -> f64 {
     25569.0 + secs / 86400.0
 }
 
-/// Delphi TDateTime corrected by NTP offset.
+/// Delphi TDateTime corrected by the NTP offset.
 /// Matches: `Now - GlobalMPTimeZoneOffset + GlobalMPTimeOffset`.
 /// We use UTC directly (no timezone offset needed — TDateTime in MoonProto = UTC).
+///
+/// The NTP offset (optional, on by default) reaches the protocol only here. It is
+/// soft — it never sets the OS clock — and the client gates nothing on it: it
+/// feeds only outgoing handshake/Ping timestamps and the `net_lag_ping`
+/// diagnostic. `server_time_delta` (order times) uses [`delphi_now_raw`] with no
+/// offset, anti-replay is the `msg_num` slider, rate/PMTU use Ping payload fields,
+/// and the client validates no incoming timestamp. A spoofed NTP offset therefore
+/// cannot affect confidentiality, integrity or authentication; its only reachable
+/// effect is availability — a server that checks handshake-timestamp freshness
+/// could reject a skewed Hello (reconnect) — plus a wrong lag readout. The offset
+/// is intentionally not clamped here (parity with the Delphi reference); disable
+/// the source entirely with `ClientConfig::without_ntp`.
 pub(crate) fn delphi_now() -> f64 {
     delphi_now_raw() + get_ntp_offset_days()
 }

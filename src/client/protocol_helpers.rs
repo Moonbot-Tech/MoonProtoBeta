@@ -218,22 +218,29 @@ impl Client {
         }
     }
 
-    // Order/account/strategy/UI mutations are the session-integrity boundary.
-    // They must arrive through AES-GCM; public market/control traffic can stay
-    // on the transport MAC/obfuscation layer. API is checked separately because
-    // a few large public server responses are intentionally plaintext.
+    // Sensitive families (Order/Strat/UI/Balance/LogMsg) have no plaintext path:
+    // without session AES-GCM they are dropped HERE, before decompression.
+    // Private API responses are dropped too, but AFTER optional decompression
+    // (their method id lives inside the EngineResponse body). Only the public
+    // market feed (identical to the exchange's own) stays plaintext.
+    // AEAD over that feed would buy little: this is a thin client that executes
+    // nothing off the feed, so forging/replaying it only affects what is
+    // displayed; a replayed tick is cosmetic (the next live packet overwrites the
+    // tail) and keyless forgery is already a 2^32 brute force. The cost would be a
+    // per-packet nonce+tag on the highest-volume path, for data that is public
+    // anyway. Integrity is enforced where it changes account state (the AES-GCM
+    // gate).
     fn drop_plaintext_sensitive(real_cmd: u8) -> bool {
         matches!(
             Command::from_byte(real_cmd),
-            Command::Order | Command::Strat | Command::UI | Command::Balance
+            Command::Order | Command::Strat | Command::UI | Command::Balance | Command::LogMsg
         )
     }
 
-    // Plaintext API is limited to public bulk responses the Delphi server also
-    // sends outside AES-GCM: market lists, market updates, and compressed candle
-    // data. Account/order/settings API methods remain session-encrypted; a
-    // plaintext response for those methods is not a useful data packet and is
-    // dropped before it can match a pending request.
+    // Public bulk API responses (markets list/refresh, candles) may be plaintext;
+    // every other API response carries session/account state and is rejected
+    // unless it crossed AES-GCM. See `drop_plaintext_sensitive` above for the
+    // plaintext-vs-crypted rationale.
     fn drop_plaintext_api(payload: &[u8]) -> bool {
         match Self::engine_response_meta_from_payload(payload) {
             Some(meta) => !matches!(
@@ -263,9 +270,9 @@ impl Client {
         let mut payload: Cow<'_, [u8]> = Cow::Borrowed(data);
 
         if Command::from_byte(cmd & 0x7F) == Command::Crypted {
-            // B-V2-03: use the cached cipher instead of the key. Before handshake
-            // (cipher = None) there should be no Crypted packets at all — but we
-            // guard with an early return.
+            // Before handshake (cipher = None) there should be no Crypted
+            // packets at all; guard with an early return rather than moving
+            // replay/slider state on unauthenticated bytes.
             let DataReadState {
                 decode_cipher,
                 slider,
@@ -282,8 +289,9 @@ impl Client {
             }
         }
 
-        // Drop state-changing plaintext before decompression; high-rate public
-        // data keeps its cheaper transport path.
+        // Reject plaintext sensitive command families here. API is checked
+        // after optional decompression because its method id lives inside the
+        // EngineResponse body.
         if !was_crypted && Self::drop_plaintext_sensitive(cmd & 0x7F) {
             return None;
         }
@@ -338,8 +346,9 @@ impl Client {
             }
         }
 
-        // Drop state-changing plaintext before decompression; high-rate public
-        // data keeps its cheaper transport path.
+        // Reject plaintext sensitive command families here. API is checked
+        // after optional decompression because its method id lives inside the
+        // EngineResponse body.
         if !was_crypted && Self::drop_plaintext_sensitive(cmd & 0x7F) {
             return None;
         }

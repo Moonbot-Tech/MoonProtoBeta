@@ -44,6 +44,15 @@ impl ProtocolCore<'_> {
                 deadline_reached = true;
                 break;
             }
+            // The datagram source address from recv_from is intentionally not
+            // validated. Authenticity comes from the keyed MAC (+ AEAD for
+            // sensitive commands); a source IP is attacker-spoofable, so filtering
+            // it adds no security. A connected socket would instead surface ICMP
+            // ECONNREFUSED churn and silently drop replies whose source !=
+            // destination (multi-socket servers, NAT, asymmetric routing,
+            // VPN/tunnel egress), breaking legitimate users behind non-trivial
+            // networks. Off-path junk is rejected by the MAC; an address filter
+            // would not stop a spoofing flooder anyway.
             let recv_result = {
                 let Some(sock) = self.client.transport.socket.as_ref() else {
                     break;

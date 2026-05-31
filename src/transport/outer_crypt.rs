@@ -16,23 +16,12 @@ fn next_keystream(s0: &mut u64, s1: &mut u64) -> u64 {
     ks
 }
 
-/// OuterLightCrypt — xoroshiro128+-based packet whitening for the outer
-/// transport shape.
+/// Byte-exact MoonProto outer whitening.
 ///
-/// `buf[0]` is the seed (left unchanged, not encrypted); the remaining bytes are
-/// XOR'd with the keystream. The keystream is produced one `u64` (QWORD) per
-/// state update over the full 8-byte chunks, and byte-wise over the `<8` tail —
-/// byte-exact with Delphi `OuterLightCrypt`. The operation is its own inverse
-/// (XOR with the same seed/key), so encrypt and decrypt are the same call.
-///
-/// This layer is intentionally cheap and per-packet: it keeps transport bytes
-/// shaped without pretending to be the account/order integrity boundary. The
-/// authenticated command gate above it decides which payloads require AES-GCM.
-///
-/// `#[inline]` is mandatory: the function is called per-packet (tens of thousands
-/// of times/sec at peak) across a cross-crate boundary from `moonproto`. Do not
-/// remove it without replacing the current fast dev workflow with measured
-/// full-LTO builds.
+/// `buf[0]` is the plaintext seed. Bytes after it are XORed with the
+/// xoroshiro128+ keystream: one little-endian `u64` per full 8-byte chunk, then
+/// byte-wise for the tail. XOR makes the function symmetric, so encrypt and
+/// decrypt are the same call.
 #[inline]
 pub(crate) fn outer_light_crypt(buf: &mut [u8], key: &MoonKey) {
     if buf.len() <= 1 {

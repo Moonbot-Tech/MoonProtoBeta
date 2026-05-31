@@ -1,13 +1,12 @@
 //! Dense retained ring for hot active-library histories.
 //!
-//! The ring is single-writer / multi-reader. The writer side is intended for
-//! `StoreWorker`, not for the UDP protocol reader. Rows are stored as a dense
-//! `Vec<T>` behind a short `parking_lot::RwLock`: appends take the write lock,
-//! readers either copy a simple range or scan a zero-copy read view inside a
-//! closure. This keeps the hot history memory layout close to Delphi's dense
-//! arrays without unsafe aliasing around overwrite-ring slots. The API offers
-//! both copy and borrowed-view reads so UI code can choose simple bulk copies for
-//! rendering or zero-copy scans for derived calculations without per-row atomics.
+//! The UDP protocol path does not take this history lock; it queues typed
+//! batches to `StoreWorker`, the single writer. Rows live in a dense `Vec<T>`
+//! behind a short `parking_lot::RwLock`, so large reads scan contiguous memory
+//! like Delphi dense arrays while staying sound around overwrite slots.
+//! That cache-friendly layout is what charts and rolling analytics need:
+//! rendering bulk-copies ranges, derived calculations scan borrowed slices, and
+//! neither path pays per-row atomics.
 
 use std::sync::Arc;
 

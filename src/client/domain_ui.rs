@@ -6,7 +6,6 @@ impl Client {
     //  Cover the Delphi MClient.SendUICmd(T*Command.Create(...)) semantics.
     //  UID is auto-generated via rand::random() — the consumer does not pass it.
     //  Priority/MaxRetries/UKey — from the attributes of the matching Delphi classes.
-    //  Audit docs_api B-01: there were 14 build_* functions without Client wrappers.
     // ====================================================================
 
     #[doc(hidden)]

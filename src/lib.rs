@@ -5,6 +5,10 @@
 //! payload encryption, SipHash transport MAC, handshake, retry, slicing,
 //! ACK handling, PMTU discovery, and payload commands.
 //!
+//! MoonProto is for building **thin clients** over a MoonBot execution core:
+//! the core owns all trading mechanics (orders, stops, strategies, risk); this
+//! library renders the core's state and relays the user's intent to it.
+//!
 //! `moonproto` is an **active session manager**. Transport reconnect,
 //! init-driven subscriptions and index/schema fetches, orderbook full requests,
 //! trades gap recovery, pending Engine API routing, NTP sync, and candle chunk

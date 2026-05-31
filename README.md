@@ -8,6 +8,10 @@
 
 Rust client library for the MoonProto UDP protocol used by MoonBot servers.
 
+MoonProto is for building **thin clients** over a MoonBot execution core: the
+core owns all trading mechanics (orders, stops, strategies, risk); this library
+renders the core's state and relays the user's intent to it.
+
 The crate contains the transport layer, handshake, reconnect, reliable sliced
 datagrams, typed command parsers/builders, read-model state, and the active
 session API.

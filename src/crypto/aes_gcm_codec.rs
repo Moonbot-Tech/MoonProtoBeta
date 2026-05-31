@@ -47,17 +47,20 @@ fn cpu_timestamp() -> u64 {
 }
 
 /// Construct a reusable `Aes128Gcm` cipher from a 16-byte key.
-/// B-V2-03 fix: the key is fixed for the whole session (changes only on handshake),
-/// the key schedule is expanded once, after which the cipher is used for every packet.
-/// `Aes128Gcm` is Send+Sync, so it can be held in `Client`.
+///
+/// The key is fixed for the whole session and changes only on handshake, so the
+/// key schedule is expanded once and reused for every encrypted packet instead
+/// of being rebuilt in the send loop. `Aes128Gcm` is `Send + Sync`, so it can be
+/// held in `Client`.
 #[inline]
 pub(crate) fn cipher_from_key(key: &MoonKey) -> Aes128Gcm {
     Aes128Gcm::new(key.into())
 }
 
 /// AES-128-GCM encrypt with PKCS7 padding — hot path version with a reusable cipher.
-/// B-V2-03: on the hot path callers hold the cipher in Client and pass it here — saving
-/// `Aes128Gcm::new` (key schedule expansion) on every encrypt (50K pps at peak).
+///
+/// Callers pass the session cipher in, so packet encrypt does not rebuild the
+/// AES key schedule on the hot path.
 pub(crate) fn encrypt_with_cipher(cipher: &Aes128Gcm, plaintext: &[u8], aad: &[u8]) -> Vec<u8> {
     // Build IV: (counter XOR mask)(8) + RDTSC[low 32 bits](4)
     let counter = IV_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -93,7 +96,7 @@ pub(crate) fn encrypt_with_cipher(cipher: &Aes128Gcm, plaintext: &[u8], aad: &[u
 }
 
 /// AES-128-GCM decrypt with a reusable cipher — hot path version.
-/// See `encrypt_with_cipher` for the B-V2-03 context.
+/// See `encrypt_with_cipher` for the cached-cipher context.
 pub(crate) fn decrypt_with_cipher(cipher: &Aes128Gcm, data: &[u8], aad: &[u8]) -> Option<Vec<u8>> {
     if data.len() < IV_SIZE + 16 {
         return None;
