@@ -171,28 +171,30 @@ market name or a retained `MarketHandle`; Active Lib resolves the current server
 market index internally.
 
 ```rust
-use moonproto::{DelphiTime, EmuTradePoint};
+use moonproto::{DelphiTime, EmuPencilPoint};
 
 let Some(state) = client.snapshot() else { return Ok(()); };
 let Some(sol) = state.markets().get("SOLUSDT") else { return Ok(()); };
 
 let base_time = DelphiTime::now();
+let at = |seconds: f64| DelphiTime::from_days(base_time.as_days() + seconds / 86_400.0);
 let points = [
-    EmuTradePoint::buy(0, 142.10),
-    EmuTradePoint::sell(750, 142.05),
-    EmuTradePoint::buy(1_500, 142.22),
+    EmuPencilPoint::new(base_time, 142.10),
+    EmuPencilPoint::new(at(0.75), 142.05),
+    EmuPencilPoint::new(at(1.50), 142.22),
 ];
 
 client
     .emulator()
-    .send_trades_for_market(&sol, base_time, &points)?;
+    .send_pencil_prices_for_market(&sol, base_time, points)?;
 ```
 
-`EmuTradePoint` follows the Delphi wire meaning: `time_delta_ms` is a `u16`
-millisecond delta from `base_time`, and sell points are encoded as negative
-prices. Use `EmuTradePoint::buy` / `EmuTradePoint::sell` instead of writing that
-sign convention by hand. Empty point arrays are ignored, the same way Delphi UI
-does not send an emulator command if the drawn pencil produced no valid points.
+`send_pencil_prices_for_market` follows the Delphi UI algorithm: it starts from
+the market's current `LastAsk`, converts falling pencil points to sell ticks,
+skips points outside the `0..=65535` millisecond command window, and ignores an
+empty result. `EmuTradePoint::buy` / `EmuTradePoint::sell` remain available for
+explicit low-level tick injection, but chart tools should usually pass
+`EmuPencilPoint` values and let Active Lib encode the trade side.
 
 ### Trigger Management
 

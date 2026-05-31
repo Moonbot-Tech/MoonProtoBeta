@@ -177,7 +177,7 @@ pub use commands::{
 // `MoonCandles::request_coin_card`).
 pub use commands::candles::{DeepHistoryKind, DeepPrice};
 pub use commands::trade::{MoveAllBuysParams, MoveAllSellsParams};
-pub use commands::ui::EmuTradePoint;
+pub use commands::ui::{EmuPencilPoint, EmuTradePoint};
 #[doc(hidden)]
 pub use events::EventDispatcherSnapshot;
 pub use events::{

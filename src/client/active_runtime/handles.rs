@@ -660,6 +660,53 @@ pub struct MoonEmulator<'a> {
 }
 
 impl MoonEmulator<'_> {
+    /// Send chart-pencil points for a retained market handle.
+    ///
+    /// This is the Delphi `TChartFrame.TryEmulatePrices` shape: the UI passes
+    /// absolute chart points, Active Lib starts from the market's current
+    /// `LastAsk`, converts falling points to sell ticks, skips points outside
+    /// Delphi's `Word` millisecond window, and queues one `TEmuTradesCommand`.
+    pub fn send_pencil_prices_for_market<I>(
+        &self,
+        market: &crate::state::MarketHandle,
+        base_time: crate::DelphiTime,
+        points: I,
+    ) -> Result<(), MoonClientError>
+    where
+        I: IntoIterator<Item = crate::EmuPencilPoint>,
+    {
+        let initial_price = market.price().last_ask as f32;
+        let emu_points = emu_trade_points_from_pencil(base_time, initial_price, points)?;
+        self.send_trades_for_market(market, base_time, &emu_points)
+    }
+
+    /// Send chart-pencil points by terminal market name.
+    ///
+    /// Prefer [`Self::send_pencil_prices_for_market`] when UI code already
+    /// keeps a stable `MarketHandle` for the selected chart.
+    pub fn send_pencil_prices<I>(
+        &self,
+        market_name: impl AsRef<str>,
+        base_time: crate::DelphiTime,
+        points: I,
+    ) -> Result<(), MoonClientError>
+    where
+        I: IntoIterator<Item = crate::EmuPencilPoint>,
+    {
+        let market_name = market_name.as_ref();
+        let snapshot = self
+            .client
+            .snapshot()
+            .ok_or(MoonClientError::StateUnavailable(
+                "market map is not published yet",
+            ))?;
+        let market = snapshot
+            .markets()
+            .get(market_name)
+            .ok_or_else(|| MoonClientError::UnknownMarket(market_name.to_string()))?;
+        self.send_pencil_prices_for_market(&market, base_time, points)
+    }
+
     /// Send emulated trades for a retained market handle.
     pub fn send_trades_for_market(
         &self,
@@ -691,6 +738,41 @@ impl MoonEmulator<'_> {
         self.client
             .send_emulated_trades(market_index, base_time.as_days(), points.to_vec())
     }
+}
+
+fn emu_trade_points_from_pencil<I>(
+    base_time: crate::DelphiTime,
+    initial_price: f32,
+    points: I,
+) -> Result<Vec<crate::EmuTradePoint>, MoonClientError>
+where
+    I: IntoIterator<Item = crate::EmuPencilPoint>,
+{
+    let mut out = Vec::new();
+    let mut prev_price = initial_price;
+    for point in points {
+        let delta_ms = ((point.time.as_days() - base_time.as_days())
+            * crate::time::MILLISECONDS_PER_DAY)
+            .round();
+        if !(0.0..=f64::from(u16::MAX)).contains(&delta_ms) {
+            continue;
+        }
+        if out.len() >= usize::from(u16::MAX) {
+            return Err(MoonClientError::TooManyEmuTradePoints(
+                usize::from(u16::MAX) + 1,
+            ));
+        }
+        let mut price = point.price;
+        if price < prev_price {
+            price = -price;
+        }
+        prev_price = price.abs();
+        out.push(crate::EmuTradePoint {
+            time_delta_ms: delta_ms as u16,
+            price,
+        });
+    }
+    Ok(out)
 }
 
 fn resolve_market_index(client: &MoonClient, market_name: &str) -> Result<u16, MoonClientError> {
@@ -803,5 +885,46 @@ impl MoonStrategies<'_> {
     /// Stop checked strategies.
     pub fn stop(&self) -> Result<(), MoonClientError> {
         self.client.strategy_start_stop(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at_ms(base: crate::DelphiTime, delta_ms: f64) -> crate::DelphiTime {
+        crate::DelphiTime::from_days(base.as_days() + delta_ms / crate::time::MILLISECONDS_PER_DAY)
+    }
+
+    #[test]
+    fn pencil_points_follow_delphi_prev_price_signing_and_delta_filter() {
+        let base = crate::DelphiTime::from_days(45_000.0);
+        let points = [
+            crate::EmuPencilPoint::new(at_ms(base, -1.0), 111.0),
+            crate::EmuPencilPoint::new(at_ms(base, 0.0), 101.0),
+            crate::EmuPencilPoint::new(at_ms(base, 500.0), 99.0),
+            crate::EmuPencilPoint::new(at_ms(base, 1_000.0), 100.0),
+            crate::EmuPencilPoint::new(at_ms(base, 70_000.0), 120.0),
+        ];
+
+        let out = emu_trade_points_from_pencil(base, 100.0, points).unwrap();
+
+        assert_eq!(
+            out,
+            vec![
+                crate::EmuTradePoint {
+                    time_delta_ms: 0,
+                    price: 101.0,
+                },
+                crate::EmuTradePoint {
+                    time_delta_ms: 500,
+                    price: -99.0,
+                },
+                crate::EmuTradePoint {
+                    time_delta_ms: 1000,
+                    price: 100.0,
+                },
+            ]
+        );
     }
 }

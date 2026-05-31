@@ -153,6 +153,25 @@ pub struct EmuTradePoint {
     pub price: f32,
 }
 
+/// One drawn chart-pencil point for the MoonBot trade emulator.
+///
+/// This is not a wire record. It is the user-facing input matching
+/// `TChartFrame.TryEmulatePrices`: the UI has absolute chart time + price, and
+/// Active Lib converts that path into signed [`EmuTradePoint`] rows.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EmuPencilPoint {
+    /// Absolute Delphi chart time.
+    pub time: crate::DelphiTime,
+    /// Drawn chart price.
+    pub price: f32,
+}
+
+impl EmuPencilPoint {
+    pub const fn new(time: crate::DelphiTime, price: f32) -> Self {
+        Self { time, price }
+    }
+}
+
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
 struct WireEmuTradePoint {
