@@ -61,8 +61,8 @@ pub(crate) use outer_crypt::outer_light_crypt;
 
 /// MoonProto transport MAC key: 16 bytes used by SipHash-1-3.
 ///
-/// The outer obfuscation key is derived one-way from this key and cached in
-/// [`MacContext`]; pack/unpack never pass the raw MAC key into
+/// The outer obfuscation key is derived one-way from this key and cached with
+/// the MAC state; pack/unpack never pass the raw MAC key into
 /// `outer_light_crypt` on the hot path.
 pub type MoonKey = [u8; 16];
 
