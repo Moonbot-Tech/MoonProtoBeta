@@ -90,10 +90,10 @@ runtime follows Delphi `NewMarketFound`: it schedules a fresh
 30 seconds while the unknown market condition persists. If that listing refresh
 adds new markets, the runtime emits
 `MarketsEvent::NewMarketsAdded { names }` and immediately requests
-`TAllStatusesReq` plus `UpdateMarketsList` again. The order snapshot mirrors
-Delphi `AddNewMarket`: order pushes for an unknown market may have been dropped
-before the local market object existed, so the full order snapshot is requested
-again before the immediate price refresh.
+a fresh full order-status snapshot plus `UpdateMarketsList` again. Order pushes
+for an unknown market may have been dropped before the local market object
+existed, so the full order snapshot is requested again before the immediate
+price refresh.
 
 Inbound listing notifications also force this listing refresh, but that command
 is internal to the active library. User code should react to

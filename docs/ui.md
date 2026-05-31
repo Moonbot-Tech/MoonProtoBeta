@@ -40,7 +40,7 @@ and arb validity time.
 
 For UI code, use `client.settings().refresh()`. It queues a settings refresh
 request and returns immediately. The server answers by sending a
-`TClientSettingsCommand`; Active Lib applies it, emits
+full settings snapshot; Active Lib applies it, emits
 `Event::Settings(SettingsEvent::ClientSettingsUpdated)`, and stores the latest
 value in `snapshot().settings().client_settings`.
 
@@ -89,9 +89,8 @@ client.settings().clear_triggers_for_all(&[3])?;
 `settings().send(...)` sends a full settings snapshot. Normal UI code edits the
 latest snapshot received from the server; constructing a fresh
 `ClientSettingsCommand::default()` is useful for tests/tools, not for an already
-configured terminal session. Internal protocol tools build the same wire
-payloads through the crate-private UI command module; normal application code
-should use the high-level method names above.
+configured terminal session. Normal application code should use the high-level
+method names above.
 
 For strategy start/stop with an explicit checked-state delta, normal UI code
 uses `MoonClient`. The runtime owns strategy checked-state and sends only items

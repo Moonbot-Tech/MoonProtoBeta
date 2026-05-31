@@ -78,8 +78,8 @@ Packaging sanity check:
 cargo package --allow-dirty
 ```
 
-The package must contain only files from this crate. Root workspace secrets such
-as local key files are intentionally outside `moonproto/`.
+The package contains only crate files. Keep credentials in local config files
+outside the crate tree.
 
 ## Quick Run
 
