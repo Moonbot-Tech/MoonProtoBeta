@@ -9,9 +9,9 @@ static NTP_OFFSET_DAYS: AtomicU64 = AtomicU64::new(0);
 /// Set the process-global NTP correction in seconds.
 ///
 /// `ClientConfig::new` normally starts the managed NTP syncer automatically.
-/// This function is exposed for tests and custom tools that manage time sync
-/// outside the client.
-pub fn set_ntp_offset(offset_seconds: f64) {
+/// Public tools that intentionally manage NTP directly should use the `ntp`
+/// module and provide their own callback/storage.
+pub(crate) fn set_ntp_offset(offset_seconds: f64) {
     let bits = (offset_seconds / 86400.0).to_bits();
     NTP_OFFSET_DAYS.store(bits, Ordering::Relaxed);
 }

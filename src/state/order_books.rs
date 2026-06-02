@@ -12,23 +12,9 @@
 //!
 //! Each `(market_index, book_kind)` pair has an independent cache.
 //!
-//! Low-level usage:
-//!
-//! ```ignore
-//! let mut state = OrderBooks::new();
-//! let events = state.on_packet(packet);
-//! for ev in events {
-//!     match ev {
-//!         OrderBookEvent::Apply { top, .. } => /* redraw best bid/ask or read state.book(...) */,
-//!         OrderBookEvent::RequestFullNeeded { market_index, kind } => {
-//!             // Low-level mode only: send emk_RequestOrderBookFull yourself.
-//!             // EventDispatcher::dispatch_into_active consumes this internally.
-//!             let req = commands::engine_request::request_order_book_full(market_index, kind.as_u8());
-//!             client.send_api_request(&req);
-//!         }
-//!     }
-//! }
-//! ```
+//! Applications read current books through `MoonStateSnapshot` helpers by market
+//! name or retained `MarketHandle`. Packet apply/cache recovery is owned by the
+//! Active Lib runtime, not by terminal UI code.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -44,9 +30,9 @@ mod types;
 pub(crate) use self::apply::apply_order_book_diff_keep_zero;
 use self::apply::{apply_cached_packet, apply_diff_book, apply_full_book};
 use self::cache::OrderBookCache;
-pub(crate) use self::types::BookKey;
+pub(crate) use self::types::{ApplyResult, BookKey, OrderBookControl};
 pub use self::types::{
-    ApplyResult, OrderBookEvent, OrderBookKind, OrderBookLevel, OrderBookSnapshot, TopOfBook,
+    OrderBookEvent, OrderBookKind, OrderBookLevel, OrderBookSnapshot, TopOfBook,
 };
 
 /// Cache becomes corrupted if it stays non-empty longer than this threshold.
@@ -70,7 +56,8 @@ pub struct OrderBooks {
 }
 
 impl OrderBooks {
-    pub fn new() -> Self {
+    #[cfg(test)]
+    pub(crate) fn new() -> Self {
         Self {
             caches: HashMap::new(),
             books: HashMap::new(),
@@ -85,18 +72,21 @@ impl OrderBooks {
 
     /// Process one decoded `MPC_OrderBook` packet and return generated events.
     #[must_use = "OrderBookEvent values must be processed; ignoring RequestFullNeeded can leave a low-level orderbook corrupted"]
-    pub fn on_packet(&mut self, pkt: OrderBookUpdate, now_ms: i64) -> Vec<OrderBookEvent> {
+    #[cfg(test)]
+    pub(crate) fn on_packet(&mut self, pkt: OrderBookUpdate, now_ms: i64) -> Vec<OrderBookEvent> {
         let mut events = Vec::new();
-        self.on_packet_into(pkt, now_ms, &mut events);
+        let mut controls = Vec::new();
+        self.on_packet_into(pkt, now_ms, &mut events, &mut controls);
         events
     }
 
     /// Process one packet into a caller-owned event buffer.
-    pub fn on_packet_into(
+    pub(crate) fn on_packet_into(
         &mut self,
         pkt: OrderBookUpdate,
         now_ms: i64,
         events: &mut Vec<OrderBookEvent>,
+        controls: &mut Vec<OrderBookControl>,
     ) {
         let key: BookKey = (pkt.market_index, pkt.book_kind);
         let kind = OrderBookKind::from_u8(pkt.book_kind).unwrap_or(OrderBookKind::Futures);
@@ -115,10 +105,12 @@ impl OrderBooks {
                 .retain(|p| compare_seq(p.seq, cache.expected_seq) >= 0);
             cache.check_cache_empty();
             events.push(OrderBookEvent::Apply {
+                #[cfg(any(test, feature = "diagnostics"))]
                 market_index: pkt.market_index,
                 market_name: None,
                 kind,
                 is_full: true,
+                #[cfg(any(test, feature = "diagnostics"))]
                 seq: pkt.seq,
                 top,
             });
@@ -145,10 +137,12 @@ impl OrderBooks {
             );
             cache.last_applied_seq = seq;
             events.push(OrderBookEvent::Apply {
+                #[cfg(any(test, feature = "diagnostics"))]
                 market_index: pkt.market_index,
                 market_name: None,
                 kind,
                 is_full: false,
+                #[cfg(any(test, feature = "diagnostics"))]
                 seq,
                 top,
             });
@@ -157,10 +151,7 @@ impl OrderBooks {
             }
             cache.add(seq, cached_pkt, now_ms);
             if cache.try_request_full(now_ms) {
-                events.push(OrderBookEvent::RequestFullNeeded {
-                    market_index: key.0,
-                    kind,
-                });
+                push_request_full_needed(events, controls, key.0, kind);
             }
             return;
         }
@@ -184,10 +175,12 @@ impl OrderBooks {
             cache.expected_seq = pkt.seq.wrapping_add(1);
             cache.last_applied_seq = pkt.seq;
             events.push(OrderBookEvent::Apply {
+                #[cfg(any(test, feature = "diagnostics"))]
                 market_index: pkt.market_index,
                 market_name: None,
                 kind,
                 is_full: false,
+                #[cfg(any(test, feature = "diagnostics"))]
                 seq: pkt.seq,
                 top,
             });
@@ -198,12 +191,7 @@ impl OrderBooks {
 
         // === 4. Stale: seq < expected → drop ===
         if cmp < 0 {
-            events.push(OrderBookEvent::Ignored {
-                market_index: pkt.market_index,
-                kind,
-                seq: pkt.seq,
-                reason: ApplyResult::Stale,
-            });
+            push_ignored(events, pkt.market_index, kind, pkt.seq, ApplyResult::Stale);
             return;
         }
 
@@ -214,17 +202,9 @@ impl OrderBooks {
             cache.corrupted = true;
         }
         if cache.try_request_full(now_ms) {
-            events.push(OrderBookEvent::RequestFullNeeded {
-                market_index: key.0,
-                kind,
-            });
+            push_request_full_needed(events, controls, key.0, kind);
         }
-        events.push(OrderBookEvent::Ignored {
-            market_index: pkt.market_index,
-            kind,
-            seq,
-            reason: ApplyResult::Cached,
-        });
+        push_ignored(events, pkt.market_index, kind, seq, ApplyResult::Cached);
     }
 
     /// Drain cache by applying consecutive packets starting at `expected_seq`.
@@ -258,28 +238,17 @@ impl OrderBooks {
             cache.expected_seq = entry.seq.wrapping_add(1);
             cache.last_applied_seq = entry.seq;
             events.push(OrderBookEvent::Apply {
+                #[cfg(any(test, feature = "diagnostics"))]
                 market_index: entry.pkt.market_index,
                 market_name: None,
                 kind: OrderBookKind::from_u8(entry.pkt.book_kind).unwrap_or(OrderBookKind::Futures),
                 is_full: entry.pkt.is_full,
+                #[cfg(any(test, feature = "diagnostics"))]
                 seq: entry.seq,
                 top,
             });
         }
         cache.check_cache_empty();
-    }
-
-    /// Clear the whole state, for example on reconnect or `WantNewHello`.
-    pub fn clear(&mut self) {
-        for (_, c) in self.caches.iter_mut() {
-            c.clear();
-            c.corrupted = false;
-            c.expected_seq = 0;
-            c.last_applied_seq = 0;
-        }
-        self.caches.clear();
-        self.books.clear();
-        self.diff_scratch.clear();
     }
 
     /// Delphi `TMoonProtoEngine.ResetOrderBookCaches`: clear out-of-order
@@ -316,19 +285,44 @@ impl OrderBooks {
     }
 
     /// Get the applied current book.
-    pub fn book(&self, market_index: u16, book_kind: OrderBookKind) -> Option<&OrderBookSnapshot> {
+    pub(crate) fn book(
+        &self,
+        market_index: u16,
+        book_kind: OrderBookKind,
+    ) -> Option<&OrderBookSnapshot> {
         self.book_by_kind(market_index, book_kind.as_u8())
     }
+}
 
-    /// Get best bid/ask from the applied current book.
-    pub fn top_of_book(&self, market_index: u16, book_kind: OrderBookKind) -> Option<TopOfBook> {
-        self.book(market_index, book_kind).map(|book| book.top())
-    }
+fn push_request_full_needed(
+    events: &mut Vec<OrderBookEvent>,
+    controls: &mut Vec<OrderBookControl>,
+    market_index: u16,
+    kind: OrderBookKind,
+) {
+    controls.push(OrderBookControl::RequestFullNeeded { market_index, kind });
+    #[cfg(any(test, feature = "diagnostics"))]
+    events.push(OrderBookEvent::RequestFullNeeded { market_index, kind });
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    let _ = events;
+}
 
-    /// Iterate over applied current books.
-    pub fn iter_books(&self) -> impl Iterator<Item = &OrderBookSnapshot> {
-        self.books.values().map(Arc::as_ref)
-    }
+fn push_ignored(
+    events: &mut Vec<OrderBookEvent>,
+    market_index: u16,
+    kind: OrderBookKind,
+    seq: u16,
+    reason: ApplyResult,
+) {
+    #[cfg(any(test, feature = "diagnostics"))]
+    events.push(OrderBookEvent::Ignored {
+        market_index,
+        kind,
+        seq,
+        reason,
+    });
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    let _ = (events, market_index, kind, seq, reason);
 }
 
 #[cfg(test)]

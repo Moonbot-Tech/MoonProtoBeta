@@ -7,9 +7,10 @@ When an application subscribes to trades through `InitConfig.subscribe_trades`,
 `streams().subscribe_all_trades`, or `streams().subscribe_trades_for`, the runtime requests the
 initial full 5m candles snapshot for the active storage scope. If the chunked
 request or history-worker barrier times out, Active Lib emits
-`Event::CandlesSnapshot::Failed` and retries while that trades scope remains
-active; after a successful snapshot it does not request the same scope again. After
-the chunked response is merged and parsed, Active Lib applies it to retained
+`Event::CandlesSnapshot(CandlesSnapshotEvent::Failed { .. })` and retries while
+that trades scope remains active; after a successful snapshot it does not
+request the same scope again. After the chunked response is merged and parsed,
+Active Lib applies it to retained
 per-market history and emits `Event::CandlesSnapshot` only after the history
 worker acknowledges the barrier. Incoming trades then maintain the current 5m
 candle and derived candle/volume state.
@@ -61,10 +62,10 @@ let high = candle.high();
 let low = candle.low();
 let close = candle.close();
 let volume = candle.volume();
-let unix_ms = candle.time_delphi().unix_millis();
+let unix_ms = candle.time().unix_millis();
 ```
 
-The raw time value is a Delphi day value, not Unix time.
+The raw wire time is Delphi `TDateTime`; the public helper returns `MoonTime`.
 
 ## Full Snapshot Refresh
 
@@ -73,12 +74,31 @@ subscribes to trades, waits for `Event::CandlesSnapshot`, then reads retained 5m
 candles from `market_history_readers`. The raw chunked/zlib response object is a
 diagnostic/protocol detail.
 
+`CandlesSnapshotEvent::Ready` carries a small summary:
+
+```rust
+pub struct CandlesSnapshotApplySummary {
+    pub received_markets: usize,
+    pub received_candles: usize,
+    pub retained_markets: usize,
+    pub retained_candles: usize,
+}
+```
+
+`received_*` counts describe the decoded server snapshot. `retained_*` counts
+describe the rows that entered the active trade-storage scope and are visible
+through market-history readers. A filtered `subscribe_trades_for` scope can
+therefore retain fewer markets/candles than the server returned.
+
 ## CoinCard History
 
-`candles().request_coin_card(market, kind)` is a demand-driven, non-blocking UI
-request. It mirrors Delphi's CoinCard path: UI marks the market as needing deep
-history, a background owner calls blocking `Engine.getDeepHistory`, then
-`TMarket.CoinCardCandles` is updated.
+`candles().request_coin_card_for(&market, kind)` is a demand-driven,
+non-blocking UI request for the selected retained market. It mirrors Delphi's
+CoinCard path: UI marks its current `TMarket` as needing deep history, a
+background owner calls blocking `Engine.getDeepHistory`, then
+`TMarket.CoinCardCandles` is updated. The string-keyed
+`request_coin_card(market, kind)` variant remains useful for scripts and
+one-shot tools.
 
 These rows are separate from retained 5m history. Typical UI usage:
 
@@ -86,7 +106,9 @@ These rows are separate from retained 5m history. Typical UI usage:
 use moonproto::DeepHistoryKind;
 use moonproto::Event;
 
-let ticket = client.candles().request_coin_card("BTCUSDT", DeepHistoryKind::Hour4)?;
+let Some(snapshot) = client.snapshot() else { return; };
+let Some(market) = snapshot.markets().get("BTCUSDT") else { return; };
+let ticket = client.candles().request_coin_card_for(&market, DeepHistoryKind::Hour4)?;
 
 for event in client.drain_events() {
     if let Event::CoinCardCandles(ev) = event {
@@ -95,14 +117,13 @@ for event in client.drain_events() {
 }
 
 if let Some(snapshot) = client.snapshot() {
-    let Some(market) = snapshot.markets().get("BTCUSDT") else { return; };
     if let Some(rows) = snapshot.coin_card_candles_for(&market, DeepHistoryKind::Hour4) {
         println!("rows={}", rows.len());
     }
 }
 ```
 
-`DeepPrice` has the same `open()`, `high()`, `low()`, `close()`, and
-`volume()` / `time_delphi()` helpers.
+`DeepPrice` has the same `open()`, `high()`, `low()`, `close()`, `volume()`,
+and `time()` helpers.
 
 Desktop UI code should use the non-blocking request plus event/snapshot state.

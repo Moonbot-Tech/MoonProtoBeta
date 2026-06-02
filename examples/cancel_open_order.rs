@@ -106,9 +106,6 @@ fn main() {
             match event {
                 Event::Order(OrderEvent::Updated(uid)) => println!("[order] updated uid={uid}"),
                 Event::Order(OrderEvent::Removed(uid)) => println!("[order] removed uid={uid}"),
-                Event::Order(OrderEvent::Ignored { uid, reason }) => {
-                    println!("[order] ignored uid={uid} reason={reason:?}");
-                }
                 _ => {}
             }
         }

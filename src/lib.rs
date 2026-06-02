@@ -45,7 +45,7 @@
 //! // After the user chooses a market/order side:
 //! // client.trade().new_order(NewOrderParams::new("BTCUSDT", OrderSide::Long, 50100.0, 0.001))?;
 //! // After an order appears in events/snapshots:
-//! // client.orders().move_order(order_uid, 50100.0)?; // also accepts &Order
+//! // client.orders().move_order(order, 50100.0)?; // UID selectors are for scripts/tools
 //! for lifecycle in client.drain_lifecycle_events() {
 //!     println!("lifecycle: {lifecycle:?}");
 //! }
@@ -130,8 +130,12 @@
 mod api_pending;
 mod app_queue;
 pub mod client;
+#[cfg(feature = "diagnostics")]
 #[doc(hidden)]
 pub mod commands;
+#[cfg(not(feature = "diagnostics"))]
+#[allow(dead_code, unreachable_pub)]
+mod commands;
 pub mod events;
 pub mod key_import;
 pub mod ntp;
@@ -159,46 +163,59 @@ pub use client::{
     RefreshConfig, SellOrderParams, SplitOrderParams, TradeContextError, TradesStreamMode,
     TradesSubscription, TransportMode, VStopParams,
 };
+#[cfg(feature = "diagnostics")]
 #[doc(hidden)]
-pub use client::{SendPriority, UniqueKey};
+pub use commands::engine_api::EngineMethod;
+#[cfg(feature = "diagnostics")]
+#[doc(hidden)]
+pub use commands::engine_api::EngineResponse;
 pub use commands::engine_api::{
-    AuthCheckResponse, DexInfo, ExchangeTypeMask, HyperDexIndex, ServerInfo,
+    ApiExpirationTime, AuthCheckResponse, DexInfo, ExchangeTypeMask, HyperDexIndex, ServerInfo,
+    TransferAsset,
 };
-pub use commands::{
-    field_names, ArbConfigCompact, ArbIsolationFlags, ArbPlatformCode, AutoStartConfig,
-    AutoStartConfig2, BaseCurrency, ClientSettingsCommand, ExchangeCode, FieldValue, FixedPosition,
-    JoinSellKind, LevManage, OrderCompact, OrderType, OrderWorkerStatus, PositionType,
-    ReplaceMultiKind, ResetProfitKind, SpotMarketKind, StopSettings, StrategyActiveMode,
+pub use commands::market::{
+    ArbIsolationFlags, ArbPlatformCode, BaseCurrency, ExchangeCode, MarketArbNowEntry,
+    MarketArbPricePoint, MarketArbSlot, PositionType, TokenTags,
+};
+pub use commands::strategy_schema::{
     StrategyDynamicPicklist, StrategyFieldLayout, StrategyFieldType, StrategyFieldUiKind,
-    StrategyFields, StrategyKind, StrategySchema, StrategySchemaEditorSection,
-    StrategySchemaEditorSectionKind, StrategySchemaField, StrategySchemaKind, StrategySnapshot,
-    TempBlacklistEntry, TokenTags, TriggerAction, AS_CFG2_SIZE, AS_CFG_SIZE,
+    StrategySchema, StrategySchemaEditorSection, StrategySchemaEditorSectionKind,
+    StrategySchemaField, StrategySchemaKind,
 };
-#[doc(hidden)]
-pub use commands::{DelphiBool, MoveAllBuysCmdType, MoveAllCmdType, OrderUpdateData, PriceZone};
+pub use commands::strategy_serializer::{
+    field_names, FieldValue, StrategyActiveMode, StrategyFields, StrategyKind, StrategySnapshot,
+};
+pub use commands::trade::{
+    FixedPosition, OrderCompact, OrderSubType, OrderType, OrderWorkerStatus, ReplaceMultiKind,
+    StopSettings,
+};
+pub use commands::ui::{
+    ArbConfigCompact, AutoStartConfig, AutoStartConfig2, ClientSettingsCommand, JoinSellKind,
+    LevManage, ResetProfitKind, SpotMarketKind, TempBlacklistEntry, TriggerAction,
+};
 // Parameter types named by public high-level handle methods but defined in
 // command submodules (`MoonTrade::move_all_sells`/`move_all_buys`,
 // `MoonCandles::request_coin_card`).
 pub use commands::candles::{DeepHistoryKind, DeepPrice};
 pub use commands::trade::{MoveAllBuysParams, MoveAllSellsParams};
 pub use commands::ui::{EmuPencilPoint, EmuTradePoint};
-#[doc(hidden)]
-pub use events::EventDispatcherSnapshot;
 pub use events::{
-    ArbEvent, EngineActionEvent, EngineActionKind, Event, MissingOrderStatusRequest,
-    MoonStateSnapshot, StrategySnapshotReply, WatcherFillEvent, WatcherFillsEvent,
+    ArbEvent, EngineActionEvent, EngineActionKind, Event, MoonStateSnapshot, ServerLogEvent,
+    WatcherFillEvent, WatcherFillsEvent,
 };
 pub use key_import::{
     import_key, parse_key_info, ImportedIpVersion, ImportedKeyFormat, ImportedKeyInfo,
     ImportedKeys, ImportedNetworkConfig,
 };
+#[cfg(feature = "diagnostics")]
 #[doc(hidden)]
 pub use protocol::Command;
 pub use state::{
     CoinCardCandlesEvent, CoinCardCandlesState, ExchangeKind, TransferAssetsEvent,
     TransferAssetsState,
 };
-pub use time::DelphiTime;
-pub use transport::MoonKey;
+#[cfg(any(test, feature = "diagnostics"))]
 #[doc(hidden)]
-pub use transport::ServerMsgHeader;
+pub use time::DelphiTime;
+pub use time::MoonTime;
+pub use transport::MoonKey;

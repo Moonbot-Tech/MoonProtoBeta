@@ -1,6 +1,9 @@
 //! Order read-model and action/event types.
 
 use crate::commands::trade::{OrderType, OrderWorkerStatus, TradeCtx};
+#[cfg(any(test, feature = "diagnostics"))]
+use crate::time::DelphiTime;
+use crate::MoonTime;
 
 /// Order close reason, matching Delphi `TSellReasonCode`
 /// (MarketsU.pas:245-261).
@@ -45,18 +48,9 @@ impl SellReason {
     /// TakeProfit reached.
     pub const TakeProfit: Self = Self(14);
 
-    /// Preserve a raw Delphi reason byte.
-    pub const fn from_byte(b: u8) -> Self {
+    /// Preserve a raw Delphi reason byte while applying inbound order status.
+    pub(crate) const fn from_byte(b: u8) -> Self {
         Self(b)
-    }
-
-    /// Backward-compatible alias for callers that parse raw command bytes.
-    pub const fn from_u8(b: u8) -> Self {
-        Self::from_byte(b)
-    }
-
-    pub const fn to_byte(self) -> u8 {
-        self.0
     }
 
     pub const fn is_known(self) -> bool {
@@ -126,14 +120,27 @@ pub(crate) struct PanicSellSend {
 /// One chart point in Delphi `TOrderLine.Points`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OrderTraceChartPoint {
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub time: f64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) time: f64,
     pub price: f32,
 }
 
 impl OrderTraceChartPoint {
-    /// Point time as Delphi `TDateTime`.
-    pub fn time_delphi(self) -> crate::DelphiTime {
-        crate::DelphiTime::from_days(self.time)
+    pub fn time(self) -> MoonTime {
+        MoonTime::from_delphi_days(self.time).unwrap_or(MoonTime::ZERO)
+    }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
+    pub fn time_delphi(self) -> DelphiTime {
+        DelphiTime::from_days(self.time)
+    }
+
+    pub fn unix_millis(self) -> i64 {
+        self.time().unix_millis()
     }
 }
 
@@ -211,9 +218,33 @@ impl OrderTraceLine {
         self.tmp_point = None;
         self.can_finish = true;
     }
+
+    /// Number of Delphi order-line segments represented by `points`.
+    ///
+    /// Delphi stores one anchor point and then three chart points per segment;
+    /// `TOrderLine.ShrinkPoints` uses the same `(Count - 1) div 3` formula.
+    pub fn line_count(&self) -> usize {
+        self.points.len().saturating_sub(1) / 3
+    }
+
+    pub(crate) fn needs_shrink(&self, to_count: usize) -> bool {
+        self.points.len() >= 4 && (self.line_count() as f64) > (to_count as f64) * 1.2
+    }
+
+    pub(crate) fn shrink_points(&mut self, to_count: usize) -> usize {
+        if !self.needs_shrink(to_count) {
+            return 0;
+        }
+
+        let remove_lines = self.line_count().saturating_sub(to_count);
+        let remove_points = 3 * remove_lines;
+        self.points.drain(0..remove_points);
+        remove_lines
+    }
 }
 
 /// Result of applying one order command.
+#[allow(unreachable_pub)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ApplyResult {
     /// Command was applied and state changed.
@@ -252,7 +283,9 @@ pub enum OrderEvent {
     StopsChanged(u64),
     /// `TAllStatuses` snapshot was applied.
     Snapshot,
-    /// Command was ignored.
+    /// Command was ignored by the low-level order state machine.
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     Ignored { uid: u64, reason: ApplyResult },
 }
 
@@ -265,8 +298,9 @@ impl OrderEvent {
             | Self::TracePoint { uid }
             | Self::CorridorChanged(uid)
             | Self::VStopChanged(uid)
-            | Self::StopsChanged(uid)
-            | Self::Ignored { uid, .. } => Some(*uid),
+            | Self::StopsChanged(uid) => Some(*uid),
+            #[cfg(any(test, feature = "diagnostics"))]
+            Self::Ignored { uid, .. } => Some(*uid),
             Self::BulkReplaced { .. } | Self::Snapshot => None,
         }
     }

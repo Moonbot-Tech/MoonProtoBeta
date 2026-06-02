@@ -35,8 +35,13 @@ impl EventDispatcher {
                     .market_by_index(market_index)
                     .map(|handle| handle.name_arc());
                 self.order_book_events.clear();
-                self.order_books
-                    .on_packet_into(pkt, now_ms, &mut self.order_book_events);
+                self.order_book_controls.clear();
+                self.order_books.on_packet_into(
+                    pkt,
+                    now_ms,
+                    &mut self.order_book_events,
+                    &mut self.order_book_controls,
+                );
                 if self
                     .order_book_events
                     .iter()
@@ -52,16 +57,19 @@ impl EventDispatcher {
                     }
                 }
                 for mut ev in self.order_book_events.drain(..) {
-                    if let OrderBookEvent::Apply {
-                        market_name: name, ..
-                    } = &mut ev
-                    {
-                        *name = market_name.clone();
+                    match &mut ev {
+                        OrderBookEvent::Apply {
+                            market_name: name, ..
+                        } => {
+                            *name = market_name.clone();
+                        }
+                        #[cfg(any(test, feature = "diagnostics"))]
+                        _ => {}
                     }
                     out.push(Event::OrderBook(ev));
                 }
             }
-            None => out.push(Self::parse_failed(Command::OrderBook, payload)),
+            None => Self::push_parse_failed(out, Command::OrderBook, payload),
         }
     }
 }

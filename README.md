@@ -45,7 +45,6 @@ credentials never become part of commits or packages.
 ```text
 server = HOST:PORT
 key = <exported MoonBot key>
-# mask_ver = 0
 ```
 
 This config is only for live tests. A normal application can read the same
@@ -97,21 +96,30 @@ Basic application shape:
 
 ```rust
 use moonproto::{
-    import_key, ClientConfig, ConnectConfig, InitConfig, InitialStrategies,
+    parse_key_info, ClientConfig, ConnectConfig, InitConfig, InitialStrategies,
     MoonClient, NewOrderParams, OrderSide, TradesStreamMode, TransportMode,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let key_b64 = std::env::var("MOONPROTO_KEY")?;
-    let host = std::env::var("MOONPROTO_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let info = parse_key_info(&key_b64).expect("invalid MoonBot key");
+    let suggested_network = info.network;
+
+    let host = std::env::var("MOONPROTO_HOST").ok().or_else(|| {
+        suggested_network
+            .and_then(|network| network.address.map(|ip| ip.to_string()))
+    }).unwrap_or_else(|| "127.0.0.1".to_string());
     let port = std::env::var("MOONPROTO_PORT")
         .ok()
         .and_then(|v| v.parse().ok())
+        .or_else(|| suggested_network.map(|network| network.port))
         .unwrap_or(3000);
+    let transport_mode = suggested_network
+        .map(|network| network.transport_mode)
+        .unwrap_or(TransportMode::V0);
 
-    let keys = import_key(&key_b64).expect("invalid MoonBot key");
-    let cfg = ClientConfig::new(host, port, keys.master_key, keys.mac_key)
-        .with_transport_mode(TransportMode::V0);
+    let cfg = ClientConfig::new(host, port, info.keys.master_key, info.keys.mac_key)
+        .with_transport_mode(transport_mode);
 
     let client = MoonClient::connect(
         cfg,

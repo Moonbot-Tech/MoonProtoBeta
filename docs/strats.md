@@ -45,7 +45,7 @@ for event in client.drain_events() {
         match strat_event {
             StratEvent::SnapshotFull { .. } => {
                 let Some(state) = client.snapshot() else { continue; };
-                println!("strategies={}", state.strategy_snapshot_vec().len());
+                println!("strategies={}", state.strategy_snapshots().count());
                 for strategy in state.strategy_snapshots() {
                     if let Some(name) = strategy.strategy_name() {
                         println!("{}: {}", strategy.strategy_id, name);
@@ -68,10 +68,6 @@ for event in client.drain_events() {
             StratEvent::CheckedSynced { changed, is_delta } => {
                 println!("checked changed={changed} delta={is_delta}");
             }
-            StratEvent::SnapshotRequested { .. } => {
-                // Already answered by the runtime from its owned strategy list.
-                // The event is emitted for UI/diagnostic awareness.
-            }
             StratEvent::SchemaApplied { kind_count, field_count, .. } => {
                 println!("strategy schema: kinds={kind_count} fields={field_count}");
             }
@@ -86,6 +82,11 @@ applications should read `state.strategy_snapshot(...)` or
 `state.strategy_snapshots()`. For logging, use
 `StratEvent::snapshot_server_epoch()` and `StratEvent::snapshot_raw_len()`;
 raw snapshot bytes are diagnostics-only.
+
+Server `TStratSnapshotRequest` packets are answered by the runtime from the
+library-owned local strategy list. Terminal code does not need to handle that
+packet or build a snapshot reply; the normal `MoonClient` event sink suppresses
+the hidden request event after latching/sending the reply.
 
 ## Strategy Schema
 
@@ -104,7 +105,7 @@ let schema = state
     .expect("schema is available after LifecycleEvent::Ready");
 
 for kind in &schema.kinds {
-    println!("kind {} {}", kind.ordinal, kind.name);
+    println!("kind {} {}", kind.ordinal(), kind.name);
 }
 
 for field in &schema.fields {
@@ -113,7 +114,10 @@ for field in &schema.fields {
         field.name,
         field.type_id.name(),
         field.ui_kind,
-        field.visible_kind_ordinals
+        field
+            .visible_strategy_kinds()
+            .map(|kind| schema.kind_name_for_strategy_kind(kind).unwrap_or("?"))
+            .collect::<Vec<_>>()
     );
 }
 ```
@@ -121,9 +125,9 @@ for field in &schema.fields {
 `StrategySchema` exposes:
 
 - `format_version`;
-- `kinds`: strategy kind ordinal and server UI name;
+- `kinds`: typed strategy kind and server UI name;
 - `fields`: field name, typed field kind, UI kind, default value when Delphi
-  marked it non-zero, and visibility decoded to strategy-kind ordinals;
+  marked it non-zero, and typed strategy-kind visibility;
 - `StrategyFieldLayout`: no layout marker, comment, filter class, or chapter
   class with its chapter name;
 - `static_picklist`;
@@ -135,9 +139,10 @@ it as a plain string because its suggestions come from runtime terminal
 configuration, not from strategy RTTI/schema data. A terminal may add its own UI
 suggestions for that field, but Active Lib does not hardcode them.
 
-Use `field.visible_for_kind(raw_ordinal)` or
-`field.visible_for_strategy_kind(kind)` for visibility checks. The internal
-bitmask used by the serializer is not part of the public UI schema surface.
+Use `field.visible_for_strategy_kind(kind)` or
+`field.visible_strategy_kinds()` for visibility checks. Raw Delphi ordinals and
+the internal serializer bitmask are diagnostics-only; terminal code should keep
+the typed `StrategyKind`.
 For strategy editors, prefer the ready-made Delphi-shaped views:
 
 ```rust
@@ -150,11 +155,10 @@ for section in schema.editor_sections_for_strategy_kind(kind) {
 }
 ```
 
-`editor_sections_for_kind` / `editor_sections_for_strategy_kind` preserve
-Delphi editor grouping. Layout markers are carried over following fields until
-the next marker, so terminal UI does not need to know that `sgComment`,
-`sgFilterClass`, and `sgChapterClass` are stored only on the first field of a
-section.
+`editor_sections_for_strategy_kind` preserves Delphi editor grouping. Layout
+markers are carried over following fields until the next marker, so terminal UI
+does not need to know that `sgComment`, `sgFilterClass`, and `sgChapterClass`
+are stored only on the first field of a section.
 
 Dynamic combo fields can also build their current values from the retained
 strategy list:
@@ -179,9 +183,8 @@ use moonproto::{
 };
 ```
 
-`StrategySchema::parse_compressed(data)` and `StrategySchema::parse_plain(data)`
-are public for protocol tools, but normal clients should read the active
-runtime state populated by Init.
+Normal clients should read the active runtime state populated by Init. Schema
+parsing helpers are kept out of the terminal model.
 
 ## State
 
@@ -212,15 +215,16 @@ that are absent from the payload. Delphi keeps those strategies as local
 `TStratDelete` has two independent Delphi effects: delete `StrategyID` when it
 is non-zero, then delete `FolderPath` when it names an existing empty non-root
 folder. `StratEvent::Deleted` exposes both result flags. `strategy_deleted` and
-`folder_deleted` tell which parts actually changed state; if both are false the
-runtime emits `StratEvent::Ignored`.
+`folder_deleted` tell which parts actually changed state. If both are false,
+Active Lib does not publish a strategy event.
 
 Future-version strat commands, unknown strat command ids, incoming
 `TStratSchemaRequest`, and incoming `TStratSellPriceUpdate` do not emit active
 strategy events. Delphi turns those into a skipped/base command or has no
 client-side branch, then frees the object without strategy side effects. The
 low-level parser/state APIs still expose `StratCommand::Skipped`,
-`StratCommand::Unknown`, and `StratEvent::Ignored` for explicit diagnostics.
+`StratCommand::Unknown`, and the command parsers under the diagnostics feature
+for explicit protocol diagnostics.
 
 ## Active Predicates
 
@@ -271,11 +275,15 @@ let init = InitConfig {
 };
 
 let client = MoonClient::connect(cfg, ConnectConfig::new(init))?;
-let all: Vec<StrategySnapshot> = client
+let owned_for_export: Vec<StrategySnapshot> = client
     .snapshot()
     .map(|state| state.strategy_snapshot_vec())
     .unwrap_or_default();
 ```
+
+`strategy_snapshot_vec()` clones full snapshots and is meant for owned export,
+persistence handoff, or offline editing. Rendering code should normally use
+`strategy_snapshots()` / `strategy_snapshot(id)` and borrow the retained state.
 
 The epoch passed to `InitialStrategies::new` is Delphi
 `cfg.ServerStratEpoch` for this local client's strategy list. It is the value
@@ -288,8 +296,9 @@ owns the strategy editor/persistence; this call tells Active Lib that the local
 list changed. Active Lib increments its Delphi `cfg.ServerStratEpoch` analogue,
 updates the runtime-owned copy used for future server snapshot requests, and
 publishes the current list from the same schema that Init fetched from the
-server. The call queues intent and returns immediately; server echo/update
-arrives later through `Event::Strat`.
+server. The call queues intent and returns immediately; if startup is still
+running, the runtime defers the intent until the Init/schema gate has opened.
+Server echo/update arrives later through `Event::Strat`.
 
 ## Strategy Fields
 
@@ -420,7 +429,9 @@ client
 
 This is still an Active Lib intent, not a raw protocol call: "local strategies
 changed; synchronize them". The runtime advances the local strategy epoch and
-keeps the list used for future `TStratSnapshotRequest` replies.
+keeps the list used for future `TStratSnapshotRequest` replies. If the call is
+made while Init is still in progress, the command is held in the runtime FIFO
+and serialized only after the live server schema is available.
 
 Strategy snapshot serialization mirrors Delphi `TStrategySerializer` lengths:
 field-name and folder-path dictionary entries use a `Byte` length and write

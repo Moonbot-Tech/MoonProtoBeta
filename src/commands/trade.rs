@@ -62,16 +62,11 @@ pub use trace::{BulkReplaceNotify, CorridorUpdate, OrderTracePoint};
 /// the sender can serialize the exact wire command.
 #[derive(Debug, Clone, Copy)]
 pub struct MoveAllSellsParams {
-    #[doc(hidden)]
-    pub cmd_type: MoveAllCmdType,
-    #[doc(hidden)]
-    pub move_kind: ReplaceMultiKind,
-    #[doc(hidden)]
-    pub price: f64,
-    #[doc(hidden)]
-    pub price_zone: PriceZone,
-    #[doc(hidden)]
-    pub side: FixedPosition,
+    pub(crate) cmd_type: MoveAllCmdType,
+    pub(crate) move_kind: ReplaceMultiKind,
+    pub(crate) price: f64,
+    pub(crate) price_zone: PriceZone,
+    pub(crate) side: FixedPosition,
 }
 
 impl MoveAllSellsParams {
@@ -119,14 +114,10 @@ impl MoveAllSellsParams {
 /// `%` (`Pers`), but not buy-side `PriceZone`.
 #[derive(Debug, Clone, Copy)]
 pub struct MoveAllBuysParams {
-    #[doc(hidden)]
-    pub cmd_type: MoveAllBuysCmdType,
-    #[doc(hidden)]
-    pub move_kind: ReplaceMultiKind,
-    #[doc(hidden)]
-    pub price: f64,
-    #[doc(hidden)]
-    pub side: FixedPosition,
+    pub(crate) cmd_type: MoveAllBuysCmdType,
+    pub(crate) move_kind: ReplaceMultiKind,
+    pub(crate) price: f64,
+    pub(crate) side: FixedPosition,
 }
 
 impl MoveAllBuysParams {

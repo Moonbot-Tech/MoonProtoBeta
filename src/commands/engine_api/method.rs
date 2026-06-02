@@ -2,13 +2,11 @@
 
 /// Engine RPC method identifiers.
 ///
-/// Each method has a corresponding builder in `super::super::engine_request`
-/// and a `Client::api_*` wrapper. Most wrappers return an `mpsc::Receiver` for
-/// asynchronous handling through the pending-response registry.
-///
-/// Method-specific response payloads are parsed by helpers near the related
-/// protocol module, for example `commands::market`, `commands::candles`, or
-/// `commands::engine_api` for small scalar responses.
+/// Public code normally sees method names only in diagnostics and action
+/// tickets/events. User-facing Engine API operations are exposed as
+/// `MoonClient` domain intents (`account()`, `balances()`, `settings()`,
+/// `candles()`, `streams()`) plus retained state/events, not as "send method
+/// and parse bytes" calls.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EngineMethod(u8);
 
@@ -31,8 +29,10 @@ impl EngineMethod {
     /// `GetMarketsIndexes`: compact server `mIndex -> market name` mapping used
     /// by indexed streams.
     pub const GetMarketsIndexes: Self = Self(5);
-    /// `GetBalance`: current quantity for one currency. Parse with
-    /// [`super::parse_get_balance_response`].
+    /// `GetBalance`: current quantity for one currency.
+    ///
+    /// The normal terminal API does not expose this scalar RPC directly; wallet
+    /// and position UI uses retained balance/transfer-asset state.
     pub const GetBalance: Self = Self(6);
     /// `GetMarketsBalanceFull`: server-side full balance refresh.
     ///
@@ -63,8 +63,8 @@ impl EngineMethod {
     pub const SetLeverage: Self = Self(12);
     /// `SetHedgeMode`: enable or disable hedge mode.
     pub const SetHedgeMode: Self = Self(13);
-    /// `QueryHedgeMode`: current hedge-mode flag. Parse with
-    /// [`super::parse_query_hedge_mode_response`].
+    /// `QueryHedgeMode`: current hedge-mode flag. The Active Lib runtime parses
+    /// the response into account state/events.
     pub const QueryHedgeMode: Self = Self(14);
     /// `CheckAPIExpirationTime`: exchange API-key expiration as a Delphi
     /// `TDateTime`, parsed by `super::parse_api_expiration_time_response`.
@@ -109,10 +109,12 @@ impl EngineMethod {
     /// Keep the raw Delphi ordinal byte. Delphi reads/writes
     /// `TEngineMethodKind` via `ms.Read/Stream.Write` and does not turn an
     /// unknown ordinal into `emk_None`.
+    #[doc(hidden)]
     pub const fn from_byte(b: u8) -> Self {
         Self(b)
     }
 
+    #[doc(hidden)]
     pub const fn to_byte(self) -> u8 {
         self.0
     }

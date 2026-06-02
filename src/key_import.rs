@@ -18,7 +18,11 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use crate::client::TransportMode;
+#[cfg(any(test, feature = "diagnostics"))]
+use crate::time::DelphiTime;
+use crate::time::MoonTime;
 use crate::MoonKey;
+use zeroize::Zeroize;
 
 const OLD_PWD_HEAD: &str = "F$xC";
 const NEW_PWD_HEAD: &str = "F$xC2";
@@ -48,9 +52,9 @@ pub enum ImportedIpVersion {
 
 /// Endpoint and transport metadata carried by current MoonBot key exports.
 ///
-/// `address` can be `None`: Delphi applies `port` and `mask_ver` from the V1
-/// payload even when the active IP branch contains a zero address, and leaves
-/// the previously configured IP untouched.
+/// `address` can be `None`: Delphi applies the exported port/transport mode
+/// even when the active IP branch contains a zero address, and leaves the
+/// previously configured IP untouched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ImportedNetworkConfig {
     /// Active IP version in the exported payload.
@@ -60,7 +64,7 @@ pub struct ImportedNetworkConfig {
     /// Exported server UDP port.
     pub port: u16,
     /// Exported MoonProto transport mode (`V0`, `V1`, or `V2`).
-    pub mask_ver: TransportMode,
+    pub transport_mode: TransportMode,
 }
 
 /// Full parsed MoonBot key export for UI/config screens.
@@ -76,13 +80,31 @@ pub struct ImportedKeyInfo {
     pub format: ImportedKeyFormat,
     /// `TMoonProtoKeyContainer.rnd`.
     pub rnd: String,
-    /// Raw Delphi `TDateTime` from the key container.
+    /// Raw Delphi `TDateTime` from the key container, retained for diagnostics.
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub date: f64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) date: f64,
     /// UI label equivalent to MoonBot:
     /// `rnd + "  " + FormatDateTime("dd.mm.yyyy hh:nn", Date)`.
     pub display_name: String,
     /// Suggested endpoint/transport settings from current V1 exports.
     pub network: Option<ImportedNetworkConfig>,
+}
+
+impl ImportedKeyInfo {
+    /// Key container date as a normal Rust-facing MoonProto timestamp.
+    pub fn date(&self) -> MoonTime {
+        MoonTime::from_delphi_days(self.date).unwrap_or(MoonTime::ZERO)
+    }
+
+    /// Key container date as typed Delphi `TDateTime`.
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
+    pub fn date_delphi(&self) -> DelphiTime {
+        DelphiTime::from_days(self.date)
+    }
 }
 
 /// Decoded cryptographic keys from MoonBot export.
@@ -108,23 +130,6 @@ impl std::fmt::Debug for ImportedKeys {
             .field("filled", &self.filled)
             .field("container_version", &self.container_version)
             .finish()
-    }
-}
-
-impl ImportedKeys {
-    /// Whether the exported MoonBot key container was marked as filled.
-    ///
-    /// Normal applications do not need this: a successfully imported key has
-    /// already passed the Delphi container checks.
-    #[doc(hidden)]
-    pub fn filled(&self) -> bool {
-        self.filled
-    }
-
-    /// Raw `TMoonProtoKeyContainer.ver` value retained for diagnostics.
-    #[doc(hidden)]
-    pub fn container_version(&self) -> u8 {
-        self.container_version
     }
 }
 
@@ -154,19 +159,30 @@ pub fn parse_key_info(base64_str: &str) -> Option<ImportedKeyInfo> {
     let checksum = i64::from_le_bytes(raw[8..16].try_into().unwrap());
     let encrypted = &raw[16..];
 
-    if let Some(plain) = try_decrypt(encrypted, NEW_PWD_HEAD, ts, checksum) {
-        return parse_v1_plain(&plain);
+    if let Some(mut plain) = try_decrypt(encrypted, NEW_PWD_HEAD, ts, checksum) {
+        let parsed = parse_v1_plain(&plain);
+        plain.zeroize();
+        return parsed;
     }
 
-    let plain = try_decrypt(encrypted, OLD_PWD_HEAD, ts, checksum)?;
-    parse_legacy_plain(&plain)
+    let mut plain = try_decrypt(encrypted, OLD_PWD_HEAD, ts, checksum)?;
+    let parsed = parse_legacy_plain(&plain);
+    plain.zeroize();
+    parsed
 }
 
 fn try_decrypt(encrypted: &[u8], password_head: &str, ts: i64, checksum: i64) -> Option<Vec<u8>> {
-    let password = password_bytes(password_head, ts);
+    let mut password = password_bytes(password_head, ts);
     let mut plain = encrypted.to_vec();
     decode_buffer(&mut plain, &password);
-    (calculate_checksum_w(&plain) == checksum).then_some(plain)
+    let ok = calculate_checksum_w(&plain) == checksum;
+    password.zeroize();
+    if ok {
+        Some(plain)
+    } else {
+        plain.zeroize();
+        None
+    }
 }
 
 fn password_bytes(password_head: &str, ts: i64) -> Vec<u8> {
@@ -258,7 +274,7 @@ fn parse_v1_plain(plain: &[u8]) -> Option<ImportedKeyInfo> {
             ip_version,
             address,
             port,
-            mask_ver: TransportMode::from_byte(mask_ver),
+            transport_mode: TransportMode::from_byte(mask_ver),
         }),
     ))
 }
@@ -594,8 +610,8 @@ mod tests {
         ];
         let key_b64 = build_legacy_test_export(master_key, mac_key);
         let keys = import_key(&key_b64).expect("Failed to import key");
-        assert!(keys.filled());
-        assert_eq!(keys.container_version(), 1);
+        assert!(keys.filled);
+        assert_eq!(keys.container_version, 1);
         assert_eq!(keys.master_key, master_key);
         assert_eq!(keys.mac_key, mac_key);
 
@@ -622,7 +638,7 @@ mod tests {
                 ip_version: ImportedIpVersion::V4,
                 address: Some(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))),
                 port: 3000,
-                mask_ver: TransportMode::V2,
+                transport_mode: TransportMode::V2,
             })
         );
 
@@ -634,10 +650,10 @@ mod tests {
             keys.master_key,
             keys.mac_key,
         )
-        .with_transport_mode(network.mask_ver);
+        .with_transport_mode(network.transport_mode);
         assert_eq!(cfg.server_ip, "127.0.0.1");
         assert_eq!(cfg.server_port, 3000);
-        assert_eq!(cfg.mask_ver, TransportMode::V2);
+        assert_eq!(cfg.transport_mode, TransportMode::V2);
     }
 
     #[test]
@@ -653,7 +669,7 @@ mod tests {
                 ip_version: ImportedIpVersion::V4,
                 address: None,
                 port: 4000,
-                mask_ver: TransportMode::V0,
+                transport_mode: TransportMode::V0,
             })
         );
         let network = info.network.expect("V1 network metadata expected");
@@ -666,10 +682,10 @@ mod tests {
             keys.master_key,
             keys.mac_key,
         )
-        .with_transport_mode(network.mask_ver);
+        .with_transport_mode(network.transport_mode);
         assert_eq!(cfg.server_ip, "example.com");
         assert_eq!(cfg.server_port, 4000);
-        assert_eq!(cfg.mask_ver, TransportMode::V0);
+        assert_eq!(cfg.transport_mode, TransportMode::V0);
     }
 
     #[test]
@@ -694,8 +710,8 @@ mod tests {
             info.format,
             info.display_name,
             info.network,
-            info.keys.filled(),
-            info.keys.container_version()
+            info.keys.filled,
+            info.keys.container_version
         );
     }
 }

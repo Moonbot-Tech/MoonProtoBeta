@@ -424,23 +424,30 @@ fn queue_order_action_rejected(
     dispatcher: &mut crate::events::EventDispatcher,
     kind: &RuntimeCommandKind,
 ) {
-    let uid = match kind {
-        RuntimeCommandKind::MoveOrder { uid, .. }
-        | RuntimeCommandKind::CancelOrder { uid }
-        | RuntimeCommandKind::UpdateStops { uid, .. }
-        | RuntimeCommandKind::UpdateVStop { uid, .. }
-        | RuntimeCommandKind::TurnOrderPanicSell { uid, .. }
-        | RuntimeCommandKind::RequestOrderStatus { uid } => Some(*uid),
-        RuntimeCommandKind::SetImmune { .. }
-        | RuntimeCommandKind::SwitchPanicSellByMarket { .. } => None,
-    };
-    if let Some(uid) = uid {
-        dispatcher.queue_events([crate::events::Event::Order(
-            crate::state::OrderEvent::Ignored {
-                uid,
-                reason: crate::state::ApplyResult::NotApplicable,
-            },
-        )]);
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    {
+        let _ = (dispatcher, kind);
+    }
+    #[cfg(any(test, feature = "diagnostics"))]
+    {
+        let uid = match kind {
+            RuntimeCommandKind::MoveOrder { uid, .. }
+            | RuntimeCommandKind::CancelOrder { uid }
+            | RuntimeCommandKind::UpdateStops { uid, .. }
+            | RuntimeCommandKind::UpdateVStop { uid, .. }
+            | RuntimeCommandKind::TurnOrderPanicSell { uid, .. }
+            | RuntimeCommandKind::RequestOrderStatus { uid } => Some(*uid),
+            RuntimeCommandKind::SetImmune { .. }
+            | RuntimeCommandKind::SwitchPanicSellByMarket { .. } => None,
+        };
+        if let Some(uid) = uid {
+            dispatcher.queue_events([crate::events::Event::Order(
+                crate::state::OrderEvent::Ignored {
+                    uid,
+                    reason: crate::state::ApplyResult::NotApplicable,
+                },
+            )]);
+        }
     }
 }
 

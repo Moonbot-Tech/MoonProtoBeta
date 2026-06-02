@@ -1,18 +1,118 @@
-//! Time helpers for Delphi `TDateTime` values used by MoonProto.
+//! Time helpers used by MoonProto public API and wire adapters.
 //!
-//! MoonProto inherits MoonBot's Delphi representation: days since
-//! `1899-12-30`, stored as `f64`. This is not Unix time. Public structs keep
-//! some raw fields for byte-level compatibility and dense history storage, but
-//! application code should convert through [`DelphiTime`] instead of casting the
-//! raw day value to a Unix timestamp.
+//! Public API uses [`MoonTime`], a compact Unix-milliseconds timestamp. The
+//! Delphi `TDateTime` day value inherited from MoonBot is a wire-format detail:
+//! packets are converted at the boundary so retained histories and UI-facing
+//! rows do not carry protocol-native floating-point time.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const SECONDS_PER_DAY: f64 = 86_400.0;
 pub const MILLISECONDS_PER_DAY: f64 = 86_400_000.0;
+pub const MILLIS_PER_SECOND: i64 = 1_000;
+pub const MILLIS_PER_MINUTE: i64 = 60 * MILLIS_PER_SECOND;
+pub const MILLIS_PER_HOUR: i64 = 60 * MILLIS_PER_MINUTE;
 pub const UNIX_EPOCH_AS_DELPHI_DAYS: f64 = 25_569.0;
 
+/// Public MoonProto timestamp.
+///
+/// Stored as Unix milliseconds so hot retained-history rows stay 8 bytes wide
+/// and range scans use integer comparisons. Conversion to [`SystemTime`] is
+/// available for UI/framework integration, but the hot path does not call
+/// `SystemTime::now()` per row.
+#[repr(transparent)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MoonTime(i64);
+
+impl MoonTime {
+    pub const MIN: Self = Self(i64::MIN);
+    pub const MAX: Self = Self(i64::MAX);
+    pub const ZERO: Self = Self(0);
+
+    #[inline]
+    pub const fn from_unix_millis(millis: i64) -> Self {
+        Self(millis)
+    }
+
+    #[inline]
+    pub fn from_unix_seconds(seconds: f64) -> Option<Self> {
+        let millis = (seconds * 1000.0).round();
+        finite_f64_to_i64(millis).map(Self)
+    }
+
+    #[inline]
+    pub fn from_system_time(time: SystemTime) -> Option<Self> {
+        match time.duration_since(UNIX_EPOCH) {
+            Ok(delta) => {
+                let millis = delta.as_millis();
+                (millis <= i64::MAX as u128).then_some(Self(millis as i64))
+            }
+            Err(err) => {
+                let millis = err.duration().as_millis();
+                (millis <= i64::MAX as u128).then_some(Self(-(millis as i64)))
+            }
+        }
+    }
+
+    #[inline]
+    pub fn now() -> Self {
+        Self::from_system_time(SystemTime::now()).unwrap_or(Self::ZERO)
+    }
+
+    #[inline]
+    pub const fn unix_millis(self) -> i64 {
+        self.0
+    }
+
+    #[inline]
+    pub fn unix_seconds(self) -> f64 {
+        self.0 as f64 / 1000.0
+    }
+
+    pub fn system_time(self) -> Option<SystemTime> {
+        let duration = Duration::from_millis(self.0.unsigned_abs());
+        if self.0 >= 0 {
+            UNIX_EPOCH.checked_add(duration)
+        } else {
+            UNIX_EPOCH.checked_sub(duration)
+        }
+    }
+
+    #[inline]
+    pub(crate) fn from_delphi_days(days: f64) -> Option<Self> {
+        let millis = ((days - UNIX_EPOCH_AS_DELPHI_DAYS) * MILLISECONDS_PER_DAY).round();
+        finite_f64_to_i64(millis).map(Self)
+    }
+
+    #[inline]
+    pub(crate) fn to_delphi_days(self) -> f64 {
+        self.0 as f64 / MILLISECONDS_PER_DAY + UNIX_EPOCH_AS_DELPHI_DAYS
+    }
+}
+
+impl From<i64> for MoonTime {
+    #[inline]
+    fn from(value: i64) -> Self {
+        Self::from_unix_millis(value)
+    }
+}
+
+impl From<MoonTime> for i64 {
+    #[inline]
+    fn from(value: MoonTime) -> Self {
+        value.unix_millis()
+    }
+}
+
+fn finite_f64_to_i64(value: f64) -> Option<i64> {
+    (value.is_finite() && value >= i64::MIN as f64 && value <= i64::MAX as f64)
+        .then_some(value as i64)
+}
+
 /// Delphi `TDateTime` value: days since `1899-12-30`.
+///
+/// This is kept for protocol diagnostics and wire adapters. Normal application
+/// code should use [`MoonTime`].
 #[repr(transparent)]
 #[derive(Debug, Default, Clone, Copy, PartialEq, PartialOrd)]
 pub struct DelphiTime(f64);
@@ -46,6 +146,12 @@ impl DelphiTime {
     #[inline]
     pub fn now() -> Self {
         Self::from_system_time(SystemTime::now())
+    }
+
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn to_moon_time(self) -> Option<MoonTime> {
+        MoonTime::from_delphi_days(self.0)
     }
 
     #[inline]
@@ -100,24 +206,28 @@ mod tests {
 
     #[test]
     fn unix_epoch_roundtrip() {
+        let moon = MoonTime::from_unix_millis(0);
+        assert_eq!(moon.to_delphi_days(), UNIX_EPOCH_AS_DELPHI_DAYS);
+        assert_eq!(moon.unix_seconds(), 0.0);
+        assert_eq!(moon.unix_millis(), 0);
+
         let dt = DelphiTime::from_unix_seconds(0.0);
-        assert_eq!(dt.as_days(), UNIX_EPOCH_AS_DELPHI_DAYS);
-        assert_eq!(dt.unix_seconds(), Some(0.0));
-        assert_eq!(dt.unix_millis(), Some(0));
+        assert_eq!(dt.to_moon_time(), Some(moon));
     }
 
     #[test]
     fn system_time_roundtrip_handles_pre_epoch() {
         let before = UNIX_EPOCH - Duration::from_secs(86_400);
-        let dt = DelphiTime::from_system_time(before);
-        assert_eq!(dt.as_days(), UNIX_EPOCH_AS_DELPHI_DAYS - 1.0);
+        let moon = MoonTime::from_system_time(before).unwrap();
+        assert_eq!(moon.unix_millis(), -86_400_000);
+        assert_eq!(moon.to_delphi_days(), UNIX_EPOCH_AS_DELPHI_DAYS - 1.0);
     }
 
     #[test]
     fn known_day_converts_to_unix_millis() {
-        let dt = DelphiTime::from_days(45_000.25);
+        let dt = MoonTime::from_delphi_days(45_000.25).unwrap();
         let expected = ((45_000.25 - UNIX_EPOCH_AS_DELPHI_DAYS) * MILLISECONDS_PER_DAY) as i64;
-        assert_eq!(dt.unix_millis(), Some(expected));
+        assert_eq!(dt.unix_millis(), expected);
     }
 
     #[test]
@@ -129,10 +239,8 @@ mod tests {
             f64::MAX,
             -f64::MAX,
         ] {
-            let dt = DelphiTime::from_days(value);
-            assert_eq!(dt.unix_seconds(), None);
-            assert_eq!(dt.unix_millis(), None);
-            assert_eq!(dt.system_time(), None);
+            assert_eq!(MoonTime::from_delphi_days(value), None);
+            assert_eq!(MoonTime::from_unix_seconds(value), None);
         }
     }
 }

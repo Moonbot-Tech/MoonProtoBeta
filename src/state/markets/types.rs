@@ -128,7 +128,11 @@ pub struct MarketBalancePosition {
     pub max_value: f64,
     pub leverage_x: i32,
     pub position_type: PositionType,
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub balance_hash: u64,
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub last_balance_epoch: u16,
 }
 
@@ -161,7 +165,9 @@ impl MarketBalancePosition {
             max_value: market.max_value(),
             leverage_x: market.leverage_x,
             position_type: market.position_type,
+            #[cfg(any(test, feature = "diagnostics"))]
             balance_hash: market.balance_hash,
+            #[cfg(any(test, feature = "diagnostics"))]
             last_balance_epoch: market.last_balance_epoch,
         }
     }
@@ -171,6 +177,8 @@ impl MarketBalancePosition {
 ///
 /// Diagnostic only: it never gates protocol behavior. FireTest prints this when
 /// investigating CPU red flags around large market-list payloads.
+#[cfg(any(test, feature = "diagnostics"))]
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MarketsListApplyTiming {
     pub payload_len: usize,
@@ -182,6 +190,14 @@ pub struct MarketsListApplyTiming {
     pub corr_loop_ns: u64,
     pub ref_passes_ns: u64,
 }
+
+/// Last `GetMarketsList` apply phase timing placeholder for normal builds.
+///
+/// Normal applications do not receive this diagnostic type; the apply path also
+/// skips per-phase timers outside `test`/`diagnostics`.
+#[cfg(not(any(test, feature = "diagnostics")))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct MarketsListApplyTiming;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct MarketLastPriceHistoryInput {

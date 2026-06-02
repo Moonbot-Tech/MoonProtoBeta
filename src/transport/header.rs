@@ -32,8 +32,9 @@ const _: () = assert!(core::mem::size_of::<WireClientMsgHeader>() == CLIENT_HDR_
 
 /// Server -> Client header (7 bytes)
 #[derive(Debug, Clone, Copy)]
-pub struct ServerMsgHeader {
+pub(crate) struct ServerMsgHeader {
     /// Random byte used as the seed for outer obfuscation.
+    #[allow(dead_code)]
     pub rnd: u8,
     /// SipHash MAC stored in little-endian order on the wire.
     pub checksum: u32,
@@ -63,7 +64,7 @@ impl ServerMsgHeader {
     ///
     /// Returns `None` when `data` is shorter than `SERVER_HDR_SIZE`.
     #[inline]
-    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+    pub(crate) fn from_bytes(data: &[u8]) -> Option<Self> {
         if data.len() < SERVER_HDR_SIZE {
             return None;
         }
@@ -78,7 +79,8 @@ impl ServerMsgHeader {
 
     /// Serialize this header to the exact 7-byte wire layout.
     #[inline]
-    pub fn to_bytes(&self) -> [u8; SERVER_HDR_SIZE] {
+    #[cfg(test)]
+    pub(crate) fn to_bytes(&self) -> [u8; SERVER_HDR_SIZE] {
         let wire = WireServerMsgHeader {
             rnd: self.rnd,
             checksum: LeU32::new(self.checksum),

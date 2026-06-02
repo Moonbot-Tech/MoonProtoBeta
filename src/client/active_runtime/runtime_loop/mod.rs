@@ -12,8 +12,8 @@ use super::commands::{
 };
 use super::*;
 use crate::client::init::{RuntimeInitMachine, RuntimeInitPoll};
+use parking_lot::RwLock;
 use std::collections::VecDeque;
-use std::sync::RwLock;
 
 mod handlers;
 mod pending;
@@ -24,28 +24,28 @@ use pending::*;
 pub(super) fn runtime_loop(
     mut client: Client,
     mut dispatcher: crate::events::EventDispatcher,
-    rx: mpsc::Receiver<RuntimeCommand>,
+    rx: &mpsc::Receiver<RuntimeCommand>,
     event_sink: MoonEventSink,
     snapshot: Arc<RwLock<Option<MoonClientSnapshot>>>,
     connect: ConnectConfig,
     ready_tx: Option<mpsc::Sender<Result<(), ConnectError>>>,
+    deferred_commands: &mut VecDeque<RuntimeCommand>,
 ) {
     let api_pending = Arc::clone(&client.pending_api.api_pending);
     let mut pending = RuntimePending::default();
     let mut startup = Some(RuntimeInitMachine::new(connect, &mut dispatcher));
     let startup_started_at = Instant::now();
-    let mut deferred_commands = VecDeque::new();
     let mut dispatch_buffers = InlineDispatchBuffers::default();
     loop {
         let (stop, changed) = if startup.is_some() {
-            drain_commands_during_startup(&rx, &mut deferred_commands)
+            drain_commands_during_startup(rx, deferred_commands)
         } else {
             drain_deferred_and_live_commands(
                 &mut client,
                 &mut dispatcher,
-                &rx,
+                rx,
                 &mut pending,
-                &mut deferred_commands,
+                deferred_commands,
             )
         };
         if changed {
@@ -134,14 +134,14 @@ pub(super) fn runtime_loop(
         }
 
         let (stop, changed) = if startup.is_some() {
-            drain_commands_during_startup(&rx, &mut deferred_commands)
+            drain_commands_during_startup(rx, deferred_commands)
         } else {
             drain_deferred_and_live_commands(
                 &mut client,
                 &mut dispatcher,
-                &rx,
+                rx,
                 &mut pending,
-                &mut deferred_commands,
+                deferred_commands,
             )
         };
         if changed {
@@ -220,7 +220,7 @@ pub(super) fn publish_snapshot(
     snapshot: &RwLock<Option<MoonClientSnapshot>>,
 ) {
     let next = Arc::new(dispatcher.snapshot());
-    let mut guard = snapshot.write().unwrap();
+    let mut guard = snapshot.write();
     let revision = guard
         .as_ref()
         .map(|snapshot| snapshot.revision().saturating_add(1))
@@ -242,7 +242,7 @@ mod tests {
             server_port: 3000,
             master_key: [0; 16],
             mac_key: [0; 16],
-            mask_ver: TransportMode::V0,
+            transport_mode: TransportMode::V0,
             client_id: 0,
             ntp_host: None,
             refresh: RefreshConfig {
@@ -544,6 +544,68 @@ mod tests {
     }
 
     #[test]
+    fn startup_defers_strategy_sync_until_schema_gate_is_ready() {
+        let mut client = ready_client();
+        let mut dispatcher = crate::events::EventDispatcher::new();
+        let mut pending = RuntimePending::default();
+
+        let mut fields = StrategyFields::new();
+        fields.insert("Comment", FieldValue::String("early edit".to_string()));
+        let strategy = StrategySnapshot {
+            strategy_id: 0xE4E4,
+            strategy_ver: 1,
+            last_date: 77,
+            checked: true,
+            kind: 1,
+            path: "Local".into(),
+            fields,
+        };
+
+        let (tx, rx) = mpsc::channel();
+        tx.send(RuntimeCommand::StrategySnapshotBatch(
+            vec![strategy.clone()],
+        ))
+        .unwrap();
+
+        let mut deferred = VecDeque::new();
+        let (stop, changed) = drain_commands_during_startup(&rx, &mut deferred);
+        assert!(!stop);
+        assert!(!changed);
+        assert_eq!(deferred.len(), 1);
+        assert!(client.take_send_queues_for_test().0.is_empty());
+
+        apply_comment_strategy_schema(&mut dispatcher);
+        let (stop, changed) = drain_deferred_and_live_commands(
+            &mut client,
+            &mut dispatcher,
+            &rx,
+            &mut pending,
+            &mut deferred,
+        );
+        assert!(!stop);
+        assert!(changed);
+        assert!(deferred.is_empty());
+
+        let (sliced, high, low) = client.take_send_queues_for_test();
+        let item = sliced
+            .into_iter()
+            .chain(high)
+            .chain(low)
+            .find(|item| item.cmd == Command::Strat.to_byte())
+            .expect("deferred strategy sync must be sent after schema is available");
+        let crate::commands::strat::StratCommand::Snapshot(snapshot) =
+            crate::commands::strat::StratCommand::parse(&item.data)
+                .expect("queued strategy snapshot must parse")
+        else {
+            panic!("expected TStratSnapshot");
+        };
+        let batch = crate::commands::strategy_serializer::parse_strategy_batch(&snapshot.data)
+            .expect("deferred strategy snapshot payload must parse");
+        assert_eq!(batch.strategies.len(), 1);
+        assert_eq!(batch.strategies[0].strategy_id, strategy.strategy_id);
+    }
+
+    #[test]
     fn transfer_assets_batch_emits_completion_after_all_kinds_finish() {
         let mut pending = RuntimePending::default();
         pending
@@ -583,11 +645,11 @@ mod tests {
         let snapshot = RwLock::new(None);
 
         publish_snapshot(&dispatcher, &snapshot);
-        let first = snapshot.read().unwrap().clone().expect("first snapshot");
+        let first = snapshot.read().clone().expect("first snapshot");
         assert_eq!(first.revision(), 1);
 
         publish_snapshot(&dispatcher, &snapshot);
-        let second = snapshot.read().unwrap().clone().expect("second snapshot");
+        let second = snapshot.read().clone().expect("second snapshot");
         assert_eq!(second.revision(), 2);
         assert_eq!(second.orders().len(), first.orders().len());
     }

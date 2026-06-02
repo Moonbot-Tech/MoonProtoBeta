@@ -1,4 +1,4 @@
-use super::*;
+﻿use super::*;
 
 impl Client {
     /// Auto-compress payload if `cmd` is not yet marked with `COMPRESSED_FLAG`, size > 64 bytes
@@ -37,7 +37,7 @@ impl Client {
             cmd,
             self.cfg.client_id,
             payload,
-            self.cfg.mask_ver.to_byte(),
+            self.cfg.transport_mode.to_byte(),
             &mut self.transport.transport_mode_state,
         );
         // Take the packet out so the borrow checker does not complain about a double
@@ -63,7 +63,7 @@ impl Client {
             cmd.to_byte(),
             self.cfg.client_id,
             payload,
-            self.cfg.mask_ver.to_byte(),
+            self.cfg.transport_mode.to_byte(),
             &mut self.transport.transport_mode_state,
         );
         let packet = std::mem::take(&mut self.transport.send_buf);
@@ -94,7 +94,6 @@ impl Client {
                 self.metrics
                     .err_emu_diagnostics
                     .lock()
-                    .unwrap()
                     .record_outgoing(cmd, true);
                 if trace_io_enabled() {
                     eprintln!(
@@ -148,14 +147,12 @@ impl Client {
                 self.metrics
                     .err_emu_diagnostics
                     .lock()
-                    .unwrap()
                     .record_outgoing(cmd, false);
                 let total_sent = self
                     .metrics
                     .total_sent
                     .fetch_add(packet.len() as u64, Ordering::Relaxed)
                     + packet.len() as u64;
-                self.track_sent(packet.len() as u64, self.now_ms());
                 if trace_io_enabled() {
                     eprintln!(
                         "[mp-io-tx-ok] t={} cmd={:?} raw={} packet_len={} packet_hash={:016X} total_sent={}",

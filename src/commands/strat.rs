@@ -120,6 +120,7 @@ impl StratCheckedItem {
 }
 
 /// `TStratSnapshot` (CmdId=2). Priority=Sliced. UKey=UK_StratSnapshot (UID is always = 1, overlap).
+#[cfg_attr(feature = "diagnostics", allow(dead_code))]
 #[derive(Debug, Clone)]
 pub struct StratSnapshot {
     pub server_epoch: u64,
@@ -140,6 +141,7 @@ pub struct StratDelete {
 
 /// `TStratSellPriceUpdate` (CmdId=4). Client→server command.
 /// UKey=UK_StratSellPriceUpdate (UID = strategy_id).
+#[cfg_attr(feature = "diagnostics", allow(dead_code))]
 #[derive(Debug, Clone, Copy)]
 pub struct StratSellPriceUpdate {
     pub strategy_id: u64,
@@ -168,6 +170,7 @@ pub struct StratSchema {
 }
 
 /// All parseable incoming MPC_Strat subcommands.
+#[cfg_attr(feature = "diagnostics", allow(dead_code))]
 #[derive(Debug, Clone)]
 pub enum StratCommand {
     SnapshotRequest {

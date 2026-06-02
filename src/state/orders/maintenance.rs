@@ -91,6 +91,48 @@ impl Orders {
         events
     }
 
+    /// Delphi `TCryptoPumpTool.ShrinkOrderLines` periodically calls
+    /// `TOrderLine.ShrinkPoints(800)` for long order trace lines. Rust keeps
+    /// the same chart-ready state and shrinks only the retained line, not a raw
+    /// packet log.
+    pub(crate) fn tick_order_trace_line_shrink(&mut self, now_ms: i64) -> Vec<OrderEvent> {
+        if now_ms - self.last_order_line_shrink_ms < ORDER_TRACE_LINE_SHRINK_INTERVAL_MS {
+            return Vec::new();
+        }
+
+        let mut events = Vec::new();
+        for entry in self.map.values_mut() {
+            let needs_shrink = entry
+                .buy_trace_line
+                .as_ref()
+                .is_some_and(|line| line.needs_shrink(ORDER_TRACE_LINE_SHRINK_TO))
+                || entry
+                    .sell_trace_line
+                    .as_ref()
+                    .is_some_and(|line| line.needs_shrink(ORDER_TRACE_LINE_SHRINK_TO));
+            if !needs_shrink {
+                continue;
+            }
+
+            let entry = std::sync::Arc::make_mut(entry);
+            let mut shrunk = false;
+            if let Some(line) = entry.buy_trace_line.as_mut() {
+                shrunk |= line.shrink_points(ORDER_TRACE_LINE_SHRINK_TO) > 0;
+            }
+            if let Some(line) = entry.sell_trace_line.as_mut() {
+                shrunk |= line.shrink_points(ORDER_TRACE_LINE_SHRINK_TO) > 0;
+            }
+            if shrunk {
+                events.push(OrderEvent::TracePoint { uid: entry.uid });
+            }
+        }
+
+        if !events.is_empty() {
+            self.last_order_line_shrink_ms = now_ms;
+        }
+        events
+    }
+
     /// Read-only dirty-guard for the periodic order maintenance ticks (O1,
     /// sverka #14).
     ///
@@ -102,6 +144,18 @@ impl Orders {
     /// relevant flags rather than exact timing, so it can never skip due work.
     pub(crate) fn has_due_tick_work(&self, now_ms: i64) -> bool {
         if self.pending_removals.iter().any(|p| now_ms >= p.due_ms) {
+            return true;
+        }
+        if now_ms - self.last_order_line_shrink_ms >= ORDER_TRACE_LINE_SHRINK_INTERVAL_MS
+            && self.map.values().any(|o| {
+                o.buy_trace_line
+                    .as_ref()
+                    .is_some_and(|line| line.needs_shrink(ORDER_TRACE_LINE_SHRINK_TO))
+                    || o.sell_trace_line
+                        .as_ref()
+                        .is_some_and(|line| line.needs_shrink(ORDER_TRACE_LINE_SHRINK_TO))
+            })
+        {
             return true;
         }
         self.map.values().any(|o| {
@@ -150,5 +204,6 @@ impl Orders {
         self.pending_local_visual_orders.clear();
         self.pending_removals.clear();
         self.current_snapshot_flag = 0;
+        self.last_order_line_shrink_ms = 0;
     }
 }

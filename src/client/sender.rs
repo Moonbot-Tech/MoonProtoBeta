@@ -1,4 +1,4 @@
-﻿//! Thread-safe typed send/subscription handle.
+//! Thread-safe typed send/subscription handle.
 #![allow(dead_code)]
 
 use super::*;
@@ -272,11 +272,7 @@ impl ClientSender {
         {
             return Err(SubscribeError::DomainNotReady);
         }
-        self.shared
-            .send_lock
-            .lock()
-            .unwrap()
-            .push_send_cmd_int(item);
+        self.shared.send_lock.lock().push_send_cmd_int(item);
         Ok(())
     }
 }

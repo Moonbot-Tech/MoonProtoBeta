@@ -17,7 +17,7 @@ Use these non-blocking calls from UI/application code:
 | Transferable assets | `balances().refresh_transfer_assets()` / `balances().refresh_transfer_assets_kind(kind)` | `Event::TransferAssets`, `snapshot().transfer_assets()` |
 | Orders snapshot | `orders().request_snapshot()` | order events, `snapshot().orders()` |
 | UI settings | `settings().refresh()` | `Event::Settings`, `snapshot().settings()` |
-| CoinCard candles | `candles().request_coin_card(market, kind)` | `Event::CoinCardCandles`, `snapshot().coin_card_candles()` |
+| CoinCard candles | `candles().request_coin_card_for(&market, kind)` | `Event::CoinCardCandles`, `snapshot().coin_card_candles_for(&market, kind)` |
 | Account mutations | `account().set_leverage`, `account().set_hedge_mode`, `account().cancel_all_orders`, `account().change_position_type(market, position_type)`, `balances().convert_dust_bnb`, `account().confirm_risk_limit`, `account().set_ma_mode`, `balances().transfer_asset`, `streams().reload_order_book` | `Event::EngineAction` and normal retained state updates |
 
 Example:
@@ -38,6 +38,10 @@ if let Some(snapshot) = client.snapshot() {
 }
 ```
 
+`snapshot().account().api_expiration()` returns `ApiExpirationTime`: use
+`time()`, `system_time()`, or `days_until(now)` for UI labels instead of
+carrying the raw Engine API `Double`.
+
 ## Candles
 
 There are two user-facing candle paths:
@@ -46,9 +50,11 @@ There are two user-facing candle paths:
   initial full 5m snapshot for that storage scope, retries lost/stuck chunked
   requests by event+timeout, applies the successful snapshot to market history,
   emits `Event::CandlesSnapshot`, then keeps candles current from trades;
-- CoinCard/deep-history candles: call `candles().request_coin_card(market, kind)`,
-  wait for `Event::CoinCardCandles`, then read
-  `snapshot().coin_card_candles()`.
+- CoinCard/deep-history candles: call
+  `candles().request_coin_card_for(&market, kind)` for the selected retained
+  market, wait for `Event::CoinCardCandles`, then read
+  `snapshot().coin_card_candles_for(&market, kind)`. The string-keyed request
+  remains available for scripts/tools.
 
 Normal chart UI does not receive raw zipped chunk payloads.
 
@@ -74,8 +80,7 @@ if let Some(snapshot) = client.snapshot() {
 
 ## Low-Level Internals
 
-`EngineMethod` remains public because events and diagnostics can name server
-methods. Raw request builders and protocol receivers are crate-internal Active
-Lib machinery. Public code should not wait on raw `Receiver<EngineResponse>` or
-pick a protocol-loop duration; the application API is the owned `MoonClient`
-runtime plus events/snapshots.
+Raw request builders, request UIDs, Engine API methods, and protocol receivers
+are internal Active Lib/diagnostic machinery. Public code should not wait on raw
+`Receiver<EngineResponse>` or pick a protocol-loop duration; the application API
+is the owned `MoonClient` runtime plus events/snapshots.

@@ -6,17 +6,10 @@
 use std::env;
 use std::time::{Duration, Instant};
 
-use moonproto::state::{OrderBookEvent, OrderBookKind};
+use moonproto::state::OrderBookEvent;
 use moonproto::Event;
 
 mod common;
-
-fn kind_name(kind: OrderBookKind) -> &'static str {
-    match kind {
-        OrderBookKind::Futures => "futures",
-        OrderBookKind::Spot => "spot",
-    }
-}
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -69,7 +62,7 @@ fn main() {
                     .ask
                     .map(|level| format!("{} @ {}", level.quantity, level.rate))
                     .unwrap_or_else(|| "none".to_string());
-                println!("[top] {name} {} bid={} ask={}", kind_name(kind), bid, ask);
+                println!("[top] {name} {} bid={} ask={}", kind.as_str(), bid, ask);
             }
         }
         std::thread::sleep(Duration::from_millis(50));

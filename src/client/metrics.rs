@@ -1,8 +1,9 @@
 //! Passive protocol timing counters.
 
-use super::bps::BpsCounter;
 #[cfg(any(test, feature = "diagnostics"))]
 use super::diagnostics::ErrEmuDiagnosticsState;
+#[cfg(any(test, feature = "diagnostics"))]
+use parking_lot::Mutex;
 use std::collections::HashMap;
 #[cfg(any(test, feature = "diagnostics"))]
 use std::sync::atomic::AtomicBool;
@@ -10,8 +11,6 @@ use std::sync::atomic::AtomicU64;
 #[cfg(any(test, feature = "diagnostics"))]
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-#[cfg(any(test, feature = "diagnostics"))]
-use std::sync::Mutex;
 #[cfg(any(test, feature = "diagnostics"))]
 use std::time::{Duration, Instant};
 
@@ -30,10 +29,6 @@ pub(crate) struct ClientMetrics {
     pub(crate) total_sent: AtomicU64,
     /// Accepted UDP bytes received (shared atomic mirror of `total_recv`).
     pub(crate) total_recv_shared: AtomicU64,
-    /// O(1) EMA sliding-window byte/sec counter for the send direction.
-    pub(crate) bps_sent: BpsCounter,
-    /// O(1) EMA sliding-window byte/sec counter for the recv direction.
-    pub(crate) bps_recv: BpsCounter,
     /// Log throttle table: key -> last raise timestamp (anti-spam).
     pub(crate) log_last: HashMap<&'static str, i64>,
     /// Client-side ErrEmu packet-loss diagnostics (test-only loss emulator).
@@ -47,19 +42,23 @@ pub(crate) struct ClientMetrics {
 }
 
 impl ClientMetrics {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new_with_shared(
+        #[cfg(any(test, feature = "diagnostics"))] err_emu_diagnostics: Arc<
+            Mutex<ErrEmuDiagnosticsState>,
+        >,
+        protocol_metrics: Arc<ProtocolMetrics>,
+        #[cfg(any(test, feature = "diagnostics"))] debug_outgoing_blackhole: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             total_recv: 0,
             total_sent: AtomicU64::new(0),
             total_recv_shared: AtomicU64::new(0),
-            bps_sent: BpsCounter::new(),
-            bps_recv: BpsCounter::new(),
             log_last: HashMap::new(),
             #[cfg(any(test, feature = "diagnostics"))]
-            err_emu_diagnostics: Arc::new(Mutex::new(ErrEmuDiagnosticsState::default())),
-            protocol_metrics: Arc::new(ProtocolMetrics::default()),
+            err_emu_diagnostics,
+            protocol_metrics,
             #[cfg(any(test, feature = "diagnostics"))]
-            debug_outgoing_blackhole: Arc::new(AtomicBool::new(false)),
+            debug_outgoing_blackhole,
         }
     }
 }

@@ -7,24 +7,18 @@
 //! ## Tracked State
 //! - `ClientSettings` (CmdId=1): full UI settings snapshot.
 //! - `LevManage` (CmdId=9): leverage-management settings snapshot.
-//! - `MMOrdersSubscribe` (CmdId=5): market-maker detection subscription flag.
-//! - `SwitchDex` (CmdId=13): current DEX selector.
-//! - `SwitchSpot` (CmdId=14): current spot selector (`SpotMarketKind`).
 //! - `ArbActivateNotify` (CmdId=12): Delphi `TDateTime` expiration value.
 //!
-//! Action commands (`StratStartStop`, `ResetProfit`, `TriggerManage`,
-//! `EmuTrades`, `UpdateVersion`, `SettingsRequest`) are surfaced as
-//! `SettingsEvent` values without becoming retained state. `NewMarketNotify`
-//! is an internal Active Lib trigger: the dispatcher uses it to force listing
-//! refresh, and user code receives a market event only after the refreshed list
-//! actually inserts new markets.
+//! Client->server action commands (`SettingsRequest`, `StratStartStop`,
+//! `MMOrdersSubscribe`, `EmuTrades`, `TriggerManage`, `ResetProfit`,
+//! `SwitchDex`, `SwitchSpot`) are sent through high-level handles and ignored
+//! if they ever arrive inbound, matching the Delphi client receive branch.
+//! `NewMarketNotify` is an internal Active Lib trigger: the dispatcher uses it
+//! to force listing refresh, and user code receives a market event only after
+//! the refreshed list actually inserts new markets.
 
-use crate::commands::ui::{
-    ArbActivateNotify, ClientSettingsCommand, EmuTrades, LevManage, ResetProfit, SpotMarketKind,
-    StratStartStop, StratStartStopV2, SwitchDex, SwitchSpot, TriggerManage, UICommand,
-    UpdateVersion,
-};
-use crate::time::DelphiTime;
+use crate::commands::ui::{ClientSettingsCommand, LevManage, UICommand};
+use crate::time::MoonTime;
 
 /// Synchronized UI/settings state updated by `apply(UICommand)`.
 ///
@@ -44,14 +38,15 @@ pub struct SettingsState {
     client_settings_fallback: ClientSettingsCommand,
     /// Current leverage-management settings, if received.
     pub lev_manage: Option<LevManage>,
-    /// Whether market-maker orders are currently subscribed.
-    pub mm_orders_subscribed: bool,
-    /// Current DEX selector.
-    pub current_dex: Option<String>,
-    /// Current spot selector.
-    pub current_spot: Option<SpotMarketKind>,
-    /// `TDateTime` (Delphi double): arbitrage license expiration time.
+    /// Raw `TDateTime` days for diagnostics/parity tests.
+    ///
+    /// Normal terminal code should use [`Self::arb_valid_until_time`] and
+    /// [`Self::arb_is_active_now`] instead of carrying Delphi day doubles.
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub arb_valid_until: Option<f64>,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) arb_valid_until: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -60,36 +55,31 @@ pub enum SettingsEvent {
     ClientSettingsUpdated,
     /// Leverage-management snapshot changed.
     LevManageUpdated,
-    /// MM-orders subscription flag changed.
-    MMSubscribeChanged(bool),
-    /// Server requests the current settings snapshot again (CmdId=2).
-    SettingsRequested { uid: u64 },
-    /// Start/stop all active strategies request (v1).
-    StratStartStopRequested(StratStartStop),
-    /// Start/stop request with checked-state delta (v2).
-    StratStartStopV2Requested(StratStartStopV2),
     /// Remote update command (UI CmdId=6): version name + release/test flag.
     ///
     /// Delphi clients treat this as a request to run their local updater. The
     /// Rust state layer only surfaces the wire command; application code decides
     /// whether/how to update itself.
-    VersionUpdate(UpdateVersion),
-    /// Emulated tick series (Sliced).
-    EmuTrades(EmuTrades),
-    /// Hotkey trigger-management change.
-    TriggerManaged(TriggerManage),
-    /// Profit reset request (`kind`: 0=current, 1=all).
-    ResetProfitRequested(ResetProfit),
+    VersionUpdate {
+        #[cfg(any(test, feature = "diagnostics"))]
+        #[doc(hidden)]
+        uid: u64,
+        version_name: String,
+        is_release: bool,
+    },
     /// Arbitrage license was activated/refreshed.
-    ArbActivated(ArbActivateNotify),
-    /// Current DEX changed.
-    DexSwitched(SwitchDex),
-    /// Current spot changed.
-    SpotSwitched(SwitchSpot),
-    /// Command from a future protocol version. Low-level state API can surface it, while
-    /// `EventDispatcher` skips it like Delphi registry `FSkipped`.
+    ArbActivated {
+        #[cfg(any(test, feature = "diagnostics"))]
+        #[doc(hidden)]
+        uid: u64,
+        arb_valid: MoonTime,
+    },
+    /// Command from a future protocol version. Low-level diagnostics can surface
+    /// it, while `EventDispatcher` skips it like Delphi registry `FSkipped`.
+    #[cfg(any(test, feature = "diagnostics"))]
     Skipped { cmd_id: u8, uid: u64, ver: u16 },
     /// Unknown subcommand for forward compatibility.
+    #[cfg(any(test, feature = "diagnostics"))]
     Unknown { cmd_id: u8, uid: u64 },
 }
 
@@ -98,14 +88,26 @@ impl SettingsState {
         Self::default()
     }
 
-    pub fn arb_valid_until_time(&self) -> Option<DelphiTime> {
-        self.arb_valid_until.map(DelphiTime::from_days)
+    pub fn arb_valid_until_time(&self) -> Option<MoonTime> {
+        self.arb_valid_until.and_then(MoonTime::from_delphi_days)
+    }
+
+    /// Whether the retained arb-valid-until timestamp is still in the future.
+    pub fn arb_is_active_now(&self) -> bool {
+        self.arb_is_active_at(MoonTime::now())
+    }
+
+    /// Whether the retained arb-valid-until timestamp is later than `now`.
+    pub fn arb_is_active_at(&self, now: MoonTime) -> bool {
+        self.arb_valid_until_time()
+            .is_some_and(|valid_until| valid_until > now)
     }
 
     /// Seed Delphi `cfg` fallback used while parsing old `TClientSettingsCommand`
     /// payloads with missing append-only tail fields.
     #[doc(hidden)]
-    pub fn set_client_settings_fallback(&mut self, fallback: ClientSettingsCommand) {
+    #[cfg(test)]
+    pub(crate) fn set_client_settings_fallback(&mut self, fallback: ClientSettingsCommand) {
         self.client_settings_fallback = fallback;
     }
 
@@ -116,7 +118,7 @@ impl SettingsState {
     /// Apply an inbound UI command to retained state.
     ///
     /// Returns `None` for internal commands that have no public settings event.
-    pub fn apply(&mut self, cmd: UICommand) -> Option<SettingsEvent> {
+    pub(crate) fn apply(&mut self, cmd: UICommand) -> Option<SettingsEvent> {
         match cmd {
             UICommand::ClientSettings(c) => {
                 let settings = *c;
@@ -124,19 +126,22 @@ impl SettingsState {
                 self.client_settings = Some(settings);
                 Some(SettingsEvent::ClientSettingsUpdated)
             }
-            UICommand::SettingsRequest { uid } => Some(SettingsEvent::SettingsRequested { uid }),
+            UICommand::SettingsRequest { .. }
+            | UICommand::StratStartStop(_)
+            | UICommand::StratStartStopV2(_)
+            | UICommand::MMOrdersSubscribe(_)
+            | UICommand::EmuTrades(_)
+            | UICommand::TriggerManage(_)
+            | UICommand::ResetProfit(_)
+            | UICommand::SwitchDex(_)
+            | UICommand::SwitchSpot(_) => None,
 
-            UICommand::StratStartStop(s) => Some(SettingsEvent::StratStartStopRequested(s)),
-            UICommand::StratStartStopV2(s) => Some(SettingsEvent::StratStartStopV2Requested(s)),
-
-            UICommand::MMOrdersSubscribe(m) => {
-                self.mm_orders_subscribed = m.subscribe;
-                Some(SettingsEvent::MMSubscribeChanged(m.subscribe))
-            }
-
-            UICommand::UpdateVersion(u) => Some(SettingsEvent::VersionUpdate(u)),
-
-            UICommand::EmuTrades(e) => Some(SettingsEvent::EmuTrades(e)),
+            UICommand::UpdateVersion(u) => Some(SettingsEvent::VersionUpdate {
+                #[cfg(any(test, feature = "diagnostics"))]
+                uid: u.uid,
+                version_name: u.version_name,
+                is_release: u.is_release,
+            }),
 
             UICommand::NewMarketNotify(_) => None,
 
@@ -145,30 +150,38 @@ impl SettingsState {
                 Some(SettingsEvent::LevManageUpdated)
             }
 
-            UICommand::TriggerManage(t) => Some(SettingsEvent::TriggerManaged(t)),
-
-            UICommand::ResetProfit(r) => Some(SettingsEvent::ResetProfitRequested(r)),
-
             UICommand::ArbActivateNotify(a) => {
                 self.arb_valid_until = Some(a.arb_valid);
-                Some(SettingsEvent::ArbActivated(a))
-            }
-
-            UICommand::SwitchDex(s) => {
-                self.current_dex = Some(s.dex_name.clone());
-                Some(SettingsEvent::DexSwitched(s))
-            }
-
-            UICommand::SwitchSpot(s) => {
-                self.current_spot = Some(s.spot_index);
-                Some(SettingsEvent::SpotSwitched(s))
+                Some(SettingsEvent::ArbActivated {
+                    #[cfg(any(test, feature = "diagnostics"))]
+                    uid: a.uid,
+                    arb_valid: MoonTime::from_delphi_days(a.arb_valid).unwrap_or(MoonTime::ZERO),
+                })
             }
 
             UICommand::Skipped { cmd_id, uid, ver } => {
-                Some(SettingsEvent::Skipped { cmd_id, uid, ver })
+                #[cfg(any(test, feature = "diagnostics"))]
+                {
+                    Some(SettingsEvent::Skipped { cmd_id, uid, ver })
+                }
+                #[cfg(not(any(test, feature = "diagnostics")))]
+                {
+                    let _ = (cmd_id, uid, ver);
+                    None
+                }
             }
 
-            UICommand::Unknown { cmd_id, uid } => Some(SettingsEvent::Unknown { cmd_id, uid }),
+            UICommand::Unknown { cmd_id, uid } => {
+                #[cfg(any(test, feature = "diagnostics"))]
+                {
+                    Some(SettingsEvent::Unknown { cmd_id, uid })
+                }
+                #[cfg(not(any(test, feature = "diagnostics")))]
+                {
+                    let _ = (cmd_id, uid);
+                    None
+                }
+            }
         }
     }
 }
@@ -220,56 +233,50 @@ mod tests {
     }
 
     #[test]
-    fn mm_orders_subscribe_changes_state() {
+    fn inbound_mm_orders_subscribe_is_ignored_like_delphi_client() {
         let mut st = SettingsState::new();
-        assert!(!st.mm_orders_subscribed);
         let ev = st.apply(UICommand::MMOrdersSubscribe(MMOrdersSubscribe {
             uid: 1,
             subscribe: true,
         }));
-        assert!(matches!(ev, Some(SettingsEvent::MMSubscribeChanged(true))));
-        assert!(st.mm_orders_subscribed);
+        assert!(ev.is_none());
 
-        let _ = st.apply(UICommand::MMOrdersSubscribe(MMOrdersSubscribe {
-            uid: 2,
-            subscribe: false,
-        }));
-        assert!(!st.mm_orders_subscribed);
+        assert!(st.client_settings.is_none());
     }
 
     #[test]
-    fn dex_switch_updates_current() {
+    fn inbound_dex_switch_is_ignored_like_delphi_client() {
         let mut st = SettingsState::new();
-        assert!(st.current_dex.is_none());
         let ev = st.apply(UICommand::SwitchDex(SwitchDex {
             uid: 1,
             dex_name: "Uni".to_string(),
         }));
-        match ev {
-            Some(SettingsEvent::DexSwitched(s)) => assert_eq!(s.dex_name, "Uni"),
-            _ => panic!("wrong event"),
-        }
-        assert_eq!(st.current_dex.as_deref(), Some("Uni"));
+        assert!(ev.is_none());
     }
 
     #[test]
-    fn spot_switch_updates_index() {
+    fn inbound_spot_switch_is_ignored_like_delphi_client() {
         let mut st = SettingsState::new();
-        let _ = st.apply(UICommand::SwitchSpot(SwitchSpot {
+        let ev = st.apply(UICommand::SwitchSpot(SwitchSpot {
             uid: 1,
             spot_index: SpotMarketKind::Predict,
         }));
-        assert_eq!(st.current_spot, Some(SpotMarketKind::Predict));
+        assert!(ev.is_none());
     }
 
     #[test]
     fn arb_activate_stores_valid_until() {
         let mut st = SettingsState::new();
-        let _ = st.apply(UICommand::ArbActivateNotify(ArbActivateNotify {
+        let ev = st.apply(UICommand::ArbActivateNotify(ArbActivateNotify {
             uid: 1,
             arb_valid: 45000.5,
         }));
         assert_eq!(st.arb_valid_until, Some(45000.5));
+        assert!(matches!(
+            ev,
+            Some(SettingsEvent::ArbActivated { arb_valid, .. })
+                if arb_valid == MoonTime::from_delphi_days(45000.5).unwrap()
+        ));
     }
 
     #[test]
@@ -299,10 +306,7 @@ mod tests {
             uid: 1,
             is_start: true,
         }));
-        assert!(matches!(
-            ev,
-            Some(SettingsEvent::StratStartStopRequested(_))
-        ));
+        assert!(ev.is_none());
         // No retained state changes.
         assert!(st.client_settings.is_none());
     }

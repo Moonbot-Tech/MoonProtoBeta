@@ -7,7 +7,7 @@ fn dummy_cfg() -> ClientConfig {
         server_port: 3000,
         master_key: [0; 16],
         mac_key: [0; 16],
-        mask_ver: TransportMode::V0,
+        transport_mode: TransportMode::V0,
         client_id: 0,
         ntp_host: None,
         refresh: RefreshConfig {
@@ -56,6 +56,43 @@ fn drain_send_items(client: &Client) -> Vec<SendItem> {
 
 fn mark_post_init(client: &mut Client) {
     client.set_domain_ready(true);
+}
+
+#[test]
+fn shared_state_preserves_subscription_intent_across_runtime_rebuild() {
+    let shared = ClientSharedState::new();
+    let first = Client::new_with_shared(dummy_cfg(), shared.clone());
+    first.with_subscription_registry_mut(|registry| {
+        registry.trades_sub = Some(TradesSubscription { want_mm: true });
+        registry.mm_orders_sub = Some(false);
+        registry.orderbook_subs.insert("BTCUSDT".to_string());
+    });
+    drop(first);
+
+    let mut second = Client::new_with_shared(dummy_cfg(), shared);
+    second.with_subscription_registry(|registry| {
+        assert_eq!(
+            registry.trades_sub,
+            Some(TradesSubscription { want_mm: true })
+        );
+        assert_eq!(registry.mm_orders_sub, Some(false));
+        assert!(registry.orderbook_subs.contains("BTCUSDT"));
+    });
+
+    mark_post_init(&mut second);
+    second.server_token = 1;
+    second.restore_registry_subscriptions();
+    let sent = drain_send_items(&second);
+    assert!(
+        sent.iter().any(|item| item.cmd == Command::API.to_byte()
+            && method_id(&item.data) == Some(EngineMethod::SubscribeAllTrades.to_byte())),
+        "rebuilt client must replay the retained trades intent"
+    );
+    assert!(
+        sent.iter().any(|item| item.cmd == Command::API.to_byte()
+            && method_id(&item.data) == Some(EngineMethod::SubscribeOrderBook.to_byte())),
+        "rebuilt client must replay the retained orderbook intent"
+    );
 }
 
 #[test]

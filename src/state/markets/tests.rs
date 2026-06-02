@@ -654,6 +654,29 @@ fn direct_price_payload_clears_mark_found_on_empty_scalar_payload() {
 }
 
 #[test]
+fn direct_price_payload_rejects_impossible_huge_price_count_without_history_growth() {
+    let mut st = MarketsState::new();
+    st.apply_markets_list(MarketsListResponse {
+        markets: vec![mk_market("BTCUSDT", 0)],
+        corr_markets: vec![],
+    });
+    st.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
+
+    let mut data = Vec::new();
+    data.push(0); // HasFunding=false
+    data.extend_from_slice(&i32::MAX.to_le_bytes());
+    let mut rows = Vec::new();
+
+    let ev = st.apply_markets_prices_payload_with_local_shift(&data, 0.0, Some(&mut rows));
+
+    assert!(ev.is_none());
+    assert!(
+        rows.is_empty(),
+        "malformed UpdateMarketsList must not grow LastPrice history rows"
+    );
+}
+
+#[test]
 // parity: MoonBot MoonProtoEngine.pas:UpdateMarketsList
 fn apply_prices_updates_last_price_and_min_lot() {
     let mut market = mk_market("BTCUSDT", 0);

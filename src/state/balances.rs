@@ -30,7 +30,7 @@ pub struct GlobalBalance {
 /// Account-level balance state published through active-session snapshots.
 ///
 /// Per-market rows are read from the live markets
-/// ([`crate::events::EventDispatcherSnapshot::markets`] /
+/// ([`crate::events::MoonStateSnapshot::markets`] /
 /// [`crate::state::markets::MarketHandle::balance_position`]); this state holds
 /// only the account-level totals.
 #[derive(Debug, Clone, Default)]
@@ -39,8 +39,7 @@ pub struct BalancesState {
     pub global: GlobalBalance,
     /// Last applied balance-packet epoch. Diagnostic; per-market epoch gating
     /// lives on `Market` (Delphi `m.LastBalanceEpoch`).
-    #[doc(hidden)]
-    pub last_epoch: u16,
+    pub(crate) last_epoch: u16,
 }
 
 #[derive(Debug, Clone)]
@@ -48,20 +47,24 @@ pub enum BalanceEvent {
     /// Full snapshot applied: N markets received rows, missing rows were reset.
     SnapshotApplied {
         count: usize,
+        #[cfg(any(test, feature = "diagnostics"))]
         #[doc(hidden)]
         epoch: u16,
     },
     /// Incremental update applied.
     IncrementalApplied {
         count: usize,
+        #[cfg(any(test, feature = "diagnostics"))]
         #[doc(hidden)]
         epoch: u16,
         global_changed: bool,
     },
     /// Command was recognized, but Delphi does not apply it to balance state.
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     Ignored { cmd_id: u8, epoch: u16 },
     /// Epoch check rejected the packet as stale.
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     EpochStale { incoming: u16, last: u16 },
 }

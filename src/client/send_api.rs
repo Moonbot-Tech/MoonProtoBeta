@@ -1,4 +1,4 @@
-use super::*;
+﻿use super::*;
 
 impl Client {
     /// Public API: queue a command for sending through the owning client loop.
@@ -20,7 +20,7 @@ impl Client {
     /// block on local queue fullness and never silently drops a trading/API
     /// command because the Rust main loop is busy. If the client is gone, the
     /// command is rejected and the error is logged.
-    pub fn send_cmd(
+    pub(crate) fn send_cmd(
         &self,
         data: Vec<u8>,
         cmd: Command,
@@ -44,7 +44,7 @@ impl Client {
     /// semantics. Regular applications should use typed `Client` wrappers or
     /// [`ClientSender`], which choose the correct key, priority, encryption, and
     /// retry count.
-    pub fn send_cmd_keyed(
+    pub(crate) fn send_cmd_keyed(
         &self,
         data: Vec<u8>,
         cmd: Command,
@@ -92,7 +92,7 @@ impl Client {
         {
             return Err(SubscribeError::DomainNotReady);
         }
-        self.send_lock.lock().unwrap().push_send_cmd_int(item);
+        self.send_lock.lock().push_send_cmd_int(item);
         Ok(())
     }
 
@@ -105,7 +105,6 @@ impl Client {
         let mut low = Vec::new();
         self.send_lock
             .lock()
-            .unwrap()
             .send_queues
             .take_into(&mut sliced, &mut high, &mut low);
         (sliced, high, low)
@@ -116,7 +115,7 @@ impl Client {
         &self,
         f: impl FnOnce(&SubscriptionRegistry) -> R,
     ) -> R {
-        let registry = self.subscriptions.subscription_registry.lock().unwrap();
+        let registry = self.subscriptions.subscription_registry.lock();
         f(&registry)
     }
 
@@ -125,7 +124,7 @@ impl Client {
         &self,
         f: impl FnOnce(&mut SubscriptionRegistry) -> R,
     ) -> R {
-        let mut registry = self.subscriptions.subscription_registry.lock().unwrap();
+        let mut registry = self.subscriptions.subscription_registry.lock();
         let result = f(&mut registry);
         self.refresh_subscription_summary(&registry);
         result

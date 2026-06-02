@@ -1,22 +1,22 @@
 //! Public event/read-model types.
 
 use super::*;
+use crate::commands::engine_api::EngineMethod;
 use crate::commands::market::PositionType;
-use crate::commands::strategy_schema::StrategySchema;
-use crate::commands::strategy_serializer::StrategySnapshot;
-use crate::commands::EngineMethod;
 use crate::state::{AccountEvent, ExchangeKind};
+#[cfg(any(test, feature = "diagnostics"))]
 use crate::time::DelphiTime;
+use crate::time::MoonTime;
 
-/// Fresh strategy snapshot override returned by the application for a server
-/// `TStratSnapshotRequest`.
+#[doc(hidden)]
+/// Fresh strategy snapshot override returned by internal runtime tooling for a
+/// server `TStratSnapshotRequest`.
 ///
 /// Normal active-library flow: the application gives strategies to
-/// [`EventDispatcher::set_local_strategies`] before init, and the dispatcher
-/// uses its owned `StratsState` for the post-init snapshot and request replies.
-/// This provider is only an advanced escape hatch for callers that need to
-/// rebuild payload bytes themselves.
-pub struct StrategySnapshotReply {
+/// [`crate::InitialStrategies`] before init, and the runtime uses its owned
+/// `StratsState` for the post-init snapshot and request replies.
+/// This provider is an internal test/runtime hook, not terminal API.
+pub(crate) struct StrategySnapshotReply {
     pub server_epoch: u64,
     pub client_max_last_date: u64,
     pub full: bool,
@@ -30,7 +30,7 @@ impl StrategySnapshotReply {
     /// valid non-empty serializer payload. This matches Delphi
     /// `TStratSnapshot.CreateFromStrats([])` and prevents a normal provider from
     /// sending malformed `Size=0` snapshot data.
-    pub fn from_payload(
+    pub(crate) fn from_payload(
         server_epoch: u64,
         client_max_last_date: u64,
         full: bool,
@@ -48,45 +48,17 @@ impl StrategySnapshotReply {
             data,
         }
     }
-
-    /// Build a reply from decoded strategy snapshots.
-    ///
-    /// This is the provider-side counterpart of Delphi
-    /// `TStratSnapshot.CreateFromStrats`: it serializes the current application
-    /// strategy list, computes `ClientMaxLastDate`, and marks the packet as a
-    /// full snapshot by default. Pass the live `TStratSchema` fetched during
-    /// Init; Rust does not carry a static Delphi field/default table.
-    pub fn from_strategies(
-        server_epoch: u64,
-        full: bool,
-        schema: &StrategySchema,
-        strategies: &[StrategySnapshot],
-    ) -> Self {
-        let mut builder = crate::commands::strategy_serializer::StrategyBatchBuilder::new(schema);
-        let mut client_max_last_date = 0u64;
-        for strategy in strategies {
-            client_max_last_date = client_max_last_date.max(strategy.last_date);
-            builder.write_strategy(strategy);
-        }
-        Self {
-            server_epoch,
-            client_max_last_date,
-            full,
-            data: builder.finalize(),
-        }
-    }
 }
 
 /// Follow-up `TOrderStatusRequest` target produced after a `TAllStatuses`
 /// snapshot did not mention a locally tracked Delphi `WCache` worker.
 ///
-/// Active `MoonClient` / custom active runtimes send these automatically. Raw
-/// `EventDispatcher::dispatch_into` users can call
-/// [`EventDispatcher::missing_order_status_requests_after_snapshot`] after
-/// `OrderEvent::Snapshot` and send the returned requests through
-/// `Client::request_order_status`.
+/// Active `MoonClient` sends these automatically after applying the snapshot.
+/// The type is kept crate-private because terminal code should see the updated
+/// order state/events, not build follow-up protocol requests manually.
+#[doc(hidden)]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MissingOrderStatusRequest {
+pub(crate) struct MissingOrderStatusRequest {
     pub ctx: TradeCtx,
     pub market_name: String,
 }
@@ -97,7 +69,11 @@ pub struct WatcherFillEvent {
     /// Delphi `Round(TDateTime * MSecsPerDay)` timestamp used by `TWSFill.Time`.
     pub time_ms: i64,
     /// Shifted Delphi `TDateTime` value for consumers that work in days.
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub time: f64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) time: f64,
     pub price: f32,
     pub qty: f32,
     pub z_btc: f32,
@@ -111,13 +87,19 @@ pub struct WatcherFillEvent {
 
 impl WatcherFillEvent {
     #[inline]
+    pub fn time(&self) -> MoonTime {
+        MoonTime::from_delphi_days(self.time).unwrap_or(MoonTime::ZERO)
+    }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub fn time_delphi(&self) -> DelphiTime {
         DelphiTime::from_days(self.time)
     }
 
     #[inline]
-    pub fn unix_millis(&self) -> Option<i64> {
-        self.time_delphi().unix_millis()
+    pub fn unix_millis(&self) -> i64 {
+        self.time().unix_millis()
     }
 }
 
@@ -135,9 +117,43 @@ impl WatcherFillsEvent {
     ///
     /// Normal UI code should use [`Self::market_name`] and market handles from
     /// the snapshot/read model.
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub fn market_index(&self) -> u16 {
         self.market_index
+    }
+}
+
+/// Server-side log line mirrored by MoonProto.
+///
+/// The wire packet stores `time:TDateTime + UTF-8 text`, but terminal code
+/// should treat this as a typed log event and convert time through helpers
+/// instead of carrying raw Delphi day values around the UI.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ServerLogEvent {
+    time: f64,
+    pub msg: String,
+}
+
+impl ServerLogEvent {
+    pub(crate) fn new(time: f64, msg: String) -> Self {
+        Self { time, msg }
+    }
+
+    #[inline]
+    pub fn time(&self) -> MoonTime {
+        MoonTime::from_delphi_days(self.time).unwrap_or(MoonTime::ZERO)
+    }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
+    pub fn time_delphi(&self) -> DelphiTime {
+        DelphiTime::from_days(self.time)
+    }
+
+    #[inline]
+    pub fn unix_millis(&self) -> i64 {
+        self.time().unix_millis()
     }
 }
 
@@ -180,11 +196,26 @@ pub enum EngineActionKind {
 #[derive(Debug, Clone, PartialEq)]
 pub struct EngineActionEvent {
     pub kind: EngineActionKind,
-    pub request_uid: Option<u64>,
-    pub method: EngineMethod,
+    #[doc(hidden)]
+    pub(crate) request_uid: Option<u64>,
+    pub(crate) method: EngineMethod,
     pub success: bool,
     pub error_code: i32,
     pub error_msg: String,
+}
+
+impl EngineActionEvent {
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
+    pub fn request_uid(&self) -> Option<u64> {
+        self.request_uid
+    }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
+    pub fn method(&self) -> EngineMethod {
+        self.method
+    }
 }
 
 /// Arbitrage relay was applied to retained market state.
@@ -195,21 +226,29 @@ pub struct EngineActionEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArbEvent {
     PricesApplied {
+        #[cfg(any(test, feature = "diagnostics"))]
+        #[doc(hidden)]
         uid: u64,
+        #[cfg(any(test, feature = "diagnostics"))]
+        #[doc(hidden)]
         version: u8,
         market_blocks: usize,
         price_items: usize,
         applied_prices: usize,
     },
     IsolationApplied {
+        #[cfg(any(test, feature = "diagnostics"))]
+        #[doc(hidden)]
         uid: u64,
+        #[cfg(any(test, feature = "diagnostics"))]
+        #[doc(hidden)]
         version: u8,
         entries: usize,
         applied_entries: usize,
     },
 }
 
-/// All typed events emitted by [`EventDispatcher`].
+/// All typed events emitted by the [`crate::MoonClient`] runtime.
 #[derive(Debug)]
 pub enum Event {
     /// Order channel event: order creation, update, removal, or snapshot
@@ -247,7 +286,8 @@ pub enum Event {
     Arb(ArbEvent),
     /// Strat channel: snapshot/delete/sell-price update.
     Strat(StratEvent),
-    /// UI channel: settings updated, MM subscribe changed, etc.
+    /// UI channel receive branch: settings snapshot, leverage snapshot, remote
+    /// update request, or arbitrage activation notification.
     Settings(SettingsEvent),
     /// Markets state was updated after an Engine API response.
     Markets(MarketsEvent),
@@ -256,17 +296,20 @@ pub enum Event {
     ///
     /// Normal applications use typed domain events and `EngineAction`. This raw
     /// response is kept for diagnostics/custom tooling only.
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     EngineResponse(EngineResponse),
-    /// Server-side log message (`MPC_LogMsg`): `time:TDateTime + msg:UTF-8 rest`.
-    ServerLog { time: f64, msg: String },
+    /// Authenticated server-side log line (`MPC_LogMsg`).
+    ServerLog(ServerLogEvent),
     /// Raw payload for channels the dispatcher does not parse.
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     Raw { cmd: Command, payload: Vec<u8> },
     /// Payload parsing failed.
     ///
     /// `payload` is cloned only on failure so live diagnostics can dump the
     /// exact bytes that failed to parse without adding work to the normal path.
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     ParseFailed {
         cmd: Command,
@@ -276,9 +319,9 @@ pub enum Event {
 }
 
 impl Event {
-    pub fn server_log_time(&self) -> Option<DelphiTime> {
+    pub fn server_log_time(&self) -> Option<MoonTime> {
         match self {
-            Self::ServerLog { time, .. } => Some(DelphiTime::from_days(*time)),
+            Self::ServerLog(log) => Some(log.time()),
             _ => None,
         }
     }

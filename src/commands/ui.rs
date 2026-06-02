@@ -22,15 +22,17 @@
 //! `TAutoStartConfig` (104 bytes) and `TAutoStartConfig2` (168 bytes) are
 //! Delphi packed records from `Config.pas`. On the wire they are encoded as
 //! `Word size + bytes(size)` with soft-read semantics: extra tail bytes are
-//! skipped and short payloads are partially copied. MoonProto stores them as
-//! raw blobs because there is no stable public Active Lib model for those
-//! nested UI-only settings yet.
+//! skipped and short payloads are partially copied. Active Lib preserves the
+//! hidden blobs for exact roundtrip and exposes typed `AutoStartConfig` /
+//! `AutoStartConfig2` views for terminal UI edits.
 //!
 //! ## ArbConfig compact format
 //! This is not a raw Delphi record. The wire form is
 //! `ver:byte + wantedSet:bytes(32) + flags:byte + colorCount:byte +
 //! colorCount*5 bytes`. `wantedSet` is Delphi `set of byte`
 //! (32 bytes = 256-bit mask).
+
+#![cfg_attr(feature = "diagnostics", allow(dead_code))]
 
 use super::registry::{decode_utf8_delphi, read_string, write_string, CURRENT_PROTO_CMD_VER};
 use super::strat::StratCheckedItem;
@@ -68,9 +70,11 @@ const CMD_SWITCH_SPOT: u8 = 14;
 const LEV_CMD_VER: u8 = 1;
 
 /// `TAutoStartConfig` packed record size in bytes (Config.pas:344).
-pub const AS_CFG_SIZE: usize = 104;
+#[doc(hidden)]
+pub(crate) const AS_CFG_SIZE: usize = 104;
 /// `TAutoStartConfig2` packed record size in bytes (Config.pas:384).
-pub const AS_CFG2_SIZE: usize = 168;
+#[doc(hidden)]
+pub(crate) const AS_CFG2_SIZE: usize = 168;
 
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
@@ -233,9 +237,9 @@ impl WireAutoStartConfig2 {
     fn to_public(self) -> AutoStartConfig2 {
         AutoStartConfig2 {
             restart_on_market: self.restart_on_market != 0,
-            btc_higher_then: self.btc_higher_then.get(),
-            btc_lower_then: self.btc_lower_then.get(),
-            market_higher_then: self.market_higher_then.get(),
+            btc_higher_than: self.btc_higher_then.get(),
+            btc_lower_than: self.btc_lower_then.get(),
+            market_higher_than: self.market_higher_then.get(),
             show_old_listing: self.show_old_listing != 0,
             reset_session: self.reset_session != 0,
             max_session_cap: self.max_session_cap.get(),
@@ -245,9 +249,9 @@ impl WireAutoStartConfig2 {
 
     fn write_public(&mut self, cfg: &AutoStartConfig2) {
         self.restart_on_market = cfg.restart_on_market as u8;
-        self.btc_higher_then = LeF64::new(cfg.btc_higher_then);
-        self.btc_lower_then = LeF64::new(cfg.btc_lower_then);
-        self.market_higher_then = LeF64::new(cfg.market_higher_then);
+        self.btc_higher_then = LeF64::new(cfg.btc_higher_than);
+        self.btc_lower_then = LeF64::new(cfg.btc_lower_than);
+        self.market_higher_then = LeF64::new(cfg.market_higher_than);
         self.show_old_listing = cfg.show_old_listing as u8;
         self.reset_session = cfg.reset_session as u8;
         self.max_session_cap = LeI32::new(cfg.max_session_cap);
@@ -312,9 +316,9 @@ pub struct AutoStartConfig {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct AutoStartConfig2 {
     pub restart_on_market: bool,
-    pub btc_higher_then: f64,
-    pub btc_lower_then: f64,
-    pub market_higher_then: f64,
+    pub btc_higher_than: f64,
+    pub btc_lower_than: f64,
+    pub market_higher_than: f64,
     pub show_old_listing: bool,
     pub reset_session: bool,
     pub max_session_cap: i32,
@@ -375,14 +379,14 @@ pub struct EmuTradePoint {
 /// Active Lib converts that path into signed [`EmuTradePoint`] rows.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EmuPencilPoint {
-    /// Absolute Delphi chart time.
-    pub time: crate::DelphiTime,
+    /// Absolute chart time.
+    pub time: crate::MoonTime,
     /// Drawn chart price.
     pub price: f32,
 }
 
 impl EmuPencilPoint {
-    pub const fn new(time: crate::DelphiTime, price: f32) -> Self {
+    pub const fn new(time: crate::MoonTime, price: f32) -> Self {
         Self { time, price }
     }
 }
@@ -462,8 +466,9 @@ impl EmuTradePoint {
 //  Subcommand payloads
 // =============================================================================
 
-/// User-facing join-sells mode stored in
-/// [`ClientSettingsCommand::join_sell_kind`].
+/// User-facing join-sells mode returned by
+/// [`ClientSettingsCommand::join_sell_mode`] and accepted by
+/// [`ClientSettingsCommand::set_join_sell_mode`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JoinSellKind {
     None,
@@ -473,7 +478,18 @@ pub enum JoinSellKind {
 }
 
 impl JoinSellKind {
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub fn from_byte(value: u8) -> Self {
+        Self::from_byte_inner(value)
+    }
+
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) fn from_byte(value: u8) -> Self {
+        Self::from_byte_inner(value)
+    }
+
+    fn from_byte_inner(value: u8) -> Self {
         match value {
             0 => Self::None,
             1 => Self::FixedPrice,
@@ -482,7 +498,18 @@ impl JoinSellKind {
         }
     }
 
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub fn to_byte(self) -> u8 {
+        self.to_byte_inner()
+    }
+
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) fn to_byte(self) -> u8 {
+        self.to_byte_inner()
+    }
+
+    fn to_byte_inner(self) -> u8 {
         match self {
             Self::None => 0,
             Self::FixedPrice => 1,
@@ -534,14 +561,18 @@ impl TempBlacklistEntry<'_> {
 ///     client.settings().send(settings);
 /// }
 /// ```
-/// `uid` is `0` by default. High-level send helpers write a fresh wire UID and
-/// use Delphi's fixed settings UKey slot for queue deduplication. Set this
-/// field manually only when using the low-level builder directly.
+/// High-level send helpers write a fresh wire UID and use Delphi's fixed
+/// settings UKey slot for queue deduplication. Terminal UI edits the settings
+/// values below; it does not choose the wire UID.
 #[derive(Debug, Clone, Default)]
 pub struct ClientSettingsCommand {
     /// Wire command UID. Leave it as `0` when using high-level send helpers.
     /// Set it manually only when using `build_client_settings` directly.
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub uid: u64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) uid: u64,
     // --- always present (v1+) ---
     pub x_sell: i32,
     pub x_sell_scalp: i32,
@@ -552,7 +583,11 @@ pub struct ClientSettingsCommand {
     pub trailing_drop: f32,
     pub g_take_profit: f64,
     pub use_g_take_profit: bool,
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub unused_spread: i32,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) unused_spread: i32,
     pub panic_if_price_drop: bool,
     pub emu_mode: bool,
     // --- v2+ ---
@@ -565,9 +600,17 @@ pub struct ClientSettingsCommand {
     // --- always present (v1+) ---
     pub coins_black_list_text: String,
     pub use_coins_black_list: bool,
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub temp_bl_symbols: Vec<String>,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) temp_bl_symbols: Vec<String>,
     /// `TempBLTimes[i]: TDateTime` delta in days.
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub temp_bl_times: Vec<f64>,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) temp_bl_times: Vec<f64>,
     // --- soft-read tail (optional in older packets) ---
     pub use_manual_strategy: bool,
     pub manual_strategy_id: u64,
@@ -575,15 +618,27 @@ pub struct ClientSettingsCommand {
     pub vol_drop_level: i32,
     pub use_stop_market: bool,
     /// `TAutoStartConfig` blob (104 bytes in the current Delphi version).
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub as_cfg: Vec<u8>,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) as_cfg: Vec<u8>,
     /// `TAutoStartConfig2` blob (168 bytes in the current Delphi version).
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub as_cfg2: Vec<u8>,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) as_cfg2: Vec<u8>,
     /// HotkeysConfig.SPrice[1..6].
     pub s_price: [f32; 6],
     /// HotkeysConfig.sbNum.
     pub sb_num: u8,
     /// MultiOrders.JoinSellKind (TJoinSellKind: 0=None, 1=FixPrice, 2=FixProfit).
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub join_sell_kind: u8,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) join_sell_kind: u8,
     /// Compact `ArbConfig` form, not a raw Delphi record.
     pub arb_config: ArbConfigCompact,
 }
@@ -628,7 +683,7 @@ impl ClientSettingsCommand {
         usize::from(self.sb_num.clamp(1, 6))
     }
 
-    /// Raw current fixed-sell preset value selected by [`Self::selected_fixed_sell_slot`].
+    /// Current fixed-sell preset value selected by [`Self::selected_fixed_sell_slot`].
     pub fn selected_fixed_sell_price(&self) -> f32 {
         self.s_price[self.selected_fixed_sell_slot() - 1]
     }
@@ -658,6 +713,24 @@ impl ClientSettingsCommand {
                 symbol,
                 remaining_days: *remaining_days,
             })
+    }
+
+    /// Replace temporary coin-blacklist rows as one typed UI list.
+    ///
+    /// Delphi stores this as two parallel arrays (`TempBLSymbols` and
+    /// `TempBLTimes`). Terminal code should edit rows as `(symbol,
+    /// remaining_days)`; the wire arrays are rebuilt here for exact roundtrip.
+    pub fn set_temp_blacklist_entries<I, S>(&mut self, entries: I)
+    where
+        I: IntoIterator<Item = (S, f64)>,
+        S: Into<String>,
+    {
+        self.temp_bl_symbols.clear();
+        self.temp_bl_times.clear();
+        for (symbol, remaining_days) in entries {
+            self.temp_bl_symbols.push(symbol.into());
+            self.temp_bl_times.push(remaining_days);
+        }
     }
 
     /// Decode the AutoStart settings page from the retained 104-byte blob.
@@ -705,14 +778,22 @@ impl ClientSettingsCommand {
 /// CmdId=3 `TStratStartStopCommand`. Boolean IsStart.
 #[derive(Debug, Clone, Copy)]
 pub struct StratStartStop {
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub uid: u64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) uid: u64,
     pub is_start: bool,
 }
 
 /// CmdId=4 `TStratStartStopCommandV2`, carrying checked-strategy deltas.
 #[derive(Debug, Clone)]
 pub struct StratStartStopV2 {
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub uid: u64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) uid: u64,
     pub is_start: bool,
     pub items: Vec<StratCheckedItem>,
 }
@@ -720,7 +801,11 @@ pub struct StratStartStopV2 {
 /// CmdId=5 `TMMOrdersSubscribeCommand`.
 #[derive(Debug, Clone, Copy)]
 pub struct MMOrdersSubscribe {
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub uid: u64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) uid: u64,
     pub subscribe: bool,
 }
 
@@ -732,7 +817,11 @@ pub struct MMOrdersSubscribe {
 /// update button; a non-empty name targets a test/beta build name.
 #[derive(Debug, Clone)]
 pub struct UpdateVersion {
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub uid: u64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) uid: u64,
     pub version_name: String,
     pub is_release: bool,
 }
@@ -740,8 +829,16 @@ pub struct UpdateVersion {
 /// CmdId=7 `TEmuTradesCommand` (Priority=Sliced), emulated ticks for one market.
 #[derive(Debug, Clone)]
 pub struct EmuTrades {
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub uid: u64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) uid: u64,
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub m_index: u16,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) m_index: u16,
     /// `BaseTime: TDateTime` (Delphi double, days since 1899-12-30).
     pub base_time: f64,
     pub points: Vec<EmuTradePoint>,
@@ -750,16 +847,28 @@ pub struct EmuTrades {
 /// CmdId=8 `TNewMarketNotifyCommand` (empty body, Priority=High).
 #[derive(Debug, Clone, Copy)]
 pub struct NewMarketNotify {
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub uid: u64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) uid: u64,
 }
 
 /// CmdId=9 `TLevManageCommand` (Sliced, UK_LevManageSettings).
 #[derive(Debug, Clone)]
 pub struct LevManage {
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub uid: u64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) uid: u64,
     /// Version byte read from the incoming command. Outgoing builder always writes
     /// Delphi's `LevCmdVer = 1`, regardless of this read-model field.
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub cmd_ver: u8,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) cmd_ver: u8,
     pub auto_max_order: bool,
     pub auto_lev_up: bool,
     pub auto_isolated: bool,
@@ -773,23 +882,38 @@ pub struct LevManage {
 /// CmdId=10 `TTriggerManageCommand`.
 #[derive(Debug, Clone)]
 pub struct TriggerManage {
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub uid: u64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) uid: u64,
     /// 0 = Clear, 1 = Set.
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub action: u8,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) action: u8,
     pub all_markets: bool,
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub markets: Vec<u16>,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) markets: Vec<u16>,
     pub keys: Vec<u16>,
 }
 
 /// CmdId=11 `TResetProfitCommand`.
 #[derive(Debug, Clone, Copy)]
 pub struct ResetProfit {
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub uid: u64,
-    /// 0 = CurProfit, 1 = AllProfit.
-    pub reset_kind: u8,
+    pub kind: ResetProfitKind,
 }
 
-/// Trigger-management action for [`crate::MoonSettings::manage_triggers`].
+/// Trigger-management action for
+/// [`crate::MoonSettings::manage_triggers_for_markets`] and all-market trigger
+/// helpers.
 ///
 /// Maps the Delphi `TTriggerManageCommand.Action` byte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -798,14 +922,47 @@ pub enum TriggerAction {
     Clear,
     /// Set/arm the listed triggers (Delphi `Action = 1`).
     Set,
+    /// Future/unknown action byte preserved for diagnostics/roundtrip.
+    Unknown(u8),
 }
 
 impl TriggerAction {
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
+    pub const fn from_byte(value: u8) -> Self {
+        Self::from_byte_inner(value)
+    }
+
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) const fn from_byte(value: u8) -> Self {
+        Self::from_byte_inner(value)
+    }
+
+    const fn from_byte_inner(value: u8) -> Self {
+        match value {
+            0 => Self::Clear,
+            1 => Self::Set,
+            other => Self::Unknown(other),
+        }
+    }
+
     /// Delphi wire ordinal: `Clear = 0`, `Set = 1`.
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub const fn to_byte(self) -> u8 {
+        self.to_byte_inner()
+    }
+
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) const fn to_byte(self) -> u8 {
+        self.to_byte_inner()
+    }
+
+    const fn to_byte_inner(self) -> u8 {
         match self {
             Self::Clear => 0,
             Self::Set => 1,
+            Self::Unknown(value) => value,
         }
     }
 }
@@ -819,14 +976,47 @@ pub enum ResetProfitKind {
     CurrentProfit,
     /// Reset the all-time accumulated profit (Delphi `ResetKind = 1`).
     AllProfit,
+    /// Future/unknown reset kind preserved from the Delphi byte.
+    Unknown(u8),
 }
 
 impl ResetProfitKind {
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
+    pub const fn from_byte(value: u8) -> Self {
+        Self::from_byte_inner(value)
+    }
+
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) const fn from_byte(value: u8) -> Self {
+        Self::from_byte_inner(value)
+    }
+
+    const fn from_byte_inner(value: u8) -> Self {
+        match value {
+            0 => Self::CurrentProfit,
+            1 => Self::AllProfit,
+            other => Self::Unknown(other),
+        }
+    }
+
     /// Delphi wire ordinal: `CurrentProfit = 0`, `AllProfit = 1`.
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub const fn to_byte(self) -> u8 {
+        self.to_byte_inner()
+    }
+
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) const fn to_byte(self) -> u8 {
+        self.to_byte_inner()
+    }
+
+    const fn to_byte_inner(self) -> u8 {
         match self {
             Self::CurrentProfit => 0,
             Self::AllProfit => 1,
+            Self::Unknown(value) => value,
         }
     }
 }
@@ -834,7 +1024,11 @@ impl ResetProfitKind {
 /// CmdId=12 `TArbActivateNotify`.
 #[derive(Debug, Clone, Copy)]
 pub struct ArbActivateNotify {
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub uid: u64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) uid: u64,
     /// `ArbValid: TDateTime`.
     pub arb_valid: f64,
 }
@@ -844,7 +1038,11 @@ pub struct ArbActivateNotify {
 /// 15 ASCII bytes.
 #[derive(Debug, Clone)]
 pub struct SwitchDex {
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub uid: u64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) uid: u64,
     pub dex_name: String,
 }
 
@@ -861,11 +1059,25 @@ impl SpotMarketKind {
     pub const Crypto: Self = Self(0);
     pub const Predict: Self = Self(1);
 
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub const fn from_byte(value: u8) -> Self {
         Self(value)
     }
 
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) const fn from_byte(value: u8) -> Self {
+        Self(value)
+    }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub const fn to_byte(self) -> u8 {
+        self.0
+    }
+
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) const fn to_byte(self) -> u8 {
         self.0
     }
 
@@ -895,7 +1107,11 @@ impl std::fmt::Debug for SpotMarketKind {
 /// CmdId=14 `TSwitchSpotCommand` (High, UK_SpotSwitch).
 #[derive(Debug, Clone, Copy)]
 pub struct SwitchSpot {
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub uid: u64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) uid: u64,
     pub spot_index: SpotMarketKind,
 }
 

@@ -2,18 +2,25 @@ use super::*;
 
 impl Client {
     pub(crate) fn parse_sliced_ack_payload(payload: &[u8]) -> Option<SlicedAck> {
-        // Delphi OnNewSlicedACK reads Flags(32 bytes) + DatagramNum(2 bytes)
+        // Delphi OnNewSlicedACK reads Flags(32) + DatagramNum(2) + Session(4)
         // from the command payload after the transport header.
-        let (flags, datagram_num) = slicing::parse_ack_bytes(payload)?;
+        let (flags, datagram_num, session) = slicing::parse_ack_bytes(payload)?;
         Some(SlicedAck {
             flags,
             datagram_num,
+            session,
         })
     }
 
-    pub(crate) fn push_sliced_ack_payload(send_lock: &Arc<Mutex<SendLockState>>, payload: &[u8]) {
+    pub(crate) fn push_sliced_ack_payload(
+        send_lock: &Arc<Mutex<SendLockState>>,
+        payload: &[u8],
+        expected_session: u32,
+    ) {
         if let Some(ack) = Self::parse_sliced_ack_payload(payload) {
-            send_lock.lock().unwrap().push_sliced_ack(ack);
+            if ack.session == expected_session {
+                send_lock.lock().push_sliced_ack(ack);
+            }
         }
     }
 
@@ -95,11 +102,11 @@ impl Client {
             self.used_sliced_limit = false;
         }
 
-        // DataReadInt(MPC_Ping): write server ACK bitmap into TmpSlider.
-        self.send_lock
-            .lock()
-            .unwrap()
-            .apply_ping_ack_bitmap(payload);
+        // DataReadInt(MPC_Ping): write server ACK bitmap into TmpSlider only
+        // when it belongs to this hard session.
+        if ping.ack_session == self.ack_session32_value {
+            self.send_lock.lock().apply_ping_ack_bitmap(payload);
+        }
 
         // ClientNewData(MPC_Ping): update wall-clock deltas before SendPing.
         self.ping_count = self.ping_count.wrapping_add(1);
@@ -122,6 +129,7 @@ impl Client {
             total_sent_before_ping,
             total_recv_after_packet,
             ack_start,
+            self.ack_session32_value,
         );
         for word in &ack_words {
             response.extend_from_slice(&word.to_le_bytes());
@@ -132,7 +140,7 @@ impl Client {
 
     #[cfg(test)]
     pub(crate) fn on_new_sliced_ack(&self, payload: &[u8]) {
-        Self::push_sliced_ack_payload(&self.send_lock, payload);
+        Self::push_sliced_ack_payload(&self.send_lock, payload, self.ack_session32_value);
     }
 
     pub(crate) fn apply_sliced_ack(&mut self, ack: SlicedAck, _now_ms: i64) {
@@ -223,17 +231,28 @@ impl Client {
     // Private API responses are dropped too, but AFTER optional decompression
     // (their method id lives inside the EngineResponse body). Only the public
     // market feed (identical to the exchange's own) stays plaintext.
+    //
     // AEAD over that feed would not shrink the attacker's worst case: the same
     // on-path attacker can drop packets, and for a leveraged client a dropped
     // channel is the dominant, unpreventable harm (loss of position control ->
-    // liquidation). Feed forge/replay is strictly weaker — account/order integrity
-    // stays under AES-GCM (the core executes, not the display), the display
-    // self-corrects on the next live packet unless the attacker also drops (the
-    // dominant-harm regime again), and the residual is bounded well below a
-    // liquidation; keyless forgery is anyway a 2^32 brute force. So the per-packet
-    // nonce+tag cost on the highest-volume public path buys nothing the drop does
-    // not already grant. Integrity is enforced where it changes account state (the
-    // AES-GCM gate).
+    // liquidation). Account/order integrity stays under the AES-GCM gate above, so
+    // the core executes on authenticated input, never on the feed; keyless forgery
+    // of a feed packet is a 2^32 transport-MAC brute force per delivered packet.
+    //
+    // This argument has a precondition that is NOT free: a forged/corrupt feed
+    // packet must do no worse than inject wrong values that the next live packet
+    // overwrites. That holds only while every plaintext-reachable parser does
+    // bounded work and stays panic-averse on arbitrary bytes — a loop over an
+    // attacker-chosen wire count, an unbounded allocation sized from one, or a
+    // panic would turn a single forged packet into a freeze/crash, i.e. back into
+    // the dominant-harm regime, and would defeat this rationale (not "strictly
+    // weaker than a drop"). It is enforced two ways across the plaintext-reachable
+    // parsers: bounded count readers that clamp a wire count to the remaining bytes
+    // and a hard cap (EngineStreamReader::read_count_bounded, e.g. the price loop),
+    // and fail-fast field readers that return None at end-of-buffer (read_string /
+    // strict_read), so a loop over a wire count either clamps up front or breaks on
+    // the first short field instead of spinning. Preserve one of those bounds when
+    // adding any plaintext-reachable parser.
     fn drop_plaintext_sensitive(real_cmd: u8) -> bool {
         matches!(
             Command::from_byte(real_cmd),
@@ -308,9 +327,8 @@ impl Client {
 
         if cmd & COMPRESSED_FLAG != 0 {
             cmd &= 0x7F;
-            if let Some(decompressed) = compression::mp_decompress(&payload) {
-                payload = Cow::Owned(decompressed);
-            }
+            let decompressed = compression::mp_decompress(&payload)?;
+            payload = Cow::Owned(decompressed);
         }
 
         // Public bulk API responses may be plaintext; everything else in API is
@@ -365,9 +383,7 @@ impl Client {
 
         if cmd & COMPRESSED_FLAG != 0 {
             cmd &= 0x7F;
-            if let Some(decompressed) = compression::mp_decompress(&payload) {
-                payload = decompressed;
-            }
+            payload = compression::mp_decompress(&payload)?;
         }
 
         // Public bulk API responses may be plaintext; everything else in API is

@@ -34,6 +34,7 @@ same cryptographic keys plus `display_name` equivalent to MoonBot's
 endpoint/transport settings from current key exports. Those suggestions are not
 mandatory: applications can pre-fill controls from them and then connect with
 whatever host, port, and mode the user selected.
+If the UI needs the key date separately, use `info.date()`.
 
 ```rust
 let info = moonproto::parse_key_info(KEY_B64).expect("invalid key");
@@ -41,7 +42,7 @@ ui.key_label = info.display_name;
 if let Some(network) = info.network {
     ui.host = network.address.map(|ip| ip.to_string()).unwrap_or_default();
     ui.port = network.port;
-    ui.transport_mode = network.mask_ver;
+    ui.transport_mode = network.transport_mode;
 }
 ```
 
@@ -400,8 +401,8 @@ order snapshot request, full client strategy snapshot from the runtime-owned
 local strategy list, settings request, MM-orders subscription state, and balance
 refresh request. When the server later sends `TStratSnapshotRequest`, the
 runtime replies from the same current local strategy list; an empty list is a
-valid non-empty serializer payload.
-`SnapshotRequested` is still queued for UI/diagnostic awareness. Set
+valid non-empty serializer payload. Terminal code does not build or send this
+reply manually. Set
 `InitConfig::mm_orders_subscribe` when the UI needs a heat-map MM-orders
 subscription value. If it is `None`, a previously queued
 `set_mm_orders_subscription` intent is used; otherwise the post-init UI command
@@ -416,10 +417,9 @@ Typed outgoing domain helpers use the same Init gate. Before Init:
 subscription packets into the send queue; trade wrappers, UI wrappers, strategy
 wrappers, and `balance_request_refresh` queue nothing. Stateful order helpers
 such as replace/cancel/stop/VStop/immune also do not mutate the local `Orders`
-cache before Init. Raw `send_cmd`, `send_cmd_keyed`, and raw `api_*` helpers do
-not bypass this gate: until Init opens the domain, the only Engine API requests
-accepted by the raw path are the mandatory init primitives `BaseCheck`,
-`AuthCheck`, `GetMarketsList`, and `UpdateMarketsList`.
+cache before Init. The mandatory init primitives (`BaseCheck`, `AuthCheck`,
+`GetMarketsList`, `UpdateMarketsList`, and the strategy schema request) are
+owned by the runtime, not by application code.
 Balance bootstrap uses the post-init `TRequestBalanceRefresh`, matching the
 MoonProto Delphi client where `GetMarketsBalanceFull` returns success without a
 serialized balance snapshot.
@@ -452,21 +452,26 @@ User-facing UI refreshes and mutations use non-blocking Active Lib intents:
 client.account().refresh_hedge_mode()?; // async; read Event::Account + snapshot().account()
 client.account().refresh_api_expiration_time()?; // async; read Event::Account + snapshot().account()
 client.balances().refresh_transfer_assets()?; // async; read snapshot().transfer_assets()
-let coin_card_ticket = client.candles().request_coin_card(
-    "BTCUSDT",
-    moonproto::DeepHistoryKind::Hour4,
-)?;
+if let Some(snapshot) = client.snapshot() {
+    if let Some(market) = snapshot.markets().get("BTCUSDT") {
+        let _coin_card_ticket = client
+            .candles()
+            .request_coin_card_for(&market, moonproto::DeepHistoryKind::Hour4)?;
+    }
+}
 client.settings().refresh()?; // async; read Event::Settings + snapshot().settings()
 client.account().set_leverage("BTCUSDT", 20)?;
 client.account().set_hedge_mode(true)?;
 client.account().confirm_risk_limit("BTCUSDT")?;
 ```
 
-`candles().request_coin_card` is intentionally non-blocking even though the
-underlying Delphi `Engine.getDeepHistory` call is blocking: Delphi UI sets a
-need flag and the background worker fills `TMarket.CoinCardCandles`. In Rust,
-completion arrives as `Event::CoinCardCandles` and the rows are readable through
-`snapshot().coin_card_candles()`.
+`candles().request_coin_card_for(&market, kind)` is intentionally non-blocking
+even though the underlying Delphi `Engine.getDeepHistory` call is blocking:
+Delphi UI sets a need flag on the selected `TMarket` and the background worker
+fills `TMarket.CoinCardCandles`. In Rust, completion arrives as
+`Event::CoinCardCandles` and the rows are readable through
+`snapshot().coin_card_candles_for(&market, kind)`. The string-keyed
+`request_coin_card(market, kind)` variant is a convenience for scripts/tools.
 
 Chunked candles use a dedicated aggregator rather than the normal one-response
 pending slot. Active Lib sends the full 5m snapshot request automatically after
@@ -501,7 +506,7 @@ for event in client.drain_events() {
 If an application already has local UI settings before connecting, pass them in
 the active-library init/settings path. This preserves Delphi soft-read behavior
 for old settings snapshots: missing tail fields keep the current local values
-(`FreePositionCheck`, `VolDropLevel`, `UseStopMarket`, auto-start blobs, hotkey
+(`FreePositionCheck`, `VolDropLevel`, `UseStopMarket`, AutoStart settings, hotkey
 prices, `JoinSellKind`, and `SignOrders` for old versions) instead of being
 reset to Rust defaults.
 

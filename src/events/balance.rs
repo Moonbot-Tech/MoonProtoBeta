@@ -1,4 +1,4 @@
-//! Active `MPC_Balance` dispatch.
+﻿//! Active `MPC_Balance` dispatch.
 //!
 //! Mirrors Delphi balance/arb receive routing: parse subcommand, apply balances
 //! against known markets, and expose compact arbitrage payload only for known
@@ -17,7 +17,7 @@ impl EventDispatcher {
         out: &mut Vec<Event>,
     ) {
         if payload.len() < 11 {
-            out.push(Self::parse_failed(Command::Balance, payload));
+            Self::push_parse_failed(out, Command::Balance, payload);
             return;
         }
         let sub_cmd_id = payload[0];
@@ -31,14 +31,15 @@ impl EventDispatcher {
             3 | 4 => match parse_balance(sub_cmd_id, body) {
                 Some(upd) => {
                     // Single Delphi-parity apply: per-market into live markets.
-                    let ev = self.markets.apply_balance_update(&upd);
-                    // Account total PnL recomputed from the just-updated markets
-                    // (Delphi `RecalcTotalPnl`), then account globals applied.
-                    let total_pnl = self.markets.sum_btc_total_profit();
-                    self.balances.apply_global(&upd, total_pnl);
-                    out.push(Event::Balance(ev));
+                    if let Some(ev) = self.markets.apply_balance_update(&upd) {
+                        // Account total PnL recomputed from the just-updated markets
+                        // (Delphi `RecalcTotalPnl`), then account globals applied.
+                        let total_pnl = self.markets.sum_btc_total_profit();
+                        self.balances.apply_global(&upd, total_pnl);
+                        out.push(Event::Balance(ev));
+                    }
                 }
-                None => out.push(Self::parse_failed(Command::Balance, payload)),
+                None => Self::push_parse_failed(out, Command::Balance, payload),
             },
             6 => match parse_arb_prices(payload) {
                 Some(arb) => {
@@ -56,10 +57,14 @@ impl EventDispatcher {
                         );
                         out.push(match &parsed {
                             ArbPayload::Price { version, blocks } => {
+                                #[cfg(not(any(test, feature = "diagnostics")))]
+                                let _ = version;
                                 let price_items =
                                     blocks.iter().map(|block| block.prices.len()).sum();
                                 Event::Arb(ArbEvent::PricesApplied {
+                                    #[cfg(any(test, feature = "diagnostics"))]
                                     uid: arb.uid,
+                                    #[cfg(any(test, feature = "diagnostics"))]
                                     version: *version,
                                     market_blocks: blocks.len(),
                                     price_items,
@@ -67,8 +72,12 @@ impl EventDispatcher {
                                 })
                             }
                             ArbPayload::Isolation { version, entries } => {
+                                #[cfg(not(any(test, feature = "diagnostics")))]
+                                let _ = version;
                                 Event::Arb(ArbEvent::IsolationApplied {
+                                    #[cfg(any(test, feature = "diagnostics"))]
                                     uid: arb.uid,
+                                    #[cfg(any(test, feature = "diagnostics"))]
                                     version: *version,
                                     entries: entries.len(),
                                     applied_entries: summary.applied_isolation_entries,
@@ -77,7 +86,7 @@ impl EventDispatcher {
                         });
                     }
                 }
-                None => out.push(Self::parse_failed(Command::Balance, payload)),
+                None => Self::push_parse_failed(out, Command::Balance, payload),
             },
             _ => {}
         }

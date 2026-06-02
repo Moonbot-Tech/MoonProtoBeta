@@ -330,7 +330,7 @@ impl ProtocolCore<'_> {
                     Command::Sliced.to_byte(),
                     client.cfg.client_id,
                     slice,
-                    client.cfg.mask_ver.to_byte(),
+                    client.cfg.transport_mode.to_byte(),
                     &mut client.transport.transport_mode_state,
                 )
             };

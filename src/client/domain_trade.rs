@@ -1,4 +1,4 @@
-use super::*;
+﻿use super::*;
 
 impl Client {
     // ====================================================================
@@ -9,7 +9,7 @@ impl Client {
 
     /// Send `TNewOrderCommand` (CmdId=3) to open a new order.
     #[doc(hidden)]
-    pub fn new_order(
+    pub(crate) fn new_order(
         &self,
         ctx: crate::commands::trade::TradeCtx,
         market: &str,
@@ -31,7 +31,7 @@ impl Client {
     /// and order type from the local order and repeats the Delphi
     /// `ReplaceSentTime = 0` gate.
     #[doc(hidden)]
-    pub fn replace_order(
+    pub(crate) fn replace_order(
         &self,
         orders: &mut crate::state::Orders,
         uid: u64,
@@ -52,7 +52,7 @@ impl Client {
 
     /// Replace an order already tracked by `EventDispatcher::orders()`.
     #[doc(hidden)]
-    pub fn replace_tracked_order(
+    pub(crate) fn replace_tracked_order(
         &self,
         orders: &mut crate::state::Orders,
         uid: u64,
@@ -65,7 +65,7 @@ impl Client {
     ///
     /// Regular applications should prefer [`Self::request_order_snapshot`].
     #[doc(hidden)]
-    pub fn request_all_statuses(&self, uid: u64) -> bool {
+    pub(crate) fn request_all_statuses(&self, uid: u64) -> bool {
         let raw = crate::commands::trade::build_all_statuses_request(uid);
         self.send_trade(raw, 3)
     }
@@ -76,7 +76,7 @@ impl Client {
     /// Requires the local `Orders` read model. The wrapper derives current
     /// status from the local order and clears the local request after queueing.
     #[doc(hidden)]
-    pub fn cancel_order(&self, orders: &mut crate::state::Orders, uid: u64) -> bool {
+    pub(crate) fn cancel_order(&self, orders: &mut crate::state::Orders, uid: u64) -> bool {
         if !self.domain_ready_for_typed_send() {
             return false;
         }
@@ -89,13 +89,13 @@ impl Client {
 
     /// Cancel an order already tracked by `EventDispatcher::orders()`.
     #[doc(hidden)]
-    pub fn cancel_tracked_order(&self, orders: &mut crate::state::Orders, uid: u64) -> bool {
+    pub(crate) fn cancel_tracked_order(&self, orders: &mut crate::state::Orders, uid: u64) -> bool {
         self.cancel_order(orders, uid)
     }
 
     /// Send `TJoinOrdersCommand` (CmdId=11) to join open orders.
     #[doc(hidden)]
-    pub fn join_orders(
+    pub(crate) fn join_orders(
         &self,
         ctx: crate::commands::trade::TradeCtx,
         market: &str,
@@ -107,7 +107,7 @@ impl Client {
 
     /// Send `TSplitOrderCommand` (CmdId=12) to split an order into parts.
     #[doc(hidden)]
-    pub fn split_order(
+    pub(crate) fn split_order(
         &self,
         ctx: crate::commands::trade::TradeCtx,
         market: &str,
@@ -125,24 +125,6 @@ impl Client {
         self.send_trade(raw, 3)
     }
 
-    /// Split an order already tracked by `EventDispatcher::orders()`.
-    #[doc(hidden)]
-    pub fn split_tracked_order(
-        &self,
-        order: &crate::state::Order,
-        split_parts: i32,
-        split_small: bool,
-        split_small_sell: bool,
-    ) -> bool {
-        self.split_order(
-            order.trade_ctx(),
-            &order.market_name,
-            split_parts,
-            split_small,
-            split_small_sell,
-        )
-    }
-
     /// `TMoveAllSellsCommand` (CmdId=13), gated like Delphi active-client UI.
     ///
     /// The move mode, price/zone and side live in
@@ -150,7 +132,7 @@ impl Client {
     /// named constructors so application code does not assemble packet modes by
     /// hand.
     #[doc(hidden)]
-    pub fn move_all_sells(
+    pub(crate) fn move_all_sells(
         &self,
         orders: &crate::state::Orders,
         ctx: crate::commands::trade::TradeCtx,
@@ -170,7 +152,7 @@ impl Client {
 
     /// `TDoClosePositionCommand` (CmdId=14, MaxRetries=1).
     #[doc(hidden)]
-    pub fn do_close_position(
+    pub(crate) fn do_close_position(
         &self,
         ctx: crate::commands::trade::TradeCtx,
         market: &str,
@@ -182,7 +164,7 @@ impl Client {
 
     /// `TDoLimitClosePositionCommand` (CmdId=15, MaxRetries=1).
     #[doc(hidden)]
-    pub fn do_limit_close_position(
+    pub(crate) fn do_limit_close_position(
         &self,
         ctx: crate::commands::trade::TradeCtx,
         market: &str,
@@ -194,7 +176,7 @@ impl Client {
 
     /// `TDoSplitPositionCommand` (CmdId=16, MaxRetries=1).
     #[doc(hidden)]
-    pub fn do_split_position(
+    pub(crate) fn do_split_position(
         &self,
         ctx: crate::commands::trade::TradeCtx,
         market: &str,
@@ -206,7 +188,7 @@ impl Client {
 
     /// `TDoSellOrderCommand` (CmdId=17, MaxRetries=1).
     #[doc(hidden)]
-    pub fn do_sell_order(
+    pub(crate) fn do_sell_order(
         &self,
         ctx: crate::commands::trade::TradeCtx,
         market: &str,
@@ -219,7 +201,7 @@ impl Client {
 
     /// `TOrderStatusRequest` (CmdId=18) — request the status of a specific order.
     #[doc(hidden)]
-    pub fn request_order_status(
+    pub(crate) fn request_order_status(
         &self,
         ctx: crate::commands::trade::TradeCtx,
         market: &str,
@@ -231,7 +213,7 @@ impl Client {
     /// Request a fresh status for an order already tracked by
     /// `EventDispatcher::orders()`.
     #[doc(hidden)]
-    pub fn request_tracked_order_status(&self, order: &crate::state::Order) -> bool {
+    pub(crate) fn request_tracked_order_status(&self, order: &crate::state::Order) -> bool {
         self.request_order_status(order.trade_ctx(), &order.market_name)
     }
 
@@ -241,7 +223,7 @@ impl Client {
     /// Requires the local `Orders` read model: if the UID is unknown or the
     /// stop record did not change, Delphi would not put a packet on the wire.
     #[doc(hidden)]
-    pub fn update_order_stops(
+    pub(crate) fn update_order_stops(
         &self,
         orders: &mut crate::state::Orders,
         uid: u64,
@@ -260,7 +242,7 @@ impl Client {
 
     /// Update stops for an order already tracked by `EventDispatcher::orders()`.
     #[doc(hidden)]
-    pub fn update_tracked_order_stops(
+    pub(crate) fn update_tracked_order_stops(
         &self,
         orders: &mut crate::state::Orders,
         uid: u64,
@@ -269,29 +251,9 @@ impl Client {
         self.update_order_stops(orders, uid, stops)
     }
 
-    /// Delphi `TOrdersWorkers.TurnPanicSell`: set panic sell for every local
-    /// active sell order in `market_name`.
-    #[doc(hidden)]
-    pub fn turn_panic_sell(
-        &self,
-        orders: &mut crate::state::Orders,
-        market_name: &str,
-        turn_on: bool,
-    ) -> usize {
-        if !self.domain_ready_for_typed_send() {
-            return 0;
-        }
-        let requests = orders.turn_panic_sell_by_market(market_name, turn_on);
-        let queued = requests.len();
-        for request in requests {
-            self.send_panic_sell_request(request);
-        }
-        queued
-    }
-
     /// Delphi `TOrdersWorkers.SwitchPanicSellByMarket` button semantics.
     #[doc(hidden)]
-    pub fn switch_panic_sell_by_market(
+    pub(crate) fn switch_panic_sell_by_market(
         &self,
         orders: &mut crate::state::Orders,
         market_name: &str,
@@ -310,7 +272,7 @@ impl Client {
     /// Delphi per-worker panic-sell flag + `TTurnPanicSellCommand` (CmdId=21,
     /// UK_OrderMove).
     #[doc(hidden)]
-    pub fn turn_order_panic_sell(
+    pub(crate) fn turn_order_panic_sell(
         &self,
         orders: &mut crate::state::Orders,
         uid: u64,
@@ -329,7 +291,7 @@ impl Client {
     /// Toggle panic sell for an order already tracked by
     /// `EventDispatcher::orders()`.
     #[doc(hidden)]
-    pub fn turn_tracked_order_panic_sell(
+    pub(crate) fn turn_tracked_order_panic_sell(
         &self,
         orders: &mut crate::state::Orders,
         uid: u64,
@@ -344,7 +306,7 @@ impl Client {
     /// The dedup UID is `sum(items[].uid)`, matching Delphi
     /// `TSetImmuneCommand.SetUKey`.
     #[doc(hidden)]
-    pub fn set_immune(
+    pub(crate) fn set_immune(
         &self,
         orders: &mut crate::state::Orders,
         items: &[crate::commands::trade::ImmuneItem],
@@ -366,7 +328,7 @@ impl Client {
 
     /// `TMoveAllBuysCommand` (CmdId=27), gated like Delphi active-client UI.
     #[doc(hidden)]
-    pub fn move_all_buys(
+    pub(crate) fn move_all_buys(
         &self,
         orders: &crate::state::Orders,
         ctx: crate::commands::trade::TradeCtx,
@@ -395,7 +357,7 @@ impl Client {
     /// worker status, mutates local VStop state, and queues nothing if the value
     /// did not change.
     #[doc(hidden)]
-    pub fn update_vstop(
+    pub(crate) fn update_vstop(
         &self,
         orders: &mut crate::state::Orders,
         uid: u64,
@@ -419,7 +381,7 @@ impl Client {
 
     /// Update VStop for an order already tracked by `EventDispatcher::orders()`.
     #[doc(hidden)]
-    pub fn update_tracked_order_vstop(
+    pub(crate) fn update_tracked_order_vstop(
         &self,
         orders: &mut crate::state::Orders,
         uid: u64,
@@ -433,7 +395,7 @@ impl Client {
 
     /// `TDoMarketSplitPositionCommand` (CmdId=30, MaxRetries=1).
     #[doc(hidden)]
-    pub fn do_market_split_position(
+    pub(crate) fn do_market_split_position(
         &self,
         ctx: crate::commands::trade::TradeCtx,
         market: &str,
@@ -449,7 +411,7 @@ impl Client {
     /// Manual and alert strategies are intentionally not blocked by this server
     /// flag; it affects automatic strategy checks.
     #[doc(hidden)]
-    pub fn penalty(&self, ctx: crate::commands::trade::TradeCtx, market: &str) -> bool {
+    pub(crate) fn penalty(&self, ctx: crate::commands::trade::TradeCtx, market: &str) -> bool {
         let raw = crate::commands::trade::build_penalty(ctx, market);
         self.send_trade(raw, 3)
     }

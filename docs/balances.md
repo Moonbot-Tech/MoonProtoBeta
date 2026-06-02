@@ -37,8 +37,7 @@ create an orphan balance row.
 Full snapshots are authoritative for the current known market universe. If a
 known market is missing from a full snapshot, the library resets the live market
 balance/position fields to zero and `leverage_x = 1`, while preserving
-Delphi-preserved fields such as `balance_hash`, max value, and the
-per-market last epoch.
+Delphi-preserved protocol bookkeeping such as stale-check hashes/epochs.
 
 Incremental updates merge only the changed rows and optionally update global
 totals. Stale incremental rows are skipped per market.
@@ -185,11 +184,14 @@ pub struct GlobalBalance {
     pub btc_balance_locked:   f64,
     pub btc_balance_full:     f64,
     pub special_coin_balance: f64,
+    pub total_pnl:            f64,
 }
 ```
 
 All amounts are BTC equivalents. `special_coin_balance` is the server-selected
-special coin balance, for example USDT on futures servers.
+special coin balance, for example USDT on futures servers. `total_pnl` is the
+Delphi `TMarkets.FTotalPNL` equivalent: sum of per-market profit over BTC
+markets after the balance packet has already updated live `Market` objects.
 
 ## API Shape
 

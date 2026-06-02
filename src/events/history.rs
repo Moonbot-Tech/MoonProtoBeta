@@ -1,4 +1,4 @@
-//! Retained-history worker wiring for `EventDispatcher`.
+﻿//! Retained-history worker wiring for `EventDispatcher`.
 
 use super::*;
 use std::collections::HashSet;
@@ -23,7 +23,8 @@ impl EventDispatcher {
     /// The dispatcher does not mutate retained history directly. In active
     /// dispatch mode it only queues typed `TradesStream` batches into this
     /// handle; `MarketHistoryWorker` owns the actual `MarketHistoryStore`s.
-    pub fn set_market_history_handle(&mut self, handle: MarketHistoryHandle) {
+    #[cfg(test)]
+    pub(crate) fn set_market_history_handle(&mut self, handle: MarketHistoryHandle) {
         self.owned_market_history = None;
         self.market_history_auto_enabled = false;
         handle.set_eps_profile(self.eps_profile);
@@ -33,93 +34,23 @@ impl EventDispatcher {
         self.sync_market_history_storage();
     }
 
-    /// Disable retained-history batch delivery for this dispatcher.
-    pub fn clear_market_history_handle(&mut self) {
-        self.market_history = None;
-        self.owned_market_history = None;
-        self.market_history_auto_enabled = false;
-        self.last_market_history_scope = None;
-        self.last_market_history_markets_version = None;
-    }
-
-    /// Re-enable the default retained-history worker after
-    /// [`Self::clear_market_history_handle`] or a custom handle.
-    ///
-    /// The worker is spawned lazily when trades storage scope is active.
-    pub fn enable_default_market_history(&mut self) {
-        self.market_history_auto_enabled = true;
-        self.sync_market_history_storage();
-    }
-
-    pub fn market_history_readers(&self, market_name: &str) -> Option<MarketHistoryReaders> {
+    #[cfg(test)]
+    pub(crate) fn market_history_readers(&self, market_name: &str) -> Option<MarketHistoryReaders> {
         self.market_history.as_ref()?.try_readers(market_name)
     }
 
-    pub fn market_history_rolling_volumes(
-        &self,
-        market_name: &str,
-        now_time: f64,
-    ) -> Option<RollingTradeVolumeSnapshot> {
-        self.market_history
-            .as_ref()?
-            .try_rolling_volumes(market_name, now_time)
-    }
-
-    pub fn market_history_rolling_volumes_at(
-        &self,
-        market_name: &str,
-        now_time: crate::DelphiTime,
-    ) -> Option<RollingTradeVolumeSnapshot> {
-        self.market_history_rolling_volumes(market_name, now_time.as_days())
-    }
-
-    pub fn market_history_rolling_volumes_now(
-        &self,
-        market_name: &str,
-    ) -> Option<RollingTradeVolumeSnapshot> {
-        self.market_history_rolling_volumes_at(market_name, crate::DelphiTime::now())
-    }
-
-    pub fn market_history_derived_snapshot(
-        &self,
-        market_name: &str,
-        now_time: f64,
-    ) -> Option<MarketDerivedSnapshot> {
-        self.market_history
-            .as_ref()?
-            .try_derived_snapshot(market_name, now_time)
-    }
-
-    pub fn market_history_derived_snapshot_at(
-        &self,
-        market_name: &str,
-        now_time: crate::DelphiTime,
-    ) -> Option<MarketDerivedSnapshot> {
-        self.market_history_derived_snapshot(market_name, now_time.as_days())
-    }
-
-    pub fn market_history_derived_snapshot_now(
-        &self,
-        market_name: &str,
-    ) -> Option<MarketDerivedSnapshot> {
-        self.market_history_derived_snapshot_at(market_name, crate::DelphiTime::now())
-    }
-
-    pub fn flush_market_history(&self, now_time: f64) -> bool {
+    #[cfg(test)]
+    pub(crate) fn flush_market_history(&self, now_time: crate::MoonTime) -> bool {
         self.market_history
             .as_ref()
             .is_some_and(|handle| handle.flush(now_time))
-    }
-
-    pub fn trade_storage_scope(&self) -> Option<&TradeStorageScope> {
-        self.trade_storage_scope.as_ref()
     }
 
     /// Apply a full `emk_RequestCandlesData` snapshot to retained Active Lib
     /// candle storage. The dispatcher keeps the same trades subscription scope:
     /// if trades storage is disabled or the market is outside
     /// `subscribe_trades_for`, the snapshot row is ignored.
-    pub fn apply_candles_snapshot(
+    pub(crate) fn apply_candles_snapshot(
         &mut self,
         markets: &[crate::commands::candles::RequestCandlesMarket],
     ) -> Option<crate::state::CandlesSnapshotApplySummary> {

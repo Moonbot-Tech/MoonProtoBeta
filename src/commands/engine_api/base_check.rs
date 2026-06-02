@@ -21,11 +21,25 @@ impl ExchangeTypeMask {
     /// Prediction / outcome markets.
     pub const PREDICT: Self = Self(0x08);
 
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub const fn from_byte(b: u8) -> Self {
         Self(b)
     }
 
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) const fn from_byte(b: u8) -> Self {
+        Self(b)
+    }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub const fn to_byte(self) -> u8 {
+        self.0
+    }
+
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) const fn to_byte(self) -> u8 {
         self.0
     }
 

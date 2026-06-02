@@ -178,21 +178,6 @@ mod parse_engine_response_tests {
     }
 
     #[test]
-    fn parse_get_balance_response_reads_delphi_double() {
-        let mut data = 1234.5f64.to_le_bytes().to_vec();
-        data.extend_from_slice(&[0xAA, 0xBB]);
-
-        assert_eq!(parse_get_balance_response(&data), Some(1234.5));
-        let mut short = [0u8; 8];
-        short[..7].copy_from_slice(&data[..7]);
-        assert_eq!(
-            parse_get_balance_response(&data[..7]),
-            Some(f64::from_le_bytes(short))
-        );
-        assert_eq!(parse_get_balance_response(&[]), Some(0.0));
-    }
-
-    #[test]
     fn parse_query_hedge_mode_response_reads_delphi_bool() {
         assert_eq!(parse_query_hedge_mode_response(&[0]), Some(false));
         assert_eq!(parse_query_hedge_mode_response(&[1]), Some(true));

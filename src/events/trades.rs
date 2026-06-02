@@ -1,4 +1,4 @@
-//! Active `MPC_TradesStream` / `MPC_TradesResendResponse` dispatch.
+﻿//! Active `MPC_TradesStream` / `MPC_TradesResendResponse` dispatch.
 //!
 //! This file keeps the Delphi `ProcessTradesStream` machine-effect block
 //! together: packet-number recovery, known-market gating, retained-history
@@ -12,7 +12,7 @@ use crate::protocol::Command;
 use crate::state::{
     iter_trades_resend_response, MarketHistoryMMOrderInput, MarketHistoryStreamBatch,
     MarketHistoryStreamSection, MarketHistoryStreamSectionKind, MarketHistoryTradeInput,
-    TradesPacketEffect, DELPHI_MSECS_PER_DAY,
+    TradesEvent, TradesPacketEffect, DELPHI_MSECS_PER_DAY,
 };
 
 impl EventDispatcher {
@@ -38,7 +38,7 @@ impl EventDispatcher {
                     out,
                 );
             }
-            None => out.push(Self::parse_failed(Command::TradesStream, payload)),
+            None => Self::push_parse_failed(out, Command::TradesStream, payload),
         }
     }
 
@@ -66,7 +66,7 @@ impl EventDispatcher {
                         out,
                     );
                 }
-                None => out.push(Self::parse_failed(Command::TradesResendResponse, inner)),
+                None => Self::push_parse_failed(out, Command::TradesResendResponse, inner),
             }
         }
     }
@@ -351,9 +351,34 @@ impl EventDispatcher {
                 self.apply_known_trades_sections(decoded, Some(now_ms), history_now_time_days, out);
                 applied_sections = true;
             }
-            out.push(Event::Trade(
-                effect.into_event(decoded.packet_num, decoded.base_time),
-            ));
+            match effect {
+                TradesPacketEffect::Apply => out.push(Event::Trade(TradesEvent::Applied {
+                    #[cfg(any(test, feature = "diagnostics"))]
+                    packet_num: decoded.packet_num,
+                    #[cfg(any(test, feature = "diagnostics"))]
+                    base_time: decoded.base_time,
+                })),
+                #[cfg(any(test, feature = "diagnostics"))]
+                TradesPacketEffect::GapDetected { start, end } => {
+                    out.push(Event::Trade(TradesEvent::GapDetected { start, end }));
+                }
+                #[cfg(any(test, feature = "diagnostics"))]
+                TradesPacketEffect::Duplicate => out.push(Event::Trade(TradesEvent::Duplicate)),
+                #[cfg(any(test, feature = "diagnostics"))]
+                TradesPacketEffect::OutOfOrder { packet_num } => {
+                    out.push(Event::Trade(TradesEvent::OutOfOrder { packet_num }));
+                }
+                #[cfg(any(test, feature = "diagnostics"))]
+                TradesPacketEffect::GapFilled {
+                    packet_num,
+                    bucket_seq_range,
+                } => out.push(Event::Trade(TradesEvent::GapFilled {
+                    packet_num,
+                    bucket_seq_range,
+                })),
+                #[cfg(not(any(test, feature = "diagnostics")))]
+                _ => {}
+            }
         }
     }
 }

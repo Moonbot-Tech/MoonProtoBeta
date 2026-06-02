@@ -1,4 +1,4 @@
-use super::*;
+﻿use super::*;
 
 impl Client {
     // ====================================================================
@@ -8,7 +8,7 @@ impl Client {
 
     /// Send `TRequestBalanceRefresh` (Balance CmdId=5, High).
     #[doc(hidden)]
-    pub fn balance_request_refresh(&self) {
+    pub(crate) fn balance_request_refresh(&self) {
         let raw = crate::commands::balance::build_request_balance_refresh(rand::random());
         self.send_domain_cmd(raw, Command::Balance, SendPriority::High, true, 3);
     }

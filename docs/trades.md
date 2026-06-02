@@ -10,12 +10,12 @@ the live stream moving when old gaps cannot be recovered.
 ```rust
 use moonproto::TradesStreamMode;
 
-client.streams().subscribe_all_trades(TradesStreamMode::TradesOnly);
+client.streams().subscribe_all_trades(TradesStreamMode::TradesOnly)?;
 client.streams().subscribe_trades_for(
     TradesStreamMode::TradesOnly,
     ["BTCUSDT", "ETHUSDT"],
-);
-client.streams().unsubscribe_all_trades();
+)?;
+client.streams().unsubscribe_all_trades()?;
 ```
 
 `subscribe_all_trades(mode)` is the full Active Lib mode. Once the market list
@@ -46,13 +46,14 @@ use moonproto::state::{SeqRingCursor, TradesEvent};
 
 let mut cursor: Option<SeqRingCursor> = None;
 let mut rows = Vec::new();
+let Some(snapshot) = client.snapshot() else { return; };
+let Some(market) = snapshot.markets().get("BTCUSDT") else { return; };
 
 for event in client.drain_events() {
     if let Event::Trade(trade_event) = event {
         match trade_event {
             TradesEvent::Applied { .. } => {
                 let Some(state) = client.snapshot() else { continue; };
-                let Some(market) = state.markets().get("BTCUSDT") else { continue; };
                 let Some(readers) = state.market_history_readers_for(&market) else { continue; };
                 let Some(reader) = readers.futures_trades else { continue; };
 
@@ -60,7 +61,7 @@ for event in client.drain_events() {
                 rows.clear();
                 let meta = reader.copy_new_since(cursor, 4096, &mut rows);
                 if meta.clipped {
-                    on_retained_history_gap(meta.actual_start_seq);
+                    on_retained_history_gap();
                 }
                 on_new_trades(&rows);
             }
@@ -126,14 +127,21 @@ Each `SeqRingReader` supports:
 reader.copy_last(limit, &mut out);
 reader.copy_from_time(time_days, limit, &mut out);
 reader.copy_time_range(from_days, to_days, limit, &mut out);
+let cursor = reader.cursor_at_or_after_time(time_days);
+reader.copy_from_cursor(cursor, limit, &mut out);
+reader.with_from_cursor(cursor, limit, |view| { /* zero-copy slices */ });
 reader.copy_new_since(&mut cursor, limit, &mut out);
 ```
 
-For "only new rows", every consumer owns its own `SeqRingCursor`. Do not share
-one cursor between independent UI panels, strategy code, and logs. If
-`copy_new_since` returns `meta.clipped = true`, that consumer was slower than
-the retained ring capacity; returned rows start from the oldest still retained
-row.
+`SeqRingCursor` is the application-side "index" into a retained history. A chart
+can get one from `cursor_at_or_after_time(...)` and then read from it with
+`copy_from_cursor(...)` or `with_from_cursor(...)`. For "only new rows", every
+consumer owns its own cursor and advances it with `copy_new_since(...)`. Do not
+share one cursor between independent UI panels, strategy code, and logs. If
+`copy_new_since` returns `meta.clipped = true`, that consumer was slower than the
+retained ring capacity; returned rows start from the oldest still retained row.
+Raw sequence-number helpers are diagnostics/test-only; normal terminal code uses
+cursor and time APIs.
 
 Retained rows preserve receive/store order. UDP resend rows can arrive late, so
 timestamp order is not guaranteed. Time-range reads scan/filter retained rows
@@ -143,14 +151,14 @@ instead of assuming monotonic timestamps.
 
 ```rust
 pub struct TradeHistoryRow {
-    pub time: f64,
+    pub time: MoonTime,
     pub price: f32,
     pub qty: f32,
 }
 
 impl TradeHistoryRow {
-    pub fn time_delphi(self) -> DelphiTime;
-    pub fn unix_millis(self) -> Option<i64>;
+    pub fn time(self) -> MoonTime;
+    pub fn unix_millis(self) -> i64;
     pub fn quantity(self) -> f32;
     pub fn is_buy(self) -> bool;
     pub fn same_direction(self, other: Self) -> bool;
@@ -158,18 +166,18 @@ impl TradeHistoryRow {
 }
 
 pub struct MMOrderHistoryRow {
-    pub time: f64,
+    pub time: MoonTime,
     pub volume: f64,
     pub q: f64,
 }
 
 impl MMOrderHistoryRow {
-    pub fn time_delphi(self) -> DelphiTime;
-    pub fn unix_millis(self) -> Option<i64>;
+    pub fn time(self) -> MoonTime;
+    pub fn unix_millis(self) -> i64;
 }
 
 pub struct MiniCandle {
-    pub time: f64,
+    pub time: MoonTime,
     pub cnt: i32,
     pub min_price: f32,
     pub max_price: f32,
@@ -178,8 +186,8 @@ pub struct MiniCandle {
 }
 
 impl MiniCandle {
-    pub fn time_delphi(self) -> DelphiTime;
-    pub fn unix_millis(self) -> Option<i64>;
+    pub fn time(self) -> MoonTime;
+    pub fn unix_millis(self) -> i64;
     pub fn low(self) -> f32;
     pub fn high(self) -> f32;
     pub fn buy_volume(self) -> f32;
@@ -187,8 +195,8 @@ impl MiniCandle {
 }
 ```
 
-Row `time` fields are Delphi `TDateTime` day values. Use `time_delphi()` or row
-helpers such as `unix_millis()` before displaying them as wall-clock time.
+Row `time` fields are `MoonTime`. Use `time().unix_millis()` or
+`time().system_time()` before displaying wall-clock time.
 
 Futures trade direction uses the raw `qty` sign bit: sign bit clear means buy,
 sign bit set means sell. Use `quantity()` for absolute quantity and `is_buy()`
@@ -220,6 +228,12 @@ if let Some(derived) = snapshot.market_history_derived_snapshot_now_for(&market)
     draw_delta(derived.deltas.one_hour);
 }
 ```
+
+For normal chart panels, read this snapshot once per UI tick for the selected
+market and render volume/delta labels from it. Re-scanning retained trade or
+candle rings separately for every 1m/3m/5m/1h label is unnecessary. Manual
+retained-history scans are for custom analytics that intentionally differ from
+the Active Lib read model.
 
 ```rust
 pub struct RollingTradeVolumeSnapshot {
@@ -299,11 +313,11 @@ trades subscription scope becomes active. Regular applications use
 
 ## Recovery Policy
 
-`TradesState` maintains up to 50 gap buckets. Missing packet numbers are
-requested for up to three bucket retry cycles with a delay based on current RTT.
-If a bucket is still incomplete after its retry budget, it is closed and the
-live stream continues. This is intentional: the protocol should not flood the
-channel forever for old trade packets.
+MoonClient's trades recovery state maintains up to 50 gap buckets. Missing
+packet numbers are requested for up to three bucket retry cycles with a delay
+based on current RTT. If a bucket is still incomplete after its retry budget, it
+is closed and the live stream continues. This is intentional: the protocol
+should not flood the channel forever for old trade packets.
 
 `MoonClient` runs the recovery tick after successfully parsed live/resend trade
 packets and throttles it to roughly 100 ms. Applications should not send resend
@@ -311,6 +325,7 @@ requests manually.
 
 ## Protocol Data
 
-Raw packet parsers and resend-state helpers are internal protocol-test
-machinery. Normal applications should subscribe through `MoonClient`, react to
-`TradesEvent::Applied`, and read retained rows from `MarketHistoryReaders`.
+Raw packet parsers, resend-state helpers, and the mutable trades recovery state
+are internal protocol-test machinery. Normal applications subscribe through
+`MoonClient`, react to `TradesEvent::Applied`, and read retained rows from
+`MarketHistoryReaders`.

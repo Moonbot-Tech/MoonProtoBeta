@@ -27,6 +27,7 @@ pub(super) struct PendingAutoCandles {
 }
 
 pub(super) struct PendingAutoCandlesApply {
+    #[cfg(any(test, feature = "diagnostics"))]
     pub(super) uid: u64,
     pub(super) summary: crate::state::CandlesSnapshotApplySummary,
     pub(super) deadline: Instant,
@@ -103,13 +104,16 @@ pub(super) fn poll_auto_candles(
     while i < pending.auto_candles.len() {
         match pending.auto_candles[i].rx.try_recv() {
             Ok(merged) => {
+                #[cfg(any(test, feature = "diagnostics"))]
                 let request_uid = merged.uid;
+                #[cfg(any(test, feature = "diagnostics"))]
                 let fallback_uid = pending.auto_candles[i].uid;
                 let summary = dispatcher.apply_candles_snapshot(&merged.markets);
                 pending.auto_candles.swap_remove(i);
                 if let Some(summary) = summary {
                     if let Some(rx) = dispatcher.market_history_barrier_async() {
                         pending.auto_candles_apply.push(PendingAutoCandlesApply {
+                            #[cfg(any(test, feature = "diagnostics"))]
                             uid: request_uid,
                             summary,
                             deadline: engine_pending_deadline(),
@@ -118,6 +122,7 @@ pub(super) fn poll_auto_candles(
                     } else {
                         dispatcher.queue_candles_snapshot_event(
                             crate::state::CandlesSnapshotEvent::Failed {
+                                #[cfg(any(test, feature = "diagnostics"))]
                                 request_uid: Some(request_uid),
                                 error: "market history worker unavailable after snapshot apply"
                                     .to_string(),
@@ -128,6 +133,7 @@ pub(super) fn poll_auto_candles(
                 } else {
                     dispatcher.queue_candles_snapshot_event(
                         crate::state::CandlesSnapshotEvent::Failed {
+                            #[cfg(any(test, feature = "diagnostics"))]
                             request_uid: Some(if request_uid != 0 {
                                 request_uid
                             } else {
@@ -146,6 +152,7 @@ pub(super) fn poll_auto_candles(
                 pending.auto_candles_requested = false;
                 dispatcher.queue_candles_snapshot_event(
                     crate::state::CandlesSnapshotEvent::Failed {
+                        #[cfg(any(test, feature = "diagnostics"))]
                         request_uid: Some(uid),
                         error: "pending full candles receiver closed before response".to_string(),
                     },
@@ -159,6 +166,7 @@ pub(super) fn poll_auto_candles(
                     pending.auto_candles_requested = false;
                     dispatcher.queue_candles_snapshot_event(
                         crate::state::CandlesSnapshotEvent::Failed {
+                            #[cfg(any(test, feature = "diagnostics"))]
                             request_uid: Some(uid),
                             error: "pending full candles request timed out".to_string(),
                         },
@@ -179,6 +187,7 @@ pub(super) fn poll_auto_candles(
                 let applied = pending.auto_candles_apply.swap_remove(i);
                 dispatcher.queue_candles_snapshot_event(
                     crate::state::CandlesSnapshotEvent::Ready {
+                        #[cfg(any(test, feature = "diagnostics"))]
                         request_uid: applied.uid,
                         summary: applied.summary,
                     },
@@ -190,10 +199,13 @@ pub(super) fn poll_auto_candles(
                 pending.auto_candles_requested = false;
                 dispatcher.queue_candles_snapshot_event(
                     crate::state::CandlesSnapshotEvent::Failed {
+                        #[cfg(any(test, feature = "diagnostics"))]
                         request_uid: Some(applied.uid),
                         error: "market history worker barrier closed before ack".to_string(),
                     },
                 );
+                #[cfg(not(any(test, feature = "diagnostics")))]
+                let _ = applied;
                 changed = true;
             }
             Err(mpsc::TryRecvError::Empty) => {
@@ -202,10 +214,13 @@ pub(super) fn poll_auto_candles(
                     pending.auto_candles_requested = false;
                     dispatcher.queue_candles_snapshot_event(
                         crate::state::CandlesSnapshotEvent::Failed {
+                            #[cfg(any(test, feature = "diagnostics"))]
                             request_uid: Some(applied.uid),
                             error: "market history worker barrier timed out".to_string(),
                         },
                     );
+                    #[cfg(not(any(test, feature = "diagnostics")))]
+                    let _ = applied;
                     changed = true;
                 } else {
                     i += 1;
@@ -393,6 +408,7 @@ pub(super) fn finish_transfer_assets_batch_item(
     let batch = pending.transfer_assets_batches.swap_remove(pos);
     dispatcher.queue_events([crate::events::Event::TransferAssets(
         crate::state::TransferAssetsEvent::RefreshCompleted {
+            #[cfg(any(test, feature = "diagnostics"))]
             request_id: batch.id,
             requested: batch.updated + batch.failed,
             updated: batch.updated,

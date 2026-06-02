@@ -41,6 +41,7 @@ impl SentSliced {
 pub(crate) struct SlicedAck {
     pub(crate) flags: [u8; 32],
     pub(crate) datagram_num: u16,
+    pub(crate) session: u32,
 }
 
 pub(crate) struct DataReadState {

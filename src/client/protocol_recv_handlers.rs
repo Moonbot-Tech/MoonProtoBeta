@@ -69,14 +69,10 @@ impl ProtocolCore<'_> {
     pub(crate) fn on_handshake_control(
         &mut self,
         cmd: Command,
+        payload: &[u8],
         recv_bytes: u64,
         timestamp_ms: i64,
     ) {
-        let accept_want_new_hello = self.client.should_accept_want_new_hello();
-        if cmd == Command::WantNewHello && !accept_want_new_hello {
-            let _ = (recv_bytes, timestamp_ms);
-            return;
-        }
         let _ = recv_bytes;
         match cmd {
             Command::WrongHello => {
@@ -89,7 +85,30 @@ impl ProtocolCore<'_> {
                     self.apply_wrong_hello();
                 }
             }
-            Command::WantNewHello => self.apply_want_new_hello(),
+            Command::WantNewHello => {
+                if !self.client.should_accept_want_new_hello() {
+                    let _ = (payload, timestamp_ms);
+                    return;
+                }
+                let Some(hello) = Client::decode_handshake_hello(
+                    &self.client.cfg.master_key,
+                    self.client.cfg.client_id,
+                    Command::WantNewHello.to_byte(),
+                    payload,
+                ) else {
+                    let _ = timestamp_ms;
+                    return;
+                };
+                if !self.client.same_handshake_rnd(&hello.rnd)
+                    || hello.server_token != 0
+                    || hello.peer_mix != 0
+                {
+                    let _ = timestamp_ms;
+                    return;
+                }
+                self.client.accepted_server_mix_ts(hello.mix_ts);
+                self.apply_want_new_hello();
+            }
             _ => {}
         }
     }
@@ -177,7 +196,15 @@ impl ProtocolCore<'_> {
         timestamp_ms: i64,
         mode: &mut RunMode<'_>,
     ) -> bool {
-        let (assembled, ack) = self.client.transport.recv_slicer.on_new_sliced(payload);
+        if slicing::SliceHeader::from_bytes(payload).is_none() {
+            let _ = (recv_bytes, timestamp_ms);
+            return true;
+        }
+        let (assembled, ack) = self
+            .client
+            .transport
+            .recv_slicer
+            .on_new_sliced_with_session(payload, self.client.ack_session32_value);
 
         if slicing::trace_enabled() {
             if let Some(hdr) = slicing::SliceHeader::from_bytes(payload) {
@@ -235,7 +262,11 @@ impl ProtocolCore<'_> {
     }
 
     pub(crate) fn on_new_sliced_ack(&mut self, payload: &[u8]) {
-        Client::push_sliced_ack_payload(&self.client.send_lock, payload);
+        Client::push_sliced_ack_payload(
+            &self.client.send_lock,
+            payload,
+            self.client.ack_session32_value,
+        );
     }
 
     pub(crate) fn on_new_ping(

@@ -166,6 +166,14 @@ fn coin_card_candles_response_zero_fills_missing_records() {
 }
 
 #[test]
+fn coin_card_candles_rejects_absurd_count_before_alloc() {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&((MAX_COIN_CARD_CANDLES + 1) as i32).to_le_bytes());
+
+    assert!(parse_coin_card_candles_response(&bytes).is_none());
+}
+
+#[test]
 fn aggregator_single_chunk() {
     let mut agg = CandlesAggregator::new();
     // ChunkIndex=0, ChunkTotal=1, payload=[1,2,3,4]
@@ -246,6 +254,15 @@ fn aggregator_accepts_delphi_word_sized_chunk_total() {
 }
 
 #[test]
+fn aggregator_rejects_payload_above_domain_cap_before_copying_more() {
+    let mut agg = CandlesAggregator::with_max_payload_bytes(3);
+    let chunk = vec![0u8, 0u8, 1u8, 0u8, 1, 2, 3, 4];
+
+    assert_eq!(agg.on_chunk_result(&chunk), CandlesChunkResult::Ignored);
+    assert_eq!(agg.progress(), (0, 0));
+}
+
+#[test]
 fn request_candles_data_parser_reads_delphi_zlib_stream() {
     let mut plain = Vec::new();
     plain.extend_from_slice(&0i32.to_le_bytes()); // legacy count for v1 readers
@@ -315,6 +332,57 @@ fn request_candles_data_rejects_impossible_market_count_before_alloc() {
     let zipped = zip_plain(&plain);
 
     assert!(parse_request_candles_data_response(&zipped).is_none());
+}
+
+#[test]
+fn request_candles_data_rejects_market_count_above_domain_cap_before_alloc() {
+    let mut plain = Vec::new();
+    plain.extend_from_slice(&0i32.to_le_bytes());
+    plain.push(2);
+    plain.extend_from_slice(&((MAX_REQUEST_CANDLES_MARKETS + 1) as i32).to_le_bytes());
+    plain.extend_from_slice(&0f64.to_le_bytes());
+
+    let zipped = zip_plain(&plain);
+
+    assert!(parse_request_candles_data_response(&zipped).is_none());
+}
+
+#[test]
+fn request_candles_data_rejects_candle_count_above_domain_cap_before_alloc() {
+    let mut plain = Vec::new();
+    plain.extend_from_slice(&0i32.to_le_bytes());
+    plain.push(2);
+    plain.extend_from_slice(&1i32.to_le_bytes());
+    plain.extend_from_slice(&0f64.to_le_bytes());
+    write_delphi_utf16_string(&mut plain, "BTCUSDT");
+    plain.extend_from_slice(&((MAX_REQUEST_CANDLES_PER_MARKET + 1) as i32).to_le_bytes());
+    plain.extend_from_slice(&[0u8; 64]);
+
+    let zipped = zip_plain(&plain);
+
+    assert!(parse_request_candles_data_response(&zipped).is_none());
+}
+
+#[test]
+fn request_candles_data_partial_stops_on_candle_count_cap_after_prior_market() {
+    let mut plain = Vec::new();
+    plain.extend_from_slice(&0i32.to_le_bytes());
+    plain.push(2);
+    plain.extend_from_slice(&2i32.to_le_bytes());
+    plain.extend_from_slice(&0f64.to_le_bytes());
+    write_candles_market(&mut plain, "BTCUSDT", 45_000.0);
+    write_delphi_utf16_string(&mut plain, "ETHUSDT");
+    plain.extend_from_slice(&((MAX_REQUEST_CANDLES_PER_MARKET + 1) as i32).to_le_bytes());
+    plain.extend_from_slice(&[0u8; 64]);
+
+    let zipped = zip_plain(&plain);
+
+    assert!(parse_request_candles_data_response(&zipped).is_none());
+    let markets =
+        parse_request_candles_data_response_partial_with_local_shift(&zipped, 0.0).unwrap();
+    assert_eq!(markets.len(), 1);
+    assert_eq!(markets[0].market_name, "BTCUSDT");
+    assert_eq!(markets[0].candles_5m.len(), 1);
 }
 
 #[test]

@@ -52,8 +52,8 @@ fn main() {
         .expect("settings event must store ClientSettingsCommand");
 
     println!(
-        "[settings] uid={} x_sell={} x_sell_scalp={} stop_loss={} use_take_profit={} take_profit={}",
-        settings.uid,
+        "[settings] take_profit_percent={} x_sell={} x_sell_scalp={} stop_loss={} use_take_profit={} take_profit={}",
+        settings.effective_take_profit_percent(),
         settings.x_sell,
         settings.x_sell_scalp,
         settings.price_drop_level,
@@ -61,10 +61,10 @@ fn main() {
         settings.g_take_profit,
     );
     println!(
-        "[settings] manual_strategy={} stop_market={} join_sell_kind={} temp_blacklist={}",
+        "[settings] manual_strategy={} stop_market={} join_sell_mode={:?} temp_blacklist_rows={}",
         settings.use_manual_strategy,
         settings.use_stop_market,
-        settings.join_sell_kind,
-        settings.temp_bl_symbols.len(),
+        settings.join_sell_mode(),
+        settings.temp_blacklist_entries().count(),
     );
 }

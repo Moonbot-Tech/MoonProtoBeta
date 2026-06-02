@@ -53,7 +53,7 @@ pub struct StratsState {
     /// Latest decoded strategy schema.
     schema: Option<Arc<StrategySchema>>,
     /// `TStratSchema` field name -> TypeID cache for Delphi `BuildReaderProps`.
-    /// Stored behind `Arc` so `EventDispatcherSnapshot` clones remain cheap.
+    /// Stored behind `Arc` so `MoonStateSnapshot` clones remain cheap.
     schema_field_types: Option<Arc<HashMap<String, u8>>>,
     /// Cached `TStrategySerializer` payload for `TStratSnapshot.CreateFromStrats`.
     snapshot_payload_cache: Option<Arc<StrategySnapshotPayloadCache>>,
@@ -95,24 +95,24 @@ impl StratsState {
     /// dispatcher decodes/applies the serializer payload before publishing the
     /// event and advances `last_server_epoch` only after that succeeds,
     /// matching Delphi `ProcessStratCommand`.
-    pub fn apply(&mut self, cmd: StratCommand) -> StratEvent {
+    pub(crate) fn apply(&mut self, cmd: StratCommand) -> Option<StratEvent> {
         match cmd {
             StratCommand::Snapshot(snap) => {
                 let raw_len = snap.data.len();
                 if snap.full {
-                    StratEvent::SnapshotFull {
+                    Some(StratEvent::SnapshotFull {
                         server_epoch: snap.server_epoch,
                         raw_len,
                         #[cfg(feature = "diagnostics")]
                         raw_data: snap.data,
-                    }
+                    })
                 } else {
-                    StratEvent::SnapshotPartial {
+                    Some(StratEvent::SnapshotPartial {
                         server_epoch: snap.server_epoch,
                         raw_len,
                         #[cfg(feature = "diagnostics")]
                         raw_data: snap.data,
-                    }
+                    })
                 }
             }
             StratCommand::Delete(d) => {
@@ -127,19 +127,19 @@ impl StratsState {
                     self.delete_folder_by_path(&d.folder_path)
                 };
                 if strategy_deleted || folder_deleted {
-                    StratEvent::Deleted {
+                    Some(StratEvent::Deleted {
                         strategy_id: d.strategy_id,
                         folder_path: d.folder_path,
                         strategy_deleted,
                         folder_deleted,
-                    }
+                    })
                 } else {
-                    StratEvent::Ignored
+                    None
                 }
             }
             // Delphi client has no TStratSellPriceUpdate receive branch.
             // This command is client -> server; the server applies sg.SellPrice.
-            StratCommand::SellPriceUpdate(_) => StratEvent::Ignored,
+            StratCommand::SellPriceUpdate(_) => None,
             StratCommand::CheckedSync(s) => {
                 let mut changed = 0;
                 let mut snapshot_payload_changed = false;
@@ -162,10 +162,10 @@ impl StratsState {
                 if snapshot_payload_changed {
                     self.invalidate_snapshot_payload_cache();
                 }
-                StratEvent::CheckedSynced {
+                Some(StratEvent::CheckedSynced {
                     changed,
                     is_delta: s.is_delta,
-                }
+                })
             }
             StratCommand::CheckedEcho(e) => {
                 for it in &e.items {
@@ -175,18 +175,18 @@ impl StratsState {
                         }
                     }
                 }
-                StratEvent::CheckedEcho {
+                Some(StratEvent::CheckedEcho {
                     count: e.items.len(),
-                }
+                })
             }
-            StratCommand::SnapshotRequest { uid } => StratEvent::SnapshotRequested { uid },
+            StratCommand::SnapshotRequest { .. } => None,
             // Delphi client `ProcessStratCommand` has no branch for
             // `TStratSchemaRequest`. It is a client->server request handled by
             // the Delphi server, so a server->client copy is freed silently.
-            StratCommand::SchemaRequest { .. } => StratEvent::Ignored,
-            StratCommand::Skipped { .. } => StratEvent::Ignored,
-            StratCommand::Schema(schema) => self.apply_schema_raw(schema.data),
-            StratCommand::Unknown { .. } => StratEvent::Ignored,
+            StratCommand::SchemaRequest { .. } => None,
+            StratCommand::Skipped { .. } => None,
+            StratCommand::Schema(schema) => Some(self.apply_schema_raw(schema.data)),
+            StratCommand::Unknown { .. } => None,
         }
     }
 
@@ -244,6 +244,10 @@ impl StratsState {
             .filter_map(|strategy_id| self.snapshots_by_id.get(strategy_id).map(Arc::as_ref))
     }
 
+    /// Owned export of all retained strategy snapshots in Delphi list order.
+    ///
+    /// This clones full `StrategySnapshot` values. Use [`Self::snapshots`] for
+    /// normal read-only terminal UI paths.
     pub fn snapshot_vec(&self) -> Vec<StrategySnapshot> {
         let mut out = Vec::new();
         for strategy_id in &self.order {

@@ -78,7 +78,7 @@ fn handle_event(event: Event) {
         Event::Strat(strat_event) => handle_strategy_event(strat_event),
         Event::Settings(settings_event) => handle_settings_event(settings_event),
         Event::EngineAction(action) => handle_engine_action(action),
-        Event::ServerLog { time, msg } => append_server_log(time, msg),
+        Event::ServerLog(log) => append_server_log(log.time(), &log.msg),
         _ => {}
     }
 }
@@ -145,7 +145,7 @@ pub enum Event {
     Settings(SettingsEvent),
     Markets(MarketsEvent),
     EngineAction(EngineActionEvent),
-    ServerLog { time: f64, msg: String },
+    ServerLog(ServerLogEvent),
 }
 ```
 
@@ -167,10 +167,10 @@ snapshot has been processed by the history worker. At that point
 selected market instead of handling raw server `market_index` blocks.
 
 `WatcherFillsEvent` contains `market_name`, HyperDex user address, decoded fill
-rows, and helper methods for flags/time conversion.
+rows, and `MoonTime` helpers.
 
-`ServerLog.time` is a Delphi day value. Use `event.server_log_time()` when the
-UI needs Unix milliseconds or `SystemTime`.
+`ServerLogEvent` contains the server log text and typed time helpers. Use
+`log.time()` / `log.unix_millis()` for UI timestamps.
 
 ## Domain Gate
 

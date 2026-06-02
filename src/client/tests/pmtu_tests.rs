@@ -6,7 +6,7 @@ fn dummy_cfg() -> ClientConfig {
         server_port: 3000,
         master_key: [0; 16],
         mac_key: [0; 16],
-        mask_ver: TransportMode::V0,
+        transport_mode: TransportMode::V0,
         client_id: 0,
         ntp_host: None,
         refresh: RefreshConfig {
@@ -34,7 +34,7 @@ fn unpack_client_packet(mac_key: &MoonKey, raw: &[u8]) -> (u8, Vec<u8>) {
 }
 
 fn ping_payload_with_pmtu(pmtu: u16) -> Vec<u8> {
-    let mut payload = vec![0u8; 50];
+    let mut payload = vec![0u8; control::PING_SIZE];
     payload[20..22].copy_from_slice(&pmtu.to_le_bytes());
     payload[41] = 255; // RSQ
     payload
@@ -138,10 +138,7 @@ fn process_ping_reader_msg(
     let delivered_for_cb = Arc::clone(&delivered);
     let mut mode = RunMode::Callback {
         on_data: Box::new(move |cmd, payload| {
-            delivered_for_cb
-                .lock()
-                .unwrap()
-                .push((cmd, payload.to_vec()));
+            delivered_for_cb.lock().push((cmd, payload.to_vec()));
         }),
     };
     let mut writer = writer(client);
@@ -166,7 +163,7 @@ fn process_ping_reader_msg(
         &mut mode,
     );
     drop(mode);
-    Arc::try_unwrap(delivered).unwrap().into_inner().unwrap()
+    Arc::try_unwrap(delivered).unwrap().into_inner()
 }
 
 #[test]
@@ -280,14 +277,14 @@ fn ping_ack_does_not_drop_pending_h_until_writer_copy_apply() {
         1,
         "Delphi DataReadInt(MPC_Ping) writes TmpSlider only; PendingH is writer work"
     );
-    assert!(client.send_lock.lock().unwrap().tmp_slider.has_new_data);
+    assert!(client.send_lock.lock().tmp_slider.has_new_data);
     assert!(!client.recv.recvd_slider.has_new_data);
 
     ProtocolCore {
         client: &mut client,
     }
     .copy_recvd_data();
-    assert!(!client.send_lock.lock().unwrap().tmp_slider.has_new_data);
+    assert!(!client.send_lock.lock().tmp_slider.has_new_data);
     assert!(client.recv.recvd_slider.has_new_data);
 
     ProtocolCore {
@@ -304,26 +301,19 @@ fn ping_ack_does_not_drop_pending_h_until_writer_copy_apply() {
 fn ping_ack_reader_core_is_not_reapplied_by_main_ping_branch() {
     let mut client = Client::new(dummy_cfg());
     let payload = ping_payload_with_ack(40, &[1 << 2]);
-    client
-        .send_lock
-        .lock()
-        .unwrap()
-        .apply_ping_ack_bitmap(&payload);
+    client.send_lock.lock().apply_ping_ack_bitmap(&payload);
     ProtocolCore {
         client: &mut client,
     }
     .copy_recvd_data();
-    assert!(!client.send_lock.lock().unwrap().tmp_slider.has_new_data);
+    assert!(!client.send_lock.lock().tmp_slider.has_new_data);
     assert!(client.recv.recvd_slider.has_new_data);
 
     let delivered = Arc::new(Mutex::new(Vec::new()));
     let delivered_for_cb = Arc::clone(&delivered);
     let mut mode = RunMode::Callback {
         on_data: Box::new(move |cmd, payload| {
-            delivered_for_cb
-                .lock()
-                .unwrap()
-                .push((cmd, payload.to_vec()));
+            delivered_for_cb.lock().push((cmd, payload.to_vec()));
         }),
     };
     ProtocolCore {
@@ -338,10 +328,10 @@ fn ping_ack_reader_core_is_not_reapplied_by_main_ping_branch() {
         &mut mode,
     );
     drop(mode);
-    let delivered = Arc::try_unwrap(delivered).unwrap().into_inner().unwrap();
+    let delivered = Arc::try_unwrap(delivered).unwrap().into_inner();
 
     assert!(
-        !client.send_lock.lock().unwrap().tmp_slider.has_new_data,
+        !client.send_lock.lock().tmp_slider.has_new_data,
         "main Ping branch must not write TmpSlider again after reader DataReadInt core"
     );
     assert_eq!(delivered.len(), 1);
@@ -957,7 +947,7 @@ fn sliced_retry_clock_ignores_acked_blocks() {
     sliced.retry_count = 5;
     client.sending.push(sliced);
 
-    let mut ack = [0u8; 34];
+    let mut ack = [0u8; slicing::ACK256_WIRE_SIZE];
     ack[0] = 0b0000_0011; // blocks 0 and 1 ACKed; block 2 still pending.
     ack[32..34].copy_from_slice(&1u16.to_le_bytes());
     client.on_new_sliced_ack(&ack);
@@ -1025,7 +1015,7 @@ fn sliced_ack_applies_only_first_matching_datagram() {
     client.sending.push(first);
     client.sending.push(second);
 
-    let mut ack = [0u8; 34];
+    let mut ack = [0u8; slicing::ACK256_WIRE_SIZE];
     ack[0] = 0b0000_0001; // complete for first datagram, partial for second if wrongly applied.
     ack[32..34].copy_from_slice(&7u16.to_le_bytes());
 
@@ -1052,7 +1042,7 @@ fn sliced_ack_reader_queues_writer_applies() {
     let mut client = Client::new(dummy_cfg());
     client.sending.push(sent_sliced_with_lengths(&[10], 100));
 
-    let mut ack = [0u8; 34];
+    let mut ack = [0u8; slicing::ACK256_WIRE_SIZE];
     ack[0] = 0b0000_0001;
     ack[32..34].copy_from_slice(&1u16.to_le_bytes());
 
@@ -1085,10 +1075,9 @@ fn writer_tick_copies_ack_queues_then_check_sening_data() {
     client
         .send_lock
         .lock()
-        .unwrap()
         .apply_ping_ack_bitmap(&ping_payload_with_ack(40, &[1 << 2]));
 
-    let mut ack = [0u8; 34];
+    let mut ack = [0u8; slicing::ACK256_WIRE_SIZE];
     ack[0] = 0b0000_0001;
     ack[32..34].copy_from_slice(&1u16.to_le_bytes());
     client.on_new_sliced_ack(&ack);
@@ -1115,7 +1104,7 @@ fn writer_tick_copies_ack_queues_then_check_sening_data() {
         "GetCopyAcks must clear reader-to-writer ACK queue before CheckSeningData"
     );
     assert!(
-        !client.send_lock.lock().unwrap().tmp_slider.has_new_data,
+        !client.send_lock.lock().tmp_slider.has_new_data,
         "CopyRecvdData must clear TmpSlider after snapshot"
     );
 }
@@ -1135,12 +1124,12 @@ fn send_lock_snapshot_copies_send_acks_and_tmp_slider_atomically() {
         last_sent_at: 0,
         u_key: UniqueKey::base_ui_settings_slot(),
     };
-    let mut ack = [0u8; 34];
+    let mut ack = [0u8; slicing::ACK256_WIRE_SIZE];
     ack[0] = 1;
     ack[32..34].copy_from_slice(&9u16.to_le_bytes());
 
     {
-        let mut send_lock = client.send_lock.lock().unwrap();
+        let mut send_lock = client.send_lock.lock();
         send_lock.push_send_cmd_int(send_item);
         send_lock.push_sliced_ack(Client::parse_sliced_ack_payload(&ack).unwrap());
         send_lock.apply_ping_ack_bitmap(&ping_payload_with_ack(40, &[1 << 2]));
@@ -1161,7 +1150,7 @@ fn send_lock_snapshot_copies_send_acks_and_tmp_slider_atomically() {
     assert_eq!(acks.len(), 1);
     assert_eq!(acks[0].datagram_num, 9);
     assert!(client.recv.recvd_slider.has_new_data);
-    let send_lock = client.send_lock.lock().unwrap();
+    let send_lock = client.send_lock.lock();
     assert!(send_lock.send_queues.is_empty());
     assert!(send_lock.incoming_sliced_acks.is_empty());
     assert!(

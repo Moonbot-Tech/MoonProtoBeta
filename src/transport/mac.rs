@@ -17,18 +17,26 @@ use super::MoonKey;
 /// not a one-shot. Forgery is bounded by the 32-bit output, not the round count,
 /// so the truncated SipHash-1-3 is sufficient. Commands that move
 /// money/orders/strategies are authenticated separately by AES-128-GCM (128-bit
-/// tag + replay window). Defeating this tag lets an attacker tamper only with the
-/// plaintext transport: the public market feed (display) and the Ping control
-/// channel (operational hints — incoming-status time correction, PMTU, send-rate).
-/// This does not shrink the attacker's worst case: the same on-path attacker can
-/// drop packets, and for a leveraged client a dropped channel is the dominant,
-/// unpreventable harm (loss of position control -> liquidation). Tampering here is
-/// strictly weaker — order/account integrity stays under AES-128-GCM (the core
-/// executes, not the display), the effect self-corrects on the next live packet
-/// unless the attacker also drops (the dominant-harm regime again), and the
-/// residual is bounded well below a liquidation. Judge this width by that actual
-/// gain — keyless forge is already impractical, replay is unaffected by width —
-/// not the reflex that 32 < 128.
+/// tag + replay window), so defeating this tag never lets an attacker forge, alter
+/// or replay an order/balance/strategy — only tamper with the plaintext transport.
+/// That transport is two sub-channels, and they are NOT equally benign:
+///   - The public market feed (prices/trades/book) is display only: the core never
+///     executes on it, so a forged value is overwritten by the next live packet —
+///     strictly weaker than a drop.
+///   - The Ping control channel carries operational hints (incoming-status time,
+///     PMTU, send-rate) AND the reliable-send ACK bitmap. A forged Ping can mark an
+///     undelivered reliable command as acknowledged and suppress its retransmit
+///     (see `apply_regular_hl_ack`). For that one command that is marginally WORSE
+///     than a drop (a drop is retried; a false ACK is sticky), so the
+///     "self-corrects / strictly weaker than a drop" reasoning does NOT cover it.
+/// Even so the worst plaintext-transport tampering stays short of the account
+/// boundary: it is forge-gated (2^32 per delivered packet), the command content
+/// stays GCM-authenticated (only delivery is suppressed, never altered), and the
+/// absent server confirmation is observable to the application. Against all of it,
+/// the same on-path attacker can simply drop packets, and for a leveraged client a
+/// dropped channel is the dominant, unpreventable harm (loss of position control
+/// -> liquidation). Judge this width by that actual gain — keyless forge is
+/// impractical, replay is unaffected by width — not the reflex that 32 < 128.
 /// One SipHash round (`SIPROUND`), operating in place on the four state words.
 macro_rules! sipround {
     ($v0:ident, $v1:ident, $v2:ident, $v3:ident) => {{

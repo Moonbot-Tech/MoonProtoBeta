@@ -21,7 +21,7 @@ impl ProtocolCore<'_> {
     }
 
     pub(crate) fn build_hello_again_packet(&mut self) -> Option<Vec<u8>> {
-        if self.client.encode_cipher.is_none() {
+        if self.client.server_token == 0 {
             return None;
         }
         self.client.client_token = self.client.client_token.wrapping_add(1);
@@ -29,12 +29,16 @@ impl ProtocolCore<'_> {
         hello.rnd = self.client.handshake_rnd;
         hello.timestamp = delphi_now();
         hello.server_token = self.client.server_token;
-        hello.peer_mix = crypto::mix_values(&hello.rnd, hello.mix_ts, self.client.server_token);
+        hello.peer_mix = crypto::calculate_hello_again_peer_mix(
+            &hello.rnd,
+            hello.mix_ts,
+            self.client.server_token,
+            &self.client.session_rnd,
+        );
         let packed = hello.to_bytes_packed();
         let aad =
             handshake::handshake_aad(self.client.cfg.client_id, Command::HelloAgain.to_byte());
-        let cipher = self.client.encode_cipher.as_ref()?;
-        Some(crypto::encrypt_with_cipher(cipher, &packed, &aad))
+        Some(crypto::encrypt(&self.client.cfg.master_key, &packed, &aad))
     }
 
     pub(crate) fn send_hello_again(&mut self) {

@@ -10,7 +10,7 @@ impl Client {
     /// for the UI ("connected to Binance Futures, USDT") and for multi-server identification.
     ///
     /// See [`crate::commands::engine_api::ServerInfo`].
-    pub fn server_info(&self) -> &crate::commands::engine_api::ServerInfo {
+    pub(crate) fn server_info(&self) -> &crate::commands::engine_api::ServerInfo {
         &self.identity.server_info
     }
 
@@ -19,13 +19,13 @@ impl Client {
     /// Filled automatically by the one-time Init sequence.
     /// Returns `None` before a successful AuthCheck, or if a successful response
     /// had a malformed mandatory AuthCheck payload.
-    pub fn auth_info(&self) -> Option<&crate::commands::engine_api::AuthCheckResponse> {
+    pub(crate) fn auth_info(&self) -> Option<&crate::commands::engine_api::AuthCheckResponse> {
         self.identity.auth_info.as_ref()
     }
 
     /// Set `ServerInfo` manually. Usually not needed — Init does this
     /// automatically. Useful only for internal protocol tests.
-    pub fn set_server_info(&mut self, info: crate::commands::engine_api::ServerInfo) {
+    pub(crate) fn set_server_info(&mut self, info: crate::commands::engine_api::ServerInfo) {
         // opt #7 parity: cache the base currency name as Arc<str>, so per-packet
         // `from_client` clones a refcount instead of heap-cloning the string (Delphi reads cfg inline).
         self.identity.server_base_currency_name_arc =
@@ -39,7 +39,7 @@ impl Client {
     }
 
     /// Set per-account AuthCheck metadata manually for custom init flows.
-    pub fn set_auth_info(&mut self, info: crate::commands::engine_api::AuthCheckResponse) {
+    pub(crate) fn set_auth_info(&mut self, info: crate::commands::engine_api::AuthCheckResponse) {
         self.identity.auth_info = Some(info);
     }
 
@@ -53,7 +53,7 @@ impl Client {
     /// Existing-order actions should usually use the `*_tracked_order` wrappers
     /// instead, because they derive the route and current status from
     /// `EventDispatcher::orders()` state.
-    pub fn trade_ctx(
+    pub(crate) fn trade_ctx(
         &self,
         uid: u64,
     ) -> Result<crate::commands::trade::TradeCtx, TradeContextError> {
@@ -77,7 +77,9 @@ impl Client {
     /// be unique for the outgoing command. For actions on an existing order,
     /// prefer tracked-order wrappers because their UID must be the server order
     /// task id.
-    pub fn random_trade_ctx(&self) -> Result<crate::commands::trade::TradeCtx, TradeContextError> {
+    pub(crate) fn random_trade_ctx(
+        &self,
+    ) -> Result<crate::commands::trade::TradeCtx, TradeContextError> {
         self.trade_ctx(rand::random())
     }
 
@@ -88,7 +90,8 @@ impl Client {
     /// `Ok(())` means [`Self::trade_ctx`] / [`Self::new_order`] can build a route
     /// now; `Err` names the missing field(s). This is the cheap predicate to gate
     /// a UI trade affordance without constructing and discarding a `TradeCtx`.
-    pub fn trade_route_status(&self) -> Result<(), TradeContextError> {
+    #[cfg(test)]
+    pub(crate) fn trade_route_status(&self) -> Result<(), TradeContextError> {
         match TradeContextError::from_server_info(&self.identity.server_info) {
             Some(err) => Err(err),
             None => Ok(()),
@@ -97,21 +100,9 @@ impl Client {
 
     /// `true` when [`Self::trade_route_status`] is `Ok` — the session learned the
     /// route fields needed for market-level trade commands.
-    pub fn is_ready_to_trade(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_ready_to_trade(&self) -> bool {
         self.trade_route_status().is_ok()
-    }
-
-    /// Read the streams this session currently has subscribed (orderbooks,
-    /// all-trades, market-maker orders).
-    ///
-    /// This reads the subscription registry — the intent the active library
-    /// maintains and replays across reconnect — not the last received packet.
-    pub fn active_subscriptions(&self) -> ActiveSubscriptions {
-        self.subscriptions
-            .subscription_registry
-            .lock()
-            .unwrap()
-            .active_subscriptions()
     }
 
     /// Shareable handle to this client's `ServerTimeDelta` (days, f64 in u64-bits).
@@ -124,7 +115,7 @@ impl Client {
     ///
     /// `MoonClient` and the low-level active pump link this automatically.
     ///
-    pub fn server_time_delta_handle(&self) -> Arc<std::sync::atomic::AtomicU64> {
+    pub(crate) fn server_time_delta_handle(&self) -> Arc<std::sync::atomic::AtomicU64> {
         Arc::clone(&self.server_time_delta_handle)
     }
 }

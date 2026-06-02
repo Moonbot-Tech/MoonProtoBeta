@@ -20,7 +20,15 @@ impl ExchangeKind {
     pub const ALL: [Self; 3] = [Self::Spot, Self::Futures, Self::Quarterly];
 
     #[inline]
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub const fn to_byte(self) -> u8 {
+        self as u8
+    }
+
+    #[inline]
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) const fn to_byte(self) -> u8 {
         self as u8
     }
 
@@ -37,6 +45,8 @@ impl ExchangeKind {
         }
     }
 
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub const fn from_byte(value: u8) -> Option<Self> {
         match value {
             0 => Some(Self::Spot),
@@ -47,17 +57,12 @@ impl ExchangeKind {
     }
 }
 
-impl From<ExchangeKind> for u8 {
-    fn from(value: ExchangeKind) -> Self {
-        value.to_byte()
-    }
-}
-
 /// Event emitted after an async transfer-assets refresh request completes.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TransferAssetsEvent {
     Updated {
         kind: ExchangeKind,
+        #[cfg(any(test, feature = "diagnostics"))]
         #[doc(hidden)]
         request_uid: u64,
         count: usize,
@@ -65,6 +70,7 @@ pub enum TransferAssetsEvent {
         revision: u64,
     },
     RefreshCompleted {
+        #[cfg(any(test, feature = "diagnostics"))]
         #[doc(hidden)]
         request_id: u64,
         requested: usize,
@@ -74,6 +80,7 @@ pub enum TransferAssetsEvent {
     },
     UpdateFailed {
         kind: ExchangeKind,
+        #[cfg(any(test, feature = "diagnostics"))]
         #[doc(hidden)]
         request_uid: Option<u64>,
         error: String,
@@ -83,6 +90,7 @@ pub enum TransferAssetsEvent {
         qty: f64,
         from: ExchangeKind,
         to: ExchangeKind,
+        #[cfg(any(test, feature = "diagnostics"))]
         #[doc(hidden)]
         request_uid: u64,
         revision: u64,
@@ -130,6 +138,8 @@ impl TransferAssetsState {
         request_uid: u64,
         assets: Vec<TransferAsset>,
     ) -> TransferAssetsEvent {
+        #[cfg(not(any(test, feature = "diagnostics")))]
+        let _ = request_uid;
         self.revision = self.revision.wrapping_add(1).max(1);
         self.revision_by_kind[kind.as_index()] = self.revision;
         let nonzero_count = assets
@@ -140,6 +150,7 @@ impl TransferAssetsState {
         self.by_kind[kind.as_index()] = Arc::new(assets);
         TransferAssetsEvent::Updated {
             kind,
+            #[cfg(any(test, feature = "diagnostics"))]
             request_uid,
             count,
             nonzero_count,
@@ -156,6 +167,8 @@ impl TransferAssetsState {
         to: ExchangeKind,
         request_uid: u64,
     ) -> TransferAssetsEvent {
+        #[cfg(not(any(test, feature = "diagnostics")))]
+        let _ = request_uid;
         self.revision = self.revision.wrapping_add(1).max(1);
         self.revision_by_kind[from.as_index()] = self.revision;
         self.revision_by_kind[to.as_index()] = self.revision;
@@ -189,6 +202,7 @@ impl TransferAssetsState {
             qty,
             from,
             to,
+            #[cfg(any(test, feature = "diagnostics"))]
             request_uid,
             revision: self.revision,
         }

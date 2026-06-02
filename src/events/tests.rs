@@ -1,6 +1,7 @@
 use super::*;
 use crate::commands::arb::build_arb_prices;
 use crate::commands::balance::build_request_balance_refresh;
+use crate::commands::engine_api::EngineMethod;
 use crate::commands::market::{
     build_markets_prices_response, write_market, BaseCurrency, ExchangeCode, Market,
     MarketPriceUpdate, MarketsListResponse, MarketsPricesResponse, PositionType,
@@ -16,7 +17,6 @@ use crate::commands::trade::{
     OrderCompact, OrderStatus, OrderStatusUpdate, OrderTracePoint, OrderType, OrderUpdateData,
     OrderWorkerStatus, SetImmuneCommand, StopSettings, TradeCommand, TradeCtx, TradeEpochHeader,
 };
-use crate::commands::EngineMethod;
 use crate::state::orders::OrderCancelSend;
 use crate::state::{OrderBookKind, DELPHI_MSECS_PER_DAY};
 
@@ -26,6 +26,10 @@ fn server_time_delta_test_lock() -> std::sync::MutexGuard<'static, ()> {
     SERVER_TIME_DELTA_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn mt(days: f64) -> crate::MoonTime {
+    crate::state::history::moon_time_from_delphi_days(days)
 }
 
 fn write_str8(out: &mut Vec<u8>, value: &str) {
@@ -62,6 +66,7 @@ fn apply_comment_strategy_schema(dispatcher: &mut EventDispatcher) {
     let ev = dispatcher.strats.apply(StratCommand::Schema(StratSchema {
         data: comment_strategy_schema_payload(),
     }));
+    let ev = ev.expect("schema command must emit a schema event");
     assert!(matches!(
         ev,
         StratEvent::SchemaApplied {
@@ -817,7 +822,7 @@ fn dispatcher_keeps_sell_done_order_for_delphi_final_trace_grace() {
         out.last(),
         Some(Event::Order(OrderEvent::TracePoint { uid: found })) if *found == uid
     ));
-    assert_eq!(d.orders().get(uid).unwrap().trace_points.len(), 1);
+    assert!(d.orders().get(uid).is_some());
 
     out.clear();
     d.drain_deferred_order_removals_due(1400, &mut out);
@@ -850,7 +855,7 @@ fn dispatcher_keeps_sell_done_order_for_delphi_final_trace_grace() {
         out.last(),
         Some(Event::Order(OrderEvent::TracePoint { uid: found })) if *found == uid
     ));
-    assert_eq!(d.orders().get(uid).unwrap().trace_points.len(), 2);
+    assert!(d.orders().get(uid).is_some());
 
     out.clear();
     d.drain_deferred_order_removals_due(1401, &mut out);
@@ -1157,12 +1162,10 @@ fn dispatcher_routes_strat_to_strats_state() {
     let mut d = EventDispatcher::new();
     let payload = build_snapshot_request(7);
     let events = d.dispatch(Command::Strat, &payload, 1000);
-    assert_eq!(events.len(), 1);
-    match &events[0] {
-        Event::Strat(StratEvent::Ignored) => {} // SnapshotRequest from server is unusual; state ignores
-        Event::Strat(_) => {}
-        other => panic!("expected Strat event, got {:?}", other),
-    }
+    assert!(
+        events.is_empty(),
+        "TStratSnapshotRequest is internal runtime control, not a user event"
+    );
 }
 
 #[test]
@@ -1253,9 +1256,9 @@ fn dispatcher_logmsg_parses_time_and_msg() {
     let events = d.dispatch(Command::LogMsg, &payload, 1000);
     assert_eq!(events.len(), 1);
     match &events[0] {
-        Event::ServerLog { time, msg } => {
-            assert_eq!(*time, 45678.5);
-            assert_eq!(msg, "server log message");
+        Event::ServerLog(log) => {
+            assert_eq!(log.time_delphi().as_days(), 45678.5);
+            assert_eq!(log.msg, "server log message");
         }
         other => panic!("expected ServerLog, got {:?}", other),
     }
@@ -1269,7 +1272,7 @@ fn dispatcher_logmsg_invalid_utf8_uses_delphi_question_mark_fallback() {
     let events = d.dispatch(Command::LogMsg, &payload, 1000);
     assert_eq!(events.len(), 1);
     match &events[0] {
-        Event::ServerLog { msg, .. } => assert_eq!(msg, "L?g"),
+        Event::ServerLog(log) => assert_eq!(log.msg, "L?g"),
         other => panic!("expected ServerLog, got {:?}", other),
     }
 }
@@ -1976,7 +1979,7 @@ fn idle_orders_tick_does_not_clone_orders_while_snapshot_held() {
 fn trades_datagram_does_not_clone_trades_state_while_snapshot_held() {
     // Regression guard: TradesState (gap buckets + recvd bitmap) is recovery
     // bookkeeping, not part of the trader-visible read model, so it is kept out
-    // of EventDispatcherSnapshot. on_packet_header mutates it on every trades
+    // of MoonStateSnapshot. on_packet_header mutates it on every trades
     // datagram; with TradesState out of the snapshot its refcount stays 1, so
     // make_mut mutates in place and must not clone the gap buckets while a
     // snapshot is held.
@@ -2043,7 +2046,7 @@ fn active_dispatch_queues_trades_into_history_worker_without_direct_store_write(
         &client,
         &mut actions,
     );
-    assert!(worker.flush(45_000.0));
+    assert!(worker.flush(mt(45_000.0)));
 
     let futures = worker.readers("BTCUSDT").unwrap().futures_trades.unwrap();
     let mut rows = Vec::new();
@@ -2081,7 +2084,7 @@ fn default_history_worker_uses_client_sizing_policy() {
     seed_event_markets(&mut d, &["BTCUSDT"]);
     d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
     d.set_trade_storage_scope(Some(&crate::state::TradeStorageScope::All), 45_000.0);
-    assert!(d.flush_market_history(45_000.0));
+    assert!(d.flush_market_history(mt(45_000.0)));
 
     let readers = d
         .market_history_readers("BTCUSDT")
@@ -2195,7 +2198,7 @@ fn active_dispatch_history_worker_uses_server_index_mapping_not_market_vector_or
         &client,
         &mut actions,
     );
-    assert!(worker.flush(45_000.0));
+    assert!(worker.flush(mt(45_000.0)));
 
     let btc = worker.readers("BTCUSDT").unwrap().futures_trades.unwrap();
     let mut btc_rows = Vec::new();
@@ -2235,7 +2238,7 @@ fn active_dispatch_lazy_starts_default_history_worker_on_trades_subscription() {
         &mut actions,
     );
 
-    assert!(d.flush_market_history(45_000.0));
+    assert!(d.flush_market_history(mt(45_000.0)));
     let futures = d
         .market_history_readers("BTCUSDT")
         .expect("default worker should create storage for subscribed all-trades")
@@ -2283,7 +2286,7 @@ fn active_dispatch_drops_trades_without_subscription_intent() {
 
     assert!(out.is_empty());
     assert!(actions.is_empty());
-    assert!(worker.flush(45_000.0));
+    assert!(worker.flush(mt(45_000.0)));
     assert!(
             worker.readers("BTCUSDT").is_none(),
             "Active Lib must not allocate retained history for unexpected trades without subscription intent"
@@ -2328,7 +2331,7 @@ fn active_dispatch_queues_all_retained_stream_section_kinds_into_history_worker(
         &client,
         &mut actions,
     );
-    assert!(worker.flush(45_000.0));
+    assert!(worker.flush(mt(45_000.0)));
 
     let readers = worker.readers("BTCUSDT").unwrap();
     let futures = readers.futures_trades.clone().unwrap();
@@ -2518,21 +2521,42 @@ fn active_dispatch_queues_update_markets_last_price_into_history_worker() {
     let mut out = Vec::new();
     let mut actions = Vec::new();
     d.dispatch_into_active_actions(Command::API, &payload, 7_000, &mut out, &ctx, &mut actions);
-    assert!(worker.flush(45_000.5));
+    assert!(worker.flush(mt(45_000.5)));
 
     let last_prices = worker.readers("BTCUSDT").unwrap().last_prices.unwrap();
     let mut rows = Vec::new();
     last_prices.copy_last(4, &mut rows);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].current, 101.0);
-    assert_eq!(rows[0].real_time, 45_000.5);
+    assert_eq!(rows[0].time, mt(45_000.5));
 
     let mark_prices = worker.readers("BTCUSDT").unwrap().mark_prices.unwrap();
     let mut mark_rows = Vec::new();
     mark_prices.copy_last(4, &mut mark_rows);
     assert_eq!(mark_rows.len(), 1);
     assert_eq!(mark_rows[0].current, 101.0);
-    assert_eq!(mark_rows[0].real_time, 45_000.5);
+    assert_eq!(mark_rows[0].time, mt(45_000.5));
+}
+
+#[test]
+fn api_update_markets_list_rejects_impossible_price_count_before_apply() {
+    let mut d = EventDispatcher::new();
+    seed_event_markets(&mut d, &["BTCUSDT"]);
+    d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
+
+    let mut data = Vec::new();
+    data.push(0); // HasFunding=false
+    data.extend_from_slice(&i32::MAX.to_le_bytes());
+    let payload = api_response_payload_ver(3, EngineMethod::UpdateMarketsList, &data);
+
+    let events = d.dispatch(Command::API, &payload, 7_000);
+
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Markets(MarketsEvent::PricesUpdated { .. }))),
+        "malformed UpdateMarketsList must not enter the price apply/history path"
+    );
 }
 
 #[test]
@@ -2577,14 +2601,14 @@ fn enabling_trade_storage_backfills_current_last_price_history() {
     d.markets.apply_markets_prices_payload(&data);
 
     d.set_trade_storage_scope(Some(&TradeStorageScope::All), 45_001.0);
-    assert!(worker.flush(45_001.0));
+    assert!(worker.flush(mt(45_001.0)));
 
     let last_prices = worker.readers("BTCUSDT").unwrap().last_prices.unwrap();
     let mut rows = Vec::new();
     last_prices.copy_last(4, &mut rows);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].current, 202.0);
-    assert_eq!(rows[0].real_time, 45_001.0);
+    assert_eq!(rows[0].time, mt(45_001.0));
 }
 
 #[test]
@@ -3027,7 +3051,7 @@ fn dummy_client_cfg() -> crate::client::ClientConfig {
         server_port: 3000,
         master_key: [0; 16],
         mac_key: [0; 16],
-        mask_ver: crate::client::TransportMode::V0,
+        transport_mode: crate::client::TransportMode::V0,
         client_id: 0,
         ntp_host: None,
         refresh: crate::client::RefreshConfig {
@@ -3575,8 +3599,8 @@ fn dispatch_into_active_auto_links_server_time_delta_source() {
 
 #[test]
 fn snapshot_requested_with_provider_triggers_fresh_reply() {
-    // Active library auto-action 2: on SnapshotRequested → if the application
-    // supplied a provider, the library takes a fresh snapshot from the provider and sends the reply.
+    // Active library auto-action 2: on server TStratSnapshotRequest, the library
+    // takes a fresh snapshot from the provider and sends the reply.
     let mut d = EventDispatcher::new();
     let fresh_snapshot = vec![0xAA, 0xBB, 0xCC, 0xDD];
     let fresh_for_provider = fresh_snapshot.clone();
@@ -3640,16 +3664,9 @@ fn snapshot_requested_with_provider_triggers_fresh_reply() {
         "after a SnapshotRequest with a provider — there must be a fresh send"
     );
 
-    // out contains the SnapshotRequested event (the app sees it too, for UI awareness).
-    let has_snapshot_event = out.iter().any(|ev| {
-        matches!(
-            ev,
-            Event::Strat(crate::state::StratEvent::SnapshotRequested { uid: 42 })
-        )
-    });
     assert!(
-        has_snapshot_event,
-        "the SnapshotRequested event must be in out (for app awareness)"
+        out.is_empty(),
+        "TStratSnapshotRequest must not leak through the active event sink"
     );
 }
 
@@ -3700,14 +3717,10 @@ fn snapshot_requested_without_provider_sends_owned_empty_snapshot() {
         "without a provider — an empty owned snapshot must be sent"
     );
 
-    // The SnapshotRequested event still reaches the app for UI/diagnostics.
-    let has_event = out.iter().any(|ev| {
-        matches!(
-            ev,
-            Event::Strat(crate::state::StratEvent::SnapshotRequested { .. })
-        )
-    });
-    assert!(has_event);
+    assert!(
+        out.is_empty(),
+        "TStratSnapshotRequest must stay internal after sending the owned reply"
+    );
 }
 
 #[test]
@@ -3751,10 +3764,10 @@ fn pre_init_snapshot_request_is_latched_until_post_init_flush() {
         0,
         "provider must not be called before post-init flush"
     );
-    assert!(out.iter().any(|ev| matches!(
-        ev,
-        Event::Strat(crate::state::StratEvent::SnapshotRequested { uid: 123 })
-    )));
+    assert!(
+        out.is_empty(),
+        "pre-init TStratSnapshotRequest latch must not publish a user event"
+    );
 
     let reply = d
         .pending_or_local_strategy_snapshot_reply()

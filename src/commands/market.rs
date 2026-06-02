@@ -16,7 +16,9 @@ use std::collections::HashMap;
 
 use super::candles::current_local_time_shift_minutes;
 use super::trade::OrderType;
+#[cfg(any(test, feature = "diagnostics"))]
 use crate::time::DelphiTime;
+use crate::time::MoonTime;
 const MINS_IN_DAY: f64 = 1440.0;
 
 mod indexes;
@@ -41,7 +43,11 @@ use self::prices::{
     build_markets_prices_response_with_local_shift, parse_markets_prices_response_with_local_shift,
 };
 #[doc(hidden)]
-pub(crate) use self::prices::{CorrMarketPriceUpdate, MarketPriceUpdate, MarketsPricesResponse};
+pub(crate) use self::prices::{
+    CorrMarketPriceUpdate, MarketPriceUpdate, MarketsPricesResponse, CORR_PRICE_ROW_MIN_SIZE,
+    MARKET_PRICE_ROW_MIN_SIZE_NO_FUNDING, MARKET_PRICE_ROW_MIN_SIZE_WITH_FUNDING,
+    MAX_MARKET_PRICE_UPDATE_ROWS,
+};
 #[doc(hidden)]
 pub(crate) use self::reader::EngineStreamReader;
 #[doc(hidden)]
@@ -81,11 +87,25 @@ impl ExchangeCode {
     pub const Next5: Self = Self(14);
     pub const Next6: Self = Self(15);
 
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub const fn from_byte(b: u8) -> Self {
         Self(b)
     }
 
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) const fn from_byte(b: u8) -> Self {
+        Self(b)
+    }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub const fn to_byte(self) -> u8 {
+        self.0
+    }
+
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) const fn to_byte(self) -> u8 {
         self.0
     }
 
@@ -168,11 +188,25 @@ impl BaseCurrency {
     pub const EMPTY: Self = Self(25);
     pub const UNKNOWN: Self = Self(26);
 
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub const fn from_byte(b: u8) -> Self {
         Self(b)
     }
 
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) const fn from_byte(b: u8) -> Self {
+        Self(b)
+    }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub const fn to_byte(self) -> u8 {
+        self.0
+    }
+
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) const fn to_byte(self) -> u8 {
         self.0
     }
 
@@ -259,11 +293,25 @@ impl PositionType {
     pub const Cross: Self = Self(0);
     pub const Isolated: Self = Self(1);
 
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub const fn from_byte(b: u8) -> Self {
         Self(b)
     }
 
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) const fn from_byte(b: u8) -> Self {
+        Self(b)
+    }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub const fn to_byte(self) -> u8 {
+        self.0
+    }
+
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) const fn to_byte(self) -> u8 {
         self.0
     }
 
@@ -332,7 +380,14 @@ impl ArbPlatformCode {
     pub const BinAlpha: Self = Self(103);
     pub const HL_DEX_BASE: u8 = 50;
 
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub const fn from_byte(b: u8) -> Self {
+        Self(b)
+    }
+
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) const fn from_byte(b: u8) -> Self {
         Self(b)
     }
 
@@ -344,7 +399,14 @@ impl ArbPlatformCode {
         Self(Self::HL_DEX_BASE.wrapping_add(index))
     }
 
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub const fn to_byte(self) -> u8 {
+        self.0
+    }
+
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) const fn to_byte(self) -> u8 {
         self.0
     }
 
@@ -399,11 +461,25 @@ impl ArbIsolationFlags {
     pub const DepositBlocked: Self = Self(0b0000_0001);
     pub const WithdrawBlocked: Self = Self(0b0000_0010);
 
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub const fn from_byte(b: u8) -> Self {
         Self(b)
     }
 
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) const fn from_byte(b: u8) -> Self {
+        Self(b)
+    }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub const fn to_byte(self) -> u8 {
+        self.0
+    }
+
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) const fn to_byte(self) -> u8 {
         self.0
     }
 
@@ -440,75 +516,148 @@ impl std::fmt::Debug for ArbIsolationFlags {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Market {
     // --- Strings (10) ---
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub bn_market_name: String,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) bn_market_name: String,
     pub market_currency: String,
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub bn_market_currency: String,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) bn_market_currency: String,
     pub base_currency: String,
     pub market_currency_long: String,
     pub market_currency_canonic: String,
     pub market_name: String,
     pub market_name_mb_classic: String,
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub bn_status: String,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) bn_status: String,
     pub leading1000: String,
     // --- Integers (6) ---
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub bn_price_precision: i32,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) bn_price_precision: i32,
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub bn_quantity_precision: i32,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) bn_quantity_precision: i32,
     pub max_leverage: i32,
     pub k1000: i32,
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub bn_iceberg_parts: i32,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) bn_iceberg_parts: i32,
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub bn_margin_table_id: i32,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) bn_margin_table_id: i32,
     // --- Int64 (1) ---
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub bn_delivery_time: i64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) bn_delivery_time: i64,
     // --- Doubles (20) ---
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub bn_tick_size: f64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) bn_tick_size: f64,
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub bn_step_size: f64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) bn_step_size: f64,
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub bn_min_qty: f64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) bn_min_qty: f64,
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub bn_max_qty: f64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) bn_max_qty: f64,
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub bn_min_notional: f64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) bn_min_notional: f64,
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub bn_max_notional: f64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) bn_max_notional: f64,
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub bn_contract_size: f64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) bn_contract_size: f64,
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub bn_min_price: f64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) bn_min_price: f64,
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub bn_max_price: f64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) bn_max_price: f64,
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub bn_max_value: f64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) bn_max_value: f64,
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub bn_multiplier_up: f64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) bn_multiplier_up: f64,
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub bn_multiplier_down: f64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) bn_multiplier_down: f64,
     pub bid_multiplier_up: f64,
     pub bid_multiplier_down: f64,
     pub ask_multiplier_up: f64,
     pub ask_multiplier_down: f64,
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub int_bn_max_qty: f64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) int_bn_max_qty: f64,
     pub funding_rate: f64,
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub funding_time: f64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) funding_time: f64,
     pub volume: f64,
     // --- Booleans (5) ---
     pub is_btc_market: bool,
     pub status_trading: bool,
     pub has_1000_prefix_alias: bool,
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub bn_iceberg: bool,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) bn_iceberg: bool,
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub bn_only_isolated: bool,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) bn_only_isolated: bool,
     // --- v2: FuturesType ---
     pub futures_type: BaseCurrency,
     // --- Active Lib live balance / position state (Delphi TMarket fields) ---
@@ -533,15 +682,26 @@ pub struct Market {
     pub total_profit_s: f64,
     pub leverage_x: i32,
     pub position_type: PositionType,
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub balance_hash: u64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) balance_hash: u64,
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub last_balance_epoch: u16,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) last_balance_epoch: u16,
     // --- Active Lib live trade tail state (Delphi TMarket trade fields) ---
     pub trade_tail: MarketTradeState,
     // --- Active Lib live price state (Delphi TMarket bid/ask/last/mark fields) ---
     pub price: MarketPrice,
     // --- Active Lib live arbitrage state (Delphi TMarket.ArbSlots/ArbNow) ---
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub arb_slots: HashMap<ArbPlatformCode, MarketArbSlot>,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) arb_slots: HashMap<ArbPlatformCode, MarketArbSlot>,
 }
 
 /// Delphi `TMarket` live trade tail fields maintained from `MPC_TradesStream`.
@@ -634,7 +794,11 @@ pub struct MarketPrice {
     /// Funding rate for perpetual futures, for example `0.0001` = 0.01%.
     pub funding_rate: f64,
     /// Client-local Delphi `TDateTime` for the next funding charge.
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub funding_time: f64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) funding_time: f64,
     /// Exchange mark price used for PnL/liquidation calculations.
     pub mark_price: f64,
     /// Whether the latest update carried a mark price.
@@ -642,6 +806,12 @@ pub struct MarketPrice {
 }
 
 impl MarketPrice {
+    pub fn funding_time(self) -> MoonTime {
+        MoonTime::from_delphi_days(self.funding_time).unwrap_or(MoonTime::ZERO)
+    }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub fn funding_time_delphi(self) -> DelphiTime {
         DelphiTime::from_days(self.funding_time)
     }
@@ -761,8 +931,8 @@ impl Market {
         self.total_profit_b + self.total_profit_l + self.total_profit_s
     }
 
-    pub fn funding_time_delphi(&self) -> DelphiTime {
-        DelphiTime::from_days(self.funding_time)
+    pub fn funding_time(&self) -> MoonTime {
+        MoonTime::from_delphi_days(self.funding_time).unwrap_or(MoonTime::ZERO)
     }
 }
 
@@ -771,25 +941,53 @@ pub(crate) const ARB_PRICE_RING_LEN: usize = 10;
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct MarketArbPricePoint {
     pub price: f32,
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub time: f64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) time: f64,
     pub my_price: f32,
 }
 
 impl MarketArbPricePoint {
+    pub fn time(self) -> MoonTime {
+        MoonTime::from_delphi_days(self.time).unwrap_or(MoonTime::ZERO)
+    }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub fn time_delphi(self) -> DelphiTime {
         DelphiTime::from_days(self.time)
+    }
+
+    pub fn unix_millis(self) -> Option<i64> {
+        Some(self.time().unix_millis())
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct MarketArbNowEntry {
     pub price: f32,
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub time: f64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) time: f64,
 }
 
 impl MarketArbNowEntry {
+    pub fn time(self) -> MoonTime {
+        MoonTime::from_delphi_days(self.time).unwrap_or(MoonTime::ZERO)
+    }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub fn time_delphi(self) -> DelphiTime {
         DelphiTime::from_days(self.time)
+    }
+
+    pub fn unix_millis(self) -> Option<i64> {
+        Some(self.time().unix_millis())
     }
 }
 
@@ -818,8 +1016,14 @@ impl Default for MarketArbSlot {
 
 impl MarketArbSlot {
     /// Current write head inside the fixed Delphi 10-point arb ring.
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub fn head_index(&self) -> usize {
+        self.head as usize
+    }
+
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    fn head_index(&self) -> usize {
         self.head as usize
     }
 

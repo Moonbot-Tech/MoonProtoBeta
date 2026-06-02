@@ -3,13 +3,13 @@ use crate::commands::engine_api::ServerInfo;
 use crate::state::MarketHistorySizing;
 use crate::MoonKey;
 use std::time::Duration;
-/// Transport authorization state for one [`crate::client::Client`].
+/// Transport authorization state for one MoonProto runtime.
 ///
 /// This is a low-level diagnostic value. Most applications should watch
-/// [`LifecycleEvent`] and use [`crate::client::Client::is_authorized`] /
-/// [`crate::client::Client::is_domain_ready`] for coarse readiness.
+/// [`LifecycleEvent`] through [`crate::MoonClient`] and treat
+/// [`LifecycleEvent::Ready`] as the application-ready gate.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum AuthStatus {
+pub(crate) enum AuthStatus {
     /// Initial state before any successful transport exchange.
     Base,
     /// Transport connection is established, but domain auth is not complete yet.
@@ -20,8 +20,8 @@ pub enum AuthStatus {
     Offline,
 }
 
-/// Error returned when a session-derived [`crate::commands::trade::TradeCtx`]
-/// cannot be built yet.
+/// Error returned when the current session does not yet have the route fields
+/// required for market-level trade commands.
 ///
 /// Trade command wire headers carry two Delphi enum ordinals from the active
 /// server session: `cfg.BaseCurrency` and `cfg.Header.Current`. They are learned
@@ -73,9 +73,9 @@ impl std::error::Error for TradeContextError {}
 
 /// Lifecycle event for the connection to the MoonProto server.
 ///
-/// Register a callback with [`crate::client::Client::on_lifecycle`]. During client run calls,
-/// the callback is delivered through the application callback queue, not inside
-/// the protocol writer tick.
+/// `MoonClient` publishes lifecycle changes through its configured event sink.
+/// The default queue adapter exposes them through
+/// [`crate::MoonClient::drain_lifecycle_events`].
 ///
 /// Typical sequence:
 /// ```text
@@ -86,11 +86,11 @@ impl std::error::Error for TradeContextError {}
 ///                                                  └──[detected restart]──► ServerRestart
 /// ```
 ///
-/// `Connected` can be emitted several times during one `Client` lifetime after
+/// `Connected` can be emitted several times during one `MoonClient` lifetime after
 /// successful re-handshakes. `fresh = true` is emitted only for the first
-/// connection after `Client::new`; reconnects use `fresh = false`.
+/// connection after the runtime starts; reconnects use `fresh = false`.
 ///
-/// Session invariant: init is a one-time operation for a `Client` session.
+/// Session invariant: init is a one-time operation for a `MoonClient` session.
 /// Before init, transport `Fine` does not start Engine API traffic. After init,
 /// reconnect in the same session restores fresh indexes only after a changed
 /// `PeerAppToken`, refreshes `UpdateMarketsList`, and restores registry
@@ -186,8 +186,8 @@ pub enum LifecycleEvent {
     ServerRestart,
 }
 
-/// Lifecycle callback type registered with [`crate::client::Client::on_lifecycle`].
-pub type LifecycleFn = Box<dyn FnMut(LifecycleEvent) + Send>;
+/// Low-level lifecycle callback type used by the internal protocol runtime.
+pub(crate) type LifecycleFn = Box<dyn FnMut(LifecycleEvent) + Send>;
 
 /// Configuration for periodic refresh requests owned by the active library.
 ///
@@ -228,9 +228,9 @@ impl Default for RefreshConfig {
 
 /// MoonProto transport mode selected on both client and server.
 ///
-/// This is the public form of the Delphi `mask_ver` byte. Wire helpers still
-/// take raw bytes internally; application code should use `TransportMode::V0`,
-/// `TransportMode::V1`, or `TransportMode::V2`.
+/// This is the named public form of the transport selector carried by MoonBot
+/// key exports. Wire helpers still take raw bytes internally; application code
+/// should use `TransportMode::V0`, `TransportMode::V1`, or `TransportMode::V2`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct TransportMode(u8);
 
@@ -240,7 +240,18 @@ impl TransportMode {
     pub const V1: Self = Self(1);
     pub const V2: Self = Self(2);
 
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub const fn from_byte(b: u8) -> Self {
+        Self::from_byte_inner(b)
+    }
+
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) const fn from_byte(b: u8) -> Self {
+        Self::from_byte_inner(b)
+    }
+
+    const fn from_byte_inner(b: u8) -> Self {
         match b {
             1 => Self::V1,
             2 => Self::V2,
@@ -248,7 +259,14 @@ impl TransportMode {
         }
     }
 
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub const fn to_byte(self) -> u8 {
+        self.0
+    }
+
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) const fn to_byte(self) -> u8 {
         self.0
     }
 
@@ -286,7 +304,7 @@ pub struct ClientConfig {
     pub mac_key: MoonKey,
     /// Transport mode (`V0`, `V1`, or `V2`). It must match the server-side
     /// connection setting.
-    pub mask_ver: TransportMode,
+    pub transport_mode: TransportMode,
     /// Client id sent in transport headers. `ClientConfig::new` generates it
     /// randomly; override only for deterministic tools/tests.
     pub client_id: u64,
@@ -333,7 +351,7 @@ impl ClientConfig {
             server_port,
             master_key,
             mac_key,
-            mask_ver: TransportMode::V0,
+            transport_mode: TransportMode::V0,
             client_id: rand::random(),
             ntp_host: Some("pool.ntp.org".to_string()),
             refresh: RefreshConfig::default(),
@@ -343,7 +361,7 @@ impl ClientConfig {
 
     /// Override transport mode.
     pub fn with_transport_mode(mut self, mode: TransportMode) -> Self {
-        self.mask_ver = mode;
+        self.transport_mode = mode;
         self
     }
 
@@ -351,9 +369,10 @@ impl ClientConfig {
     ///
     /// This is for config importers and protocol tests. Application code should
     /// call [`Self::with_transport_mode`] with a named [`TransportMode`].
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub fn with_transport_mode_byte(mut self, mask_ver: u8) -> Self {
-        self.mask_ver = TransportMode::from_byte(mask_ver);
+        self.transport_mode = TransportMode::from_byte(mask_ver);
         self
     }
 
@@ -398,7 +417,7 @@ impl std::fmt::Debug for ClientConfig {
             .field("server_port", &self.server_port)
             .field("master_key", &"<REDACTED>")
             .field("mac_key", &"<REDACTED>")
-            .field("mask_ver", &self.mask_ver)
+            .field("transport_mode", &self.transport_mode)
             .field("client_id", &format_args!("{:#x}", self.client_id))
             .field("ntp_host", &self.ntp_host)
             .field("refresh", &self.refresh)

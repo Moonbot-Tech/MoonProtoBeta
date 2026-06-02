@@ -20,16 +20,16 @@ use log::{debug, error, warn};
 // MoonProto UDP Client architecture follows Delphi receive machine effects
 // inside one ProtocolCore owner: recv drain, immediate service replies,
 // domain dispatch enqueue, then send/maintenance.
+use parking_lot::Mutex;
 use polling::{Event as PollEvent, Poller};
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
 
 mod active_runtime;
 mod app_dispatch;
-mod bps;
 mod candles;
 mod clock;
 mod config;
@@ -81,13 +81,10 @@ pub use active_runtime::{
     MoonTrade, NewOrderParams, NewOrderTicket, OrderSide, OrderTarget, SellOrderParams,
     SplitOrderParams, TradesStreamMode, VStopParams,
 };
-pub use bps::BpsCounter;
 pub(crate) use candles::MergedCandles;
-pub use clock::set_ntp_offset;
-pub use config::{
-    AuthStatus, ClientConfig, LifecycleEvent, LifecycleFn, RefreshConfig, TradeContextError,
-    TransportMode,
-};
+pub(crate) use clock::set_ntp_offset;
+pub(crate) use config::{AuthStatus, LifecycleFn};
+pub use config::{ClientConfig, LifecycleEvent, RefreshConfig, TradeContextError, TransportMode};
 #[cfg(any(test, feature = "diagnostics"))]
 #[doc(hidden)]
 pub use diagnostics::ERR_EMU_RATE;
@@ -101,14 +98,11 @@ pub use diagnostics::{
 pub(crate) use init::{connect_and_init, run_init_sequence, InitResult};
 pub use init::{ConnectConfig, ConnectError, InitConfig, InitError, InitialStrategies};
 #[cfg(any(test, feature = "diagnostics"))]
-pub use metrics::ProtocolMetricsSnapshot;
 #[doc(hidden)]
-pub use send_queue::{
-    SendPriority, UniqueKey, UK_ARB_PRICES, UK_BALANCE_FULL, UK_BASE_UI_SETTINGS, UK_DEX_SWITCH,
-    UK_IMMUNE_CLICKS, UK_LEV_MANAGE_SETTINGS, UK_NONE, UK_ORDER_MOVE, UK_ORDER_STATUS,
-    UK_ORDER_STATUS_SHORT, UK_SPOT_SWITCH, UK_STOP_MOVE, UK_STRAT_SELL_PRICE_UPDATE,
-    UK_STRAT_SNAPSHOT, UK_TURN_MM_DETECTION,
-};
+pub use metrics::ProtocolMetricsSnapshot;
+#[cfg(test)]
+pub(crate) use send_queue::UK_ORDER_MOVE;
+pub(crate) use send_queue::{SendPriority, UniqueKey};
 pub(crate) use sender::{ClientSender, SubscribeError};
 pub use subscriptions::{ActiveSubscriptions, TradesSubscription};
 
@@ -135,9 +129,7 @@ use helpers::*;
 #[cfg(test)]
 pub(crate) use init::{run_base_check_delphi, send_post_init_resync, CriticalInitStatus};
 use lifecycle::ClientLifecycle;
-use metrics::ClientMetrics;
-#[cfg(any(test, feature = "diagnostics"))]
-use metrics::ProtocolMetrics;
+use metrics::{ClientMetrics, ProtocolMetrics};
 use protocol_core::ProtocolCore;
 use refresh_clocks::{PendingApi, RefreshClocks};
 #[cfg(test)]
@@ -181,6 +173,36 @@ impl HelloWaitState {
     #[inline]
     pub(crate) fn allows_fine(self) -> bool {
         matches!(self, Self::PrimaryImFriendSent | Self::RebindHelloAgain)
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct ClientSharedState {
+    pub(crate) subscription_registry: Arc<Mutex<SubscriptionRegistry>>,
+    pub(crate) subscription_summary: Arc<SubscriptionRegistrySummary>,
+    pub(crate) subscription_trades_scope:
+        Arc<parking_lot::RwLock<Option<Arc<crate::state::TradeStorageScope>>>>,
+    pub(crate) server_update_sent: Arc<AtomicBool>,
+    pub(crate) protocol_metrics: Arc<ProtocolMetrics>,
+    #[cfg(any(test, feature = "diagnostics"))]
+    pub(crate) err_emu_diagnostics: Arc<Mutex<ErrEmuDiagnosticsState>>,
+    #[cfg(any(test, feature = "diagnostics"))]
+    pub(crate) debug_outgoing_blackhole: Arc<AtomicBool>,
+}
+
+impl ClientSharedState {
+    pub(crate) fn new() -> Self {
+        Self {
+            subscription_registry: Arc::new(Mutex::new(SubscriptionRegistry::default())),
+            subscription_summary: Arc::new(SubscriptionRegistrySummary::default()),
+            subscription_trades_scope: Arc::new(parking_lot::RwLock::new(None)),
+            server_update_sent: Arc::new(AtomicBool::new(false)),
+            protocol_metrics: Arc::new(ProtocolMetrics::default()),
+            #[cfg(any(test, feature = "diagnostics"))]
+            err_emu_diagnostics: Arc::new(Mutex::new(ErrEmuDiagnosticsState::default())),
+            #[cfg(any(test, feature = "diagnostics"))]
+            debug_outgoing_blackhole: Arc::new(AtomicBool::new(false)),
+        }
     }
 }
 
@@ -230,8 +252,7 @@ impl SessionIdentity {
 /// Regular applications should not own this directly. It remains public under
 /// `moonproto::client` for internal diagnostics and custom protocol tools, but
 /// the application model is [`MoonClient`] plus EventSink/snapshots/intents.
-#[doc(hidden)]
-pub struct Client {
+pub(crate) struct Client {
     cfg: ClientConfig,
 
     /// Runtime/lifecycle state: the lifecycle callback plumbing
@@ -266,6 +287,8 @@ pub struct Client {
     waiting_hello: bool,
     handshake_rnd: [u8; 16],
     handshake_peer_mix: u64,
+    session_rnd: [u8; 16],
+    ack_session32_value: u32,
 
     client_token: u64,
     server_token: u64,
@@ -437,6 +460,16 @@ impl Client {
         self.hello_wait_state.allows_hello_again_retry()
     }
 
+    #[inline]
+    pub(crate) fn refresh_ack_session32(&mut self) {
+        self.ack_session32_value = crypto::ack_session32(
+            &self.cfg.mac_key,
+            self.cfg.client_id,
+            self.server_token,
+            &self.session_rnd,
+        );
+    }
+
     fn has_trades_subscription_intent(&self) -> bool {
         self.subscriptions.subscription_summary.trades_subscribed()
     }
@@ -460,7 +493,12 @@ impl Client {
     /// The returned client owns unbounded Delphi-style protocol queues. Clone
     /// [`Self::sender`] before entering a long-running loop when other UI or
     /// worker threads need to enqueue commands.
-    pub fn new(cfg: ClientConfig) -> Self {
+    #[cfg(test)]
+    pub(crate) fn new(cfg: ClientConfig) -> Self {
+        Self::new_with_shared(cfg, ClientSharedState::new())
+    }
+
+    pub(crate) fn new_with_shared(cfg: ClientConfig, shared: ClientSharedState) -> Self {
         // Delphi queues are ordinary grow-only TList/TDictionary structures with no
         // fixed capacity cap. Keep Rust queues unbounded too: accepted UDP packets
         // and user commands must not disappear because a local channel filled up.
@@ -469,8 +507,6 @@ impl Client {
         let app_queue_alive = Arc::new(AtomicBool::new(true));
         let runtime_shutdown = Arc::new(AtomicBool::new(false));
         let send_lock = Arc::new(Mutex::new(SendLockState::default()));
-        let subscription_summary = Arc::new(SubscriptionRegistrySummary::default());
-        let subscription_trades_scope = Arc::new(parking_lot::RwLock::new(None));
         let domain_ready_flag = Arc::new(AtomicBool::new(false));
         let last_trades_subscribe_request_ms = Arc::new(AtomicI64::new(NEVER_TIME_MS));
         let last_orderbook_subscribe_request_ms = Arc::new(AtomicI64::new(NEVER_TIME_MS));
@@ -512,6 +548,8 @@ impl Client {
             waiting_hello: false,
             handshake_rnd: [0; 16],
             handshake_peer_mix: 0,
+            session_rnd: [0; 16],
+            ack_session32_value: 0,
             client_token: rand::random::<u64>(),
             server_token: 0,
             app_token: rand::random(),
@@ -547,7 +585,13 @@ impl Client {
             can_send_rate: 2 * 1024 * 1024, // StartCanSendRate = 2 MB/s
             used_sliced_limit: false,
             actual_sleep_time: 5.0,
-            metrics: ClientMetrics::new(),
+            metrics: ClientMetrics::new_with_shared(
+                #[cfg(any(test, feature = "diagnostics"))]
+                Arc::clone(&shared.err_emu_diagnostics),
+                Arc::clone(&shared.protocol_metrics),
+                #[cfg(any(test, feature = "diagnostics"))]
+                Arc::clone(&shared.debug_outgoing_blackhole),
+            ),
             tmp_send_buf: Vec::new(),
             tmp_send_count: 0,
             tmp_send_size: 0,
@@ -559,9 +603,10 @@ impl Client {
             ping_count: 0,
             pending_api: PendingApi::new(),
             prev_auth_status: AuthStatus::Base,
-            subscriptions: Subscriptions::new(
-                subscription_summary,
-                subscription_trades_scope,
+            subscriptions: Subscriptions::new_with_registry(
+                Arc::clone(&shared.subscription_registry),
+                Arc::clone(&shared.subscription_summary),
+                Arc::clone(&shared.subscription_trades_scope),
                 domain_ready_flag,
             ),
             reconnect: ReconnectRestore::new(
@@ -572,7 +617,7 @@ impl Client {
             _ntp_process_guard: ntp_process_guard,
             server_time_delta_handle: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             identity: SessionIdentity::new(),
-            refresh_clocks: RefreshClocks::new(Arc::new(AtomicBool::new(false))),
+            refresh_clocks: RefreshClocks::new(Arc::clone(&shared.server_update_sent)),
         }
     }
 

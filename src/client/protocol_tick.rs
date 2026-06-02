@@ -39,7 +39,7 @@ impl ProtocolCore<'_> {
         // Delphi writer sleeps a fixed short tick when there is no outgoing
         // work. In the single-owner Rust loop this wait is also the UDP
         // readable wait; the next loop drains the socket before send phase.
-        if !self.client.send_lock.lock().unwrap().is_empty() {
+        if !self.client.send_lock.lock().is_empty() {
             return;
         }
         let timeout = Some(Duration::from_millis(DEFAULT_SLEEP_MS));

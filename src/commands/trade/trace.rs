@@ -1,6 +1,9 @@
 //! Trade visual/trace command payloads.
 
 use super::*;
+#[cfg(any(test, feature = "diagnostics"))]
+use crate::time::DelphiTime;
+use crate::MoonTime;
 
 /// Trace flags (TradeStruct.pas:234): bit0=IsTemp, bit1=IsFinish, bit2=IsInitial.
 pub(crate) mod trace_flags {
@@ -51,9 +54,14 @@ impl OrderTracePoint {
         (self.flags & trace_flags::IS_INITIAL) != 0
     }
 
-    /// Trace time as Delphi `TDateTime`.
-    pub fn trace_time_delphi(&self) -> crate::DelphiTime {
-        crate::DelphiTime::from_days(self.trace_time)
+    pub fn trace_time(&self) -> MoonTime {
+        MoonTime::from_delphi_days(self.trace_time).unwrap_or(MoonTime::ZERO)
+    }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
+    pub fn trace_time_delphi(&self) -> DelphiTime {
+        DelphiTime::from_days(self.trace_time)
     }
 
     pub fn adjust_time(&mut self, delta: f64) {

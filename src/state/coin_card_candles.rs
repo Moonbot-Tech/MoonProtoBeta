@@ -15,6 +15,7 @@ pub enum CoinCardCandlesEvent {
     Updated {
         market: String,
         kind: DeepHistoryKind,
+        #[cfg(any(test, feature = "diagnostics"))]
         #[doc(hidden)]
         request_uid: u64,
         count: usize,
@@ -23,6 +24,7 @@ pub enum CoinCardCandlesEvent {
     UpdateFailed {
         market: String,
         kind: DeepHistoryKind,
+        #[cfg(any(test, feature = "diagnostics"))]
         #[doc(hidden)]
         request_uid: Option<u64>,
         error: String,
@@ -75,6 +77,8 @@ impl CoinCardCandlesState {
         request_uid: u64,
         candles: Vec<DeepPrice>,
     ) -> CoinCardCandlesEvent {
+        #[cfg(not(any(test, feature = "diagnostics")))]
+        let _ = request_uid;
         self.revision = self.revision.wrapping_add(1).max(1);
         let count = candles.len();
         self.by_market.entry(market.clone()).or_default().insert(
@@ -87,6 +91,7 @@ impl CoinCardCandlesState {
         CoinCardCandlesEvent::Updated {
             market,
             kind,
+            #[cfg(any(test, feature = "diagnostics"))]
             request_uid,
             count,
             revision: self.revision,

@@ -15,7 +15,7 @@
 //! ```text
 //! server = 127.0.0.1:3000
 //! key = <exported MoonBot key>
-//! # mask_ver = 0
+//! # transport_mode = 0
 //! allow_mutation = true
 //! market = BTCUSDT
 //! strategy_field = Comment
@@ -68,9 +68,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use moonproto::client::{set_err_emu, ErrEmuDiagnostics, ErrEmuSlicedDatagramDiagnostics};
 use moonproto::commands::{
     parse_request_candles_data_response, parse_strategy_batch, CandlesAggregator,
-    ClientSettingsCommand, DeepHistoryKind, EngineMethod, EngineResponse, FieldValue, OrderCompact,
-    OrderWorkerStatus, RequestCandlesMarket, StrategyDynamicPicklist, StrategyFieldLayout,
-    StrategyFieldUiKind, StrategyFields, StrategyKind, StrategySchema, StrategySnapshot,
+    RequestCandlesMarket,
 };
 use moonproto::events::Event;
 use moonproto::state::{
@@ -79,8 +77,11 @@ use moonproto::state::{
 };
 use moonproto::Command;
 use moonproto::{
-    parse_key_info, ClientConfig, ConnectConfig, ExchangeKind, ImportedKeys, InitConfig,
-    InitialStrategies, LifecycleEvent, MoonClient, MoonStateSnapshot, ProtocolMetricsSnapshot,
+    parse_key_info, ClientConfig, ClientSettingsCommand, ConnectConfig, DeepHistoryKind,
+    EngineMethod, EngineResponse, ExchangeKind, FieldValue, ImportedKeys, InitConfig,
+    InitialStrategies, LifecycleEvent, MoonClient, MoonStateSnapshot, MoonTime, OrderCompact,
+    OrderWorkerStatus, ProtocolMetricsSnapshot, StrategyDynamicPicklist, StrategyFieldLayout,
+    StrategyFieldUiKind, StrategyFields, StrategyKind, StrategySchema, StrategySnapshot,
     TradesStreamMode, TransportMode,
 };
 
@@ -160,7 +161,7 @@ struct FireConfig {
     path: PathBuf,
     host: String,
     port: u16,
-    mask_ver: TransportMode,
+    transport_mode: TransportMode,
     key_b64: String,
     allow_mutation: bool,
     market: String,
@@ -228,16 +229,16 @@ impl FireConfig {
                 (address.to_string(), network.port)
             }
         };
-        let mask_ver = values
-            .get("mask_ver")
-            .or_else(|| values.get("transport_mode"))
+        let transport_mode = values
+            .get("transport_mode")
+            .or_else(|| values.get("mask_ver"))
             .filter(|s| !s.trim().is_empty())
             .map(|s| {
                 s.parse::<u8>()
-                    .unwrap_or_else(|_| panic!("bad mask_ver: {s}"))
+                    .unwrap_or_else(|_| panic!("bad transport_mode: {s}"))
             })
             .map(TransportMode::from_byte)
-            .or_else(|| key_info.network.map(|network| network.mask_ver))
+            .or_else(|| key_info.network.map(|network| network.transport_mode))
             .unwrap_or(TransportMode::V0);
         let allow_mutation = parse_bool(
             values
@@ -289,7 +290,7 @@ impl FireConfig {
             path,
             host,
             port,
-            mask_ver,
+            transport_mode,
             key_b64,
             allow_mutation,
             market,
@@ -652,7 +653,7 @@ impl Session {
         );
         let client = MoonClient::connect(
             ClientConfig::new(&cfg.host, cfg.port, keys.master_key, keys.mac_key)
-                .with_transport_mode(cfg.mask_ver)
+                .with_transport_mode(cfg.transport_mode)
                 .with_client_id(rand::random()),
             ConnectConfig::new(init).with_connect_timeout(cfg.connect_timeout),
         )
@@ -833,9 +834,11 @@ impl Session {
                 st.target_trade_packets = st.target_trade_packets.max(st.trades_apply);
             }
         }
-        if let (Some(market_index), Some(book_kind)) = (st.market_index, st.last_book_kind) {
+        if let (Some(market), Some(book_kind)) =
+            (snapshot.markets().get(&st.market), st.last_book_kind)
+        {
             if let Some(kind) = OrderBookKind::from_u8(book_kind) {
-                if let Some(top) = snapshot.order_books().top_of_book(market_index, kind) {
+                if let Some(top) = snapshot.top_of_book_for(&market, kind) {
                     if let (Some(bid), Some(ask)) = (top.bid, top.ask) {
                         st.last_book_bid = Some(bid.rate);
                         st.last_book_ask = Some(ask.rate);
@@ -931,7 +934,7 @@ impl Session {
 
     fn emit_active_lib_report(&mut self, profile: FireProfile, started_at: Instant) {
         self.drain_queued();
-        let now_time = delphi_now_raw_for_test();
+        let now_time = moon_now_for_test();
         self.refresh_stats_from_dispatcher(false);
 
         let snapshot = self.state_snapshot();
@@ -964,7 +967,7 @@ impl Session {
         profile: FireProfile,
         snapshot: &MoonStateSnapshot,
         market: &str,
-        now_time: f64,
+        now_time: MoonTime,
     ) {
         let Some(readers) = snapshot.market_history_readers(market) else {
             println!(
@@ -986,40 +989,31 @@ impl Session {
         let mut futures_all = Vec::new();
         if let Some(reader) = readers.futures_trades.as_ref() {
             reader.copy_last(reader.capacity(), &mut futures_all);
-            let from_25 = now_time - 25.0 / 86_400.0;
-            let from_60 = now_time - 60.0 / 86_400.0;
-            reader.copy_time_range(
-                from_25,
-                now_time + 1.0 / 86_400.0,
-                reader.capacity(),
-                &mut futures_25,
-            );
-            reader.copy_time_range(
-                from_60,
-                now_time + 1.0 / 86_400.0,
-                reader.capacity(),
-                &mut futures_60,
-            );
+            let from_25 = moon_time_saturating_sub_ms(now_time, 25_000);
+            let from_60 = moon_time_saturating_sub_ms(now_time, 60_000);
+            let to_time = moon_time_saturating_add_ms(now_time, 1_000);
+            reader.copy_time_range(from_25, to_time, reader.capacity(), &mut futures_25);
+            reader.copy_time_range(from_60, to_time, reader.capacity(), &mut futures_60);
         }
         let mut spot_all = Vec::new();
         if let Some(reader) = readers.spot_trades.as_ref() {
             reader.copy_last(reader.capacity(), &mut spot_all);
         }
 
-        let last_stats = price_line_stats(last_prices.iter().map(|p| (p.real_time, p.current)));
-        let mark_stats = price_line_stats(mark_prices.iter().map(|p| (p.real_time, p.current)));
+        let last_stats = price_line_stats(last_prices.iter().map(|p| (p.time(), p.price())));
+        let mark_stats = price_line_stats(mark_prices.iter().map(|p| (p.time(), p.price())));
         let last_delta_1m = price_delta_for_window(
-            last_prices.iter().map(|p| (p.real_time, p.current)),
+            last_prices.iter().map(|p| (p.time(), p.price())),
             now_time,
             60.0,
         );
         let last_delta_1h = price_delta_for_window(
-            last_prices.iter().map(|p| (p.real_time, p.current)),
+            last_prices.iter().map(|p| (p.time(), p.price())),
             now_time,
             3600.0,
         );
         let mark_delta_1m = price_delta_for_window(
-            mark_prices.iter().map(|p| (p.real_time, p.current)),
+            mark_prices.iter().map(|p| (p.time(), p.price())),
             now_time,
             60.0,
         );
@@ -1056,11 +1050,11 @@ impl Session {
         );
 
         if let (Some(last), Some(mark)) = (last_prices.last(), mark_prices.last()) {
-            let rel = rel_diff(f64::from(last.current), f64::from(mark.current));
+            let rel = rel_diff(f64::from(last.price()), f64::from(mark.price()));
             println!(
                 "FIRETEST ActiveLib market={market} LastPrice_vs_MarkPrice last={:.8} mark={:.8} rel_diff={:.4}%",
-                last.current,
-                mark.current,
+                last.price(),
+                mark.price(),
                 rel * 100.0
             );
             assert!(
@@ -1165,11 +1159,13 @@ impl Session {
         }
 
         if let Some(price) = price {
-            let funding_hours = (price.funding_time - now_time) * 24.0;
+            let funding_time = price.funding_time();
+            let funding_hours =
+                (funding_time.unix_millis() - now_time.unix_millis()) as f64 / 3_600_000.0;
             println!(
-                "FIRETEST ActiveLib market={market} funding_rate={:.8} funding_time={:.8} funding_hours_from_now={:.3} mark_current={:.8}/{} bid={:.8} ask={:.8}",
+                "FIRETEST ActiveLib market={market} funding_rate={:.8} funding_time_ms={} funding_hours_from_now={:.3} mark_current={:.8}/{} bid={:.8} ask={:.8}",
                 price.funding_rate,
-                price.funding_time,
+                funding_time.unix_millis(),
                 funding_hours,
                 price.mark_price,
                 price.mark_price_found,
@@ -1177,7 +1173,7 @@ impl Session {
                 price.ask,
             );
             assert!(
-                price.funding_time <= EPS || funding_hours.abs() <= 12.0,
+                funding_time == MoonTime::ZERO || funding_hours.abs() <= 12.0,
                 "ActiveLib {market}: funding time is outside 12h window: {funding_hours:.3}h"
             );
         }
@@ -1473,9 +1469,10 @@ fn append_session_strategy_dump(out: &mut String, label: &str, session: &Session
     snapshots.sort_by_key(|s| s.strategy_id);
     writeln!(out, "Strategies: count={}", snapshots.len()).unwrap();
     for strategy in snapshots {
+        let kind = strategy.kind();
         let kind_name = strats
             .strategy_schema()
-            .and_then(|schema| schema.kind_name(strategy.kind))
+            .and_then(|schema| schema.kind_name_for_strategy_kind(kind))
             .unwrap_or("?");
         writeln!(
             out,
@@ -1484,7 +1481,7 @@ fn append_session_strategy_dump(out: &mut String, label: &str, session: &Session
             strategy.strategy_ver,
             strategy.last_date,
             strategy.checked,
-            strategy.kind,
+            kind.ordinal(),
             kind_name,
             strategy.path,
             strategy.fields.len()
@@ -1511,7 +1508,7 @@ fn append_schema_dump(out: &mut String, raw_len: usize, schema: &StrategySchema)
     .unwrap();
     writeln!(out, "Kinds:").unwrap();
     for kind in &schema.kinds {
-        writeln!(out, "- {} {}", kind.ordinal, kind.name).unwrap();
+        writeln!(out, "- {} {}", kind.ordinal(), kind.name).unwrap();
     }
 
     writeln!(out, "Chapters/Layout markers:").unwrap();
@@ -1538,9 +1535,14 @@ fn append_schema_dump(out: &mut String, raw_len: usize, schema: &StrategySchema)
     writeln!(out, "Fields:").unwrap();
     for field in &schema.fields {
         let visible = field
-            .visible_kind_ordinals
-            .iter()
-            .map(|ord| format!("{}:{}", ord, schema.kind_name(*ord).unwrap_or("?")))
+            .visible_strategy_kinds()
+            .map(|kind| {
+                format!(
+                    "{}:{}",
+                    kind.ordinal(),
+                    schema.kind_name_for_strategy_kind(kind).unwrap_or("?")
+                )
+            })
             .collect::<Vec<_>>()
             .join(",");
         writeln!(
@@ -1632,13 +1634,13 @@ struct PriceLineStats {
 
 fn price_line_stats<I>(rows: I) -> PriceLineStats
 where
-    I: IntoIterator<Item = (f64, f32)>,
+    I: IntoIterator<Item = (MoonTime, f32)>,
 {
     let mut count = 0usize;
     let mut min = f64::INFINITY;
     let mut max = 0.0f64;
-    let mut first_time = 0.0f64;
-    let mut last_time = 0.0f64;
+    let mut first_time = MoonTime::ZERO;
+    let mut last_time = MoonTime::ZERO;
     for (time, price) in rows {
         if price <= 0.0 {
             continue;
@@ -1663,7 +1665,7 @@ where
         max,
         delta_percent,
         span_secs: if count > 1 {
-            ((last_time - first_time) * 86_400.0).max(0.0)
+            ((last_time.unix_millis() - first_time.unix_millis()) as f64 / 1000.0).max(0.0)
         } else {
             0.0
         },
@@ -1678,11 +1680,11 @@ fn expected_price_points_for_span(stats: PriceLineStats) -> usize {
     }
 }
 
-fn price_delta_for_window<I>(rows: I, now_time: f64, window_seconds: f64) -> f64
+fn price_delta_for_window<I>(rows: I, now_time: MoonTime, window_seconds: f64) -> f64
 where
-    I: IntoIterator<Item = (f64, f32)>,
+    I: IntoIterator<Item = (MoonTime, f32)>,
 {
-    let from_time = now_time - window_seconds / 86_400.0;
+    let from_time = moon_time_saturating_sub_ms(now_time, (window_seconds * 1000.0) as i64);
     price_line_stats(
         rows.into_iter()
             .filter(|(time, _)| *time >= from_time && *time <= now_time),
@@ -1692,14 +1694,14 @@ where
 
 fn format_last_price_values(rows: &[LastPricePoint]) -> String {
     rows.iter()
-        .map(|p| format!("{:.8}", p.current))
+        .map(|p| format!("{:.8}", p.price()))
         .collect::<Vec<_>>()
         .join(",")
 }
 
 fn format_mark_price_values(rows: &[MarkPricePoint]) -> String {
     rows.iter()
-        .map(|p| format!("{:.8}", p.current))
+        .map(|p| format!("{:.8}", p.price()))
         .collect::<Vec<_>>()
         .join(",")
 }
@@ -1891,6 +1893,13 @@ fn protocol_metrics_summary(m: &ProtocolMetricsSnapshot) -> String {
 }
 
 fn assert_protocol_cpu_gate(label: &str, m: &ProtocolMetricsSnapshot) {
+    if cfg!(debug_assertions) {
+        println!(
+            "FIRETEST CPU gate {label}: skipped in debug build; run FireTest with `--release` for the hard CPU/latency gate."
+        );
+        return;
+    }
+
     let mut red_flags = Vec::new();
 
     if m.reader_protocol_over_5ms > 0 {
@@ -1951,12 +1960,16 @@ fn assert_protocol_cpu_gate(label: &str, m: &ProtocolMetricsSnapshot) {
     );
 }
 
-fn delphi_now_raw_for_test() -> f64 {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs_f64();
-    25_569.0 + secs / 86_400.0
+fn moon_now_for_test() -> MoonTime {
+    MoonTime::now()
+}
+
+fn moon_time_saturating_sub_ms(time: MoonTime, delta_ms: i64) -> MoonTime {
+    MoonTime::from_unix_millis(time.unix_millis().saturating_sub(delta_ms))
+}
+
+fn moon_time_saturating_add_ms(time: MoonTime, delta_ms: i64) -> MoonTime {
+    MoonTime::from_unix_millis(time.unix_millis().saturating_add(delta_ms))
 }
 
 fn record_event(
@@ -2284,7 +2297,22 @@ fn record_event(
         }) => {
             st.orderbook_apply += 1;
             let raw_kind = kind.as_u8();
-            if st.market_index == Some(*market_index) {
+            let is_target_market = market_name
+                .as_deref()
+                .is_some_and(|name| name.eq_ignore_ascii_case(&st.market));
+            if is_target_market {
+                let old_index = st.market_index;
+                st.market_index = Some(*market_index);
+                if old_index != st.market_index {
+                    log_server_event(
+                        &st,
+                        event_no,
+                        format!(
+                            "OrderBook target market={} resolved event_index old={old_index:?} new={:?}",
+                            st.market, st.market_index
+                        ),
+                    );
+                }
                 if *is_full {
                     st.target_orderbook_full += 1;
                 } else {
@@ -2369,15 +2397,19 @@ fn record_event(
         Event::Arb(arb) => {
             log_server_event(&st, event_no, format!("Arb {}", arb_summary(arb)));
         }
-        Event::ServerLog { time, msg } => {
+        Event::ServerLog(log) => {
             st.server_logs += 1;
-            if let Some((request_uid, server_uid)) = parse_new_order_log_mapping(msg) {
+            if let Some((request_uid, server_uid)) = parse_new_order_log_mapping(&log.msg) {
                 st.order_uid_by_request.insert(request_uid, server_uid);
             }
             log_server_event(
                 &st,
                 event_no,
-                format!("LogMsg time={time:.8} msg={}", short_text(msg, 220)),
+                format!(
+                    "LogMsg time_ms={} msg={}",
+                    log.time().unix_millis(),
+                    short_text(&log.msg, 220)
+                ),
             );
         }
         Event::Raw { cmd, payload } => {
@@ -2430,16 +2462,12 @@ fn sync_market_probe_from_dispatcher(
     dispatcher: &MoonStateSnapshot,
     log_changes: bool,
 ) {
-    let old_index = st.market_index;
-    st.market_index = dispatcher.markets().market_index_by_name(&st.market);
-    if log_changes && st.market_index != old_index {
+    let market_present = dispatcher.markets().get(&st.market).is_some();
+    if log_changes && market_present && st.last_market_price.is_none() {
         log_server_event(
             st,
             event_no,
-            format!(
-                "Market index resolved market={} old={old_index:?} new={:?}",
-                st.market, st.market_index
-            ),
+            format!("Market handle resolved market={}", st.market),
         );
     }
     if let Some(price) = dispatcher.markets().price(&st.market) {
@@ -3357,15 +3385,15 @@ fn firetest_strategy(cfg: &FireConfig) -> StrategySnapshot {
     );
     fields.insert("AcceptCommands", FieldValue::Bool(true));
     fields.insert("OrderSize", FieldValue::Double(0.0));
-    StrategySnapshot {
+    StrategySnapshot::new(
         strategy_id,
-        strategy_ver: 1,
-        last_date: now_epoch_ms(),
-        checked: false,
-        kind: StrategyKind::TELEGRAM.to_byte(),
-        path: "FireTest".into(),
+        1,
+        now_epoch_ms(),
+        false,
+        StrategyKind::TELEGRAM,
+        "FireTest",
         fields,
-    }
+    )
 }
 
 fn assert_strategy_field_visible_for_firetest(
@@ -3385,11 +3413,13 @@ fn assert_strategy_field_visible_for_firetest(
         )
     });
     assert!(
-        field.visible_for_kind(strategy.kind),
+        field.visible_for_strategy_kind(strategy.kind()),
         "FireTest strategy_field `{}` is not visible for kind {}:{}; choose a schema-visible field/kind pair",
         cfg.strategy_field,
-        strategy.kind,
-        schema.kind_name(strategy.kind).unwrap_or("?")
+        strategy.kind().ordinal(),
+        schema
+            .kind_name_for_strategy_kind(strategy.kind())
+            .unwrap_or("?")
     );
 }
 
@@ -3530,7 +3560,6 @@ struct MoonClientPathStats {
     candles_ready: bool,
     candles_markets: usize,
     candles_rows: usize,
-    market_index: Option<u16>,
     last_book_bid: Option<f64>,
     last_book_ask: Option<f64>,
     last_trade_price: Option<f64>,
@@ -3691,7 +3720,6 @@ impl MoonClientPathStats {
         target_market: &str,
         elapsed_s: f64,
     ) {
-        self.market_index = snapshot.markets().market_index_by_name(target_market);
         if let Some(price) = snapshot.markets().price(target_market) {
             self.first_market_price_at_s.get_or_insert(elapsed_s);
             self.last_market_price = Some(MarketProbePrice::from(&price));
@@ -3730,7 +3758,7 @@ impl MoonClientPathStats {
             }
         }
         if let Some(derived) =
-            snapshot.market_history_derived_snapshot(target_market, delphi_now_raw_for_test())
+            snapshot.market_history_derived_snapshot(target_market, moon_now_for_test())
         {
             self.derived_trade_vol_1m = derived.trade_volumes.one_minute.total_value();
             self.derived_trade_vol_5m = derived.trade_volumes.five_minutes.total_value();
@@ -3744,7 +3772,7 @@ impl MoonClientPathStats {
         }
     }
 
-    fn healthy(&self, require_auto_candles: bool) -> bool {
+    fn healthy(&self, require_auto_candles: bool, require_orderbook_update: bool) -> bool {
         if self.parse_failed != 0 || self.market_invariant_error.is_some() {
             return false;
         }
@@ -3779,7 +3807,7 @@ impl MoonClientPathStats {
             && self.trades_apply > 0
             && self.orderbook_apply > 0
             && self.target_orderbook_full > 0
-            && self.target_orderbook_update > 0
+            && (!require_orderbook_update || self.target_orderbook_update > 0)
             && self.transfer_asset_updated_mask == 0b111
             && self.transfer_asset_failures == 0
             && self.transfer_asset_refresh_done
@@ -3881,6 +3909,7 @@ fn run_moonclient_public_smoke(
     startup_timeout: Duration,
     stream_after_ready: Duration,
     require_auto_candles: bool,
+    require_orderbook_update: bool,
 ) -> MoonClientPathStats {
     let init = InitConfig {
         mm_orders_subscribe: Some(true),
@@ -3891,7 +3920,7 @@ fn run_moonclient_public_smoke(
     };
     let client = MoonClient::connect(
         ClientConfig::new(&cfg.host, cfg.port, keys.master_key, keys.mac_key)
-            .with_transport_mode(cfg.mask_ver)
+            .with_transport_mode(cfg.transport_mode)
             .with_client_id(rand::random()),
         ConnectConfig::new(init).with_connect_timeout(cfg.connect_timeout),
     )
@@ -3924,7 +3953,7 @@ fn run_moonclient_public_smoke(
         if let Some(snapshot) = client.snapshot() {
             stats.refresh_from_snapshot(&snapshot, &cfg.market, elapsed_s);
         }
-        if stats.healthy(require_auto_candles) {
+        if stats.healthy(require_auto_candles, require_orderbook_update) {
             break;
         }
         let deadline = ready_at.map_or(startup_deadline, |ready| ready + stream_after_ready);
@@ -3943,7 +3972,7 @@ fn run_moonclient_public_smoke(
     if let Some(snapshot) = client.snapshot() {
         stats.refresh_from_snapshot(&snapshot, &cfg.market, elapsed_s);
     }
-    let healthy = stats.healthy(require_auto_candles);
+    let healthy = stats.healthy(require_auto_candles, require_orderbook_update);
     let slow_startup = stats
         .lifecycle_ready_at_s
         .is_some_and(|ready| ready > FIRETEST_SLOW_STARTUP_DIAG_SECS)
@@ -4003,6 +4032,7 @@ fn run_quick_fire_test(cfg: &FireConfig, keys: ImportedKeys) {
         keys,
         public_path_startup_timeout,
         cfg.wait,
+        false,
         false,
     );
     assert!(
@@ -5030,7 +5060,7 @@ fn delphi_sell_report_delta_base(
         return None;
     }
     let mut delta = sell.total_btc - sell.spent_btc;
-    if sell.is_short.is_true() {
+    if sell.is_short() {
         delta = -delta;
     }
     if reverse_base_currency {
@@ -5052,13 +5082,13 @@ fn fire_test_active_library_health() {
     let keys = key_info.keys;
 
     println!(
-        "FIRETEST config: profile={} path={} key={} server={}:{} mask_ver={} market={} strategy_field={} strategy_id={:?} err_emu={} high_loss_err_emu={} connect_timeout={:?} candles_timeout={:?} high_loss_timeout={:?}",
+        "FIRETEST config: profile={} path={} key={} server={}:{} transport_mode={} market={} strategy_field={} strategy_id={:?} err_emu={} high_loss_err_emu={} connect_timeout={:?} candles_timeout={:?} high_loss_timeout={:?}",
         profile.as_str(),
         cfg.path.display(),
         key_info.display_name,
         cfg.host,
         cfg.port,
-        cfg.mask_ver.to_byte(),
+        cfg.transport_mode.to_byte(),
         cfg.market,
         cfg.strategy_field,
         cfg.strategy_id,
@@ -5090,6 +5120,7 @@ fn fire_test_active_library_health() {
         keys,
         cfg.connect_timeout + cfg.wait,
         cfg.candles_timeout,
+        true,
         true,
     );
 

@@ -27,7 +27,7 @@ fn dummy_cfg_for_server(server_addr: SocketAddr) -> ClientConfig {
         server_port: server_addr.port(),
         master_key: [0; 16],
         mac_key: [0x11; 16],
-        mask_ver: TransportMode::V0,
+        transport_mode: TransportMode::V0,
         client_id: 0x1234_5678_9ABC_DEF0,
         ntp_host: None,
         refresh: RefreshConfig::default(),
@@ -108,7 +108,7 @@ fn pump_inline_reader_collect(client: &mut Client) -> Vec<(Command, Vec<u8>)> {
     let events_cb = Arc::clone(&events);
     let mut mode = RunMode::Callback {
         on_data: Box::new(move |cmd, payload| {
-            events_cb.lock().unwrap().push((cmd, payload.to_vec()));
+            events_cb.lock().push((cmd, payload.to_vec()));
         }),
     };
     ProtocolCore { client }.recv_drain_phase(
@@ -117,7 +117,7 @@ fn pump_inline_reader_collect(client: &mut Client) -> Vec<(Command, Vec<u8>)> {
         &mut mode,
     );
     drop(mode);
-    Arc::try_unwrap(events).unwrap().into_inner().unwrap()
+    Arc::try_unwrap(events).unwrap().into_inner()
 }
 
 fn assert_no_inline_reader_events(client: &mut Client, why: &str) {
@@ -145,7 +145,7 @@ fn service_ping_payload(
     overheat: u8,
     rsq: u8,
 ) -> Vec<u8> {
-    let mut payload = vec![0u8; 50];
+    let mut payload = vec![0u8; control::PING_SIZE];
     payload[16..20].copy_from_slice(&trip_delay.to_le_bytes());
     payload[20..22].copy_from_slice(&pmtu.to_le_bytes());
     payload[22..24].copy_from_slice(&global_timing_orders.to_le_bytes());
@@ -170,6 +170,17 @@ fn encrypted_server_hello(
     hello.timestamp = delphi_now();
     let aad = handshake::handshake_aad(client_id, cmd.to_byte());
     crypto::encrypt(master_key, &hello.to_bytes_packed(), &aad)
+}
+
+fn encrypted_want_new_hello(client: &Client, mix_ts: u64) -> Vec<u8> {
+    let mut hello = handshake::Hello::new(mix_ts, 0);
+    hello.rnd = client.handshake_rnd;
+    hello.server_token = 0;
+    hello.peer_mix = 0;
+    hello.app_token = 0;
+    hello.timestamp = delphi_now();
+    let aad = handshake::handshake_aad(client.cfg.client_id, Command::WantNewHello.to_byte());
+    crypto::encrypt(&client.cfg.master_key, &hello.to_bytes_packed(), &aad)
 }
 
 fn encrypted_session_server_hello(
@@ -217,7 +228,13 @@ fn encrypted_session_server_hello_with_rnd(
 }
 
 fn install_active_session(client: &mut Client, server_token: u64) -> (MoonKey, MoonKey) {
-    let (encode_key, decode_key) = crypto::generate_sub_keys(&client.cfg.master_key, server_token);
+    client.session_rnd = client.handshake_rnd;
+    let (encode_key, decode_key) = crypto::generate_session_sub_keys(
+        &client.cfg.master_key,
+        client.cfg.client_id,
+        server_token,
+        &client.session_rnd,
+    );
     client.server_token = server_token;
     client.encode_key = encode_key;
     client.decode_key = decode_key;
@@ -230,6 +247,7 @@ fn install_active_session(client: &mut Client, server_token: u64) -> (MoonKey, M
     client.auth_status = AuthStatus::AuthDone;
     client.need_connect = false;
     client.lifecycle.was_ever_connected = true;
+    client.refresh_ack_session32();
     (encode_key, decode_key)
 }
 
@@ -434,23 +452,10 @@ fn reader_handles_sliced_ack_without_recv_event_backlog() {
 
     wait_reader_total_recv(&mut client, packet.len() as u64);
     let deadline = Instant::now() + Duration::from_secs(1);
-    while client
-        .send_lock
-        .lock()
-        .unwrap()
-        .incoming_sliced_acks
-        .is_empty()
-        && Instant::now() < deadline
-    {
+    while client.send_lock.lock().incoming_sliced_acks.is_empty() && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(1));
     }
-    let ack = client
-        .send_lock
-        .lock()
-        .unwrap()
-        .incoming_sliced_acks
-        .pop()
-        .unwrap();
+    let ack = client.send_lock.lock().incoming_sliced_acks.pop().unwrap();
     assert_no_inline_reader_events(
         &mut client,
         "Delphi OnNewSlicedACK only queues ACK; no DataReadInt/no reader event",
@@ -653,7 +658,7 @@ fn reader_handles_ping_response_without_main_loop_tick() {
     let ((hdr, response), events) = recv_client_packet_with_events(&server_sock, &mut client);
 
     assert_eq!(hdr.cmd, Command::Ping.to_byte());
-    assert_eq!(response.len(), 50);
+    assert_eq!(response.len(), control::PING_SIZE);
     assert_eq!(
         u64::from_le_bytes(response[25..33].try_into().unwrap()),
         777
@@ -667,6 +672,10 @@ fn reader_handles_ping_response_without_main_loop_tick() {
         u64::from_le_bytes(response[42..50].try_into().unwrap()),
         2048,
         "empty MPSlider BuildAckHalf still writes the tail-half AckStart"
+    );
+    assert_eq!(
+        u32::from_le_bytes(response[50..54].try_into().unwrap()),
+        client.ack_session32_value,
     );
     assert_eq!(events, vec![(Command::Ping, ping.clone())]);
     assert_no_inline_reader_events(
@@ -742,7 +751,12 @@ fn reader_handles_who_are_you_imfriend_without_main_loop_tick() {
         elapsed >= Duration::from_millis(25),
         "WhoAreYou handler must preserve Delphi's 32ms ImFriend barrier; elapsed={elapsed:?}"
     );
-    let (encode_key, decode_key) = crypto::generate_sub_keys(&client.cfg.master_key, server_token);
+    let (encode_key, decode_key) = crypto::generate_session_sub_keys(
+        &client.cfg.master_key,
+        client.cfg.client_id,
+        server_token,
+        &client.handshake_rnd,
+    );
     let aad = handshake::handshake_aad(client.cfg.client_id, Command::ImFriend.to_byte());
     let decrypted = crypto::decrypt(&encode_key, &imfriend1, &aad)
         .expect("ImFriend decrypts with client encode key");
@@ -814,7 +828,12 @@ fn reader_who_are_you_uses_writer_updated_hello_token() {
     assert_eq!(hdr1.cmd, Command::ImFriend.to_byte());
     assert_eq!(hdr2.cmd, Command::ImFriend.to_byte());
     assert!(events1.is_empty());
-    let (encode_key, _decode_key) = crypto::generate_sub_keys(&client.cfg.master_key, server_token);
+    let (encode_key, _decode_key) = crypto::generate_session_sub_keys(
+        &client.cfg.master_key,
+        client.cfg.client_id,
+        server_token,
+        &hello.rnd,
+    );
     let imfriend_aad = handshake::handshake_aad(client.cfg.client_id, Command::ImFriend.to_byte());
     let im = crypto::decrypt(&encode_key, &imfriend1, &imfriend_aad)
         .and_then(|payload| handshake::Hello::from_bytes(&payload))
@@ -1074,6 +1093,7 @@ fn reader_drops_wrong_hello_outside_primary_wait() {
 fn reader_handles_want_new_hello_without_recv_event_backlog() {
     let _err_emu_guard = err_emu_test_guard();
     let (server_sock, client_addr, mut client) = inline_reader_test_client();
+    client.handshake_rnd = [0x91; 16];
     client.authorized = true;
     client.auth_status = AuthStatus::Offline;
     client.need_connect = false;
@@ -1084,7 +1104,8 @@ fn reader_handles_want_new_hello_without_recv_event_backlog() {
     client.metrics.total_sent.store(123, Ordering::Relaxed);
     client.recv.recvd_slider.has_new_data = true;
 
-    let packet = pack_server_packet(&client.cfg.mac_key, Command::WantNewHello, &[]);
+    let want = encrypted_want_new_hello(&client, client.client_token.wrapping_add(1));
+    let packet = pack_server_packet(&client.cfg.mac_key, Command::WantNewHello, &want);
     server_sock.send_to(&packet, client_addr).unwrap();
 
     pump_inline_reader(&mut client);
@@ -1102,6 +1123,31 @@ fn reader_handles_want_new_hello_without_recv_event_backlog() {
     assert!(!client.authorized);
     assert!(client.need_connect);
     assert!(!client.soft_reconnect);
+}
+
+#[test]
+fn reader_drops_header_only_want_new_hello_before_recv_side_effects() {
+    let _err_emu_guard = err_emu_test_guard();
+    let (server_sock, client_addr, mut client) = inline_reader_test_client();
+    client.handshake_rnd = [0xA2; 16];
+    client.set_hello_wait_state(HelloWaitState::RebindHelloAgain);
+    client.last_online = 777;
+    client.metrics.total_recv = 33;
+    let total_recv_shared_before = client.metrics.total_recv_shared.load(Ordering::Relaxed);
+
+    let packet = pack_server_packet(&client.cfg.mac_key, Command::WantNewHello, &[]);
+    server_sock.send_to(&packet, client_addr).unwrap();
+
+    pump_inline_reader(&mut client);
+
+    assert_eq!(client.last_online, 777);
+    assert_eq!(client.metrics.total_recv, 33);
+    assert_eq!(
+        client.metrics.total_recv_shared.load(Ordering::Relaxed),
+        total_recv_shared_before,
+    );
+    assert!(client.waiting_hello);
+    assert!(!client.next_primary_hello_new_session);
 }
 
 #[test]
@@ -1139,7 +1185,7 @@ fn nat_binding_change_rebinds_with_hello_again_from_new_socket() {
     let old_addr = old_socket.local_addr().unwrap();
     let mut client = Client::new(dummy_cfg_for_server(server_addr));
     let server_token = 0x2222_3333_4444_5555;
-    let (encode_key, _decode_key) = install_active_session(&mut client, server_token);
+    let (_encode_key, _decode_key) = install_active_session(&mut client, server_token);
     client.transport.socket = Some(old_socket);
     client.start_inline_reader_session();
 
@@ -1180,12 +1226,17 @@ fn nat_binding_change_rebinds_with_hello_again_from_new_socket() {
     let (hdr, payload) = unpack_client_packet(&client.cfg.mac_key, &raw[..n]);
     assert_eq!(hdr.cmd, Command::HelloAgain.to_byte());
     let aad = handshake::handshake_aad(client.cfg.client_id, Command::HelloAgain.to_byte());
-    let hello_again = crypto::decrypt(&encode_key, &payload, &aad)
+    let hello_again = crypto::decrypt(&client.cfg.master_key, &payload, &aad)
         .and_then(|bytes| handshake::Hello::from_bytes(&bytes))
-        .expect("HelloAgain decrypts with session encode key");
+        .expect("HelloAgain decrypts with master key");
     assert_eq!(
         hello_again.peer_mix,
-        crypto::mix_values(&hello_again.rnd, hello_again.mix_ts, server_token),
+        crypto::calculate_hello_again_peer_mix(
+            &hello_again.rnd,
+            hello_again.mix_ts,
+            server_token,
+            &client.session_rnd,
+        ),
     );
 
     let fine = encrypted_session_server_hello(
@@ -1329,7 +1380,7 @@ fn generic_send_error_logs_without_force_disconnect() {
         server_port: 3000,
         master_key: [0; 16],
         mac_key: [0; 16],
-        mask_ver: TransportMode::V0,
+        transport_mode: TransportMode::V0,
         client_id: 0,
         ntp_host: None,
         refresh: RefreshConfig::default(),

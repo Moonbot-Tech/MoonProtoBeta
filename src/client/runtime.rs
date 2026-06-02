@@ -1,4 +1,4 @@
-use super::*;
+﻿use super::*;
 
 impl Client {
     pub(crate) fn set_runtime_shutdown_flag(&mut self, flag: Arc<AtomicBool>) {
@@ -117,7 +117,7 @@ impl Client {
         } else {
             self.lifecycle.lifecycle_cb.take().map(|cb| {
                 let (tx, rx) = mpsc::channel::<LifecycleEvent>();
-                *self.lifecycle.lifecycle_app_tx.lock().unwrap() = Some(tx);
+                *self.lifecycle.lifecycle_app_tx.lock() = Some(tx);
                 (rx, cb)
             })
         };
@@ -145,7 +145,7 @@ impl Client {
                 ProtocolCore { client: self }.run(duration, &mut mode);
             }
             if clear_lifecycle_app_tx {
-                *lifecycle_app_tx.lock().unwrap() = None;
+                *lifecycle_app_tx.lock() = None;
             }
             app_handle
                 .join()
@@ -165,7 +165,7 @@ impl Client {
 
     /// Send LogOff and close socket. Call when done.
     /// Matches TMoonProtoBaseClient.Disconnect (Common.pas:290-298)
-    pub fn disconnect(&mut self) {
+    pub(crate) fn disconnect(&mut self) {
         self.lifecycle
             .runtime_shutdown
             .store(true, Ordering::Relaxed);

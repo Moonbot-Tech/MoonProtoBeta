@@ -67,8 +67,8 @@ state.
   `snapshot().transfer_assets()`. The command returns after queuing all wallet
   refresh requests; `Event::TransferAssets` reports each completed wallet and a
   final `RefreshCompleted` event after all requested wallet kinds have answered.
-- Time fields inherited from Delphi are day values, not Unix timestamps. Use
-  `DelphiTime` helpers such as `row.time_delphi().unix_millis()`.
+- Time fields exposed to applications use `MoonTime`. Use
+  `row.time().unix_millis()` or `row.time().system_time()` for UI labels.
 
 Regular applications should start from `MoonClient`: it owns the protocol loop,
 event sink, and retained state.

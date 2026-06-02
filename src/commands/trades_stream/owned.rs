@@ -1,3 +1,5 @@
+#![cfg_attr(feature = "diagnostics", allow(dead_code))]
+
 use super::decoder::{decode_trades_packet, TradeSectionRef};
 use super::types::{TradeSection, TradesPacket, WatcherFill, WatcherFillFlags};
 use super::wire::{WireWatcherFill, WATCHER_FILL_RECORD_SIZE};
@@ -40,7 +42,7 @@ pub(crate) fn parse_trades_packet(raw: &[u8]) -> Option<TradesPacket> {
 /// Delphi writes each watcher fill as:
 /// `TimeDelta:i16 + price:f32 + qty:f32 + zBTC:f32 + position:f32 +
 /// order_type:u8 + flags:u8`.
-pub fn parse_watcher_fills(data: &[u8]) -> Option<Vec<WatcherFill>> {
+pub(crate) fn parse_watcher_fills(data: &[u8]) -> Option<Vec<WatcherFill>> {
     if data.len() % WATCHER_FILL_RECORD_SIZE != 0 {
         return None;
     }

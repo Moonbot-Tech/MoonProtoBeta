@@ -236,23 +236,21 @@ fn market_reader_zero_tails_short_fixed_tail_after_valid_strings() {
 
 #[test]
 // parity: MoonBot MoonProtoSerialization.pas:ReadMarketPricesFromStream
-fn market_prices_row_zero_tails_short_fixed_payload() {
+fn market_prices_rejects_short_fixed_payload_before_zero_tail_loop() {
     let mut buf = Vec::new();
     buf.push(1); // send_funding
     buf.extend_from_slice(&1i32.to_le_bytes()); // one market price row
 
-    let parsed = parse_markets_prices_response_with_local_shift(&buf, 0.0).unwrap();
+    assert!(parse_markets_prices_response_with_local_shift(&buf, 0.0).is_none());
+}
 
-    assert!(parsed.send_funding);
-    assert_eq!(parsed.prices.len(), 1);
-    assert_eq!(parsed.prices[0].m_index, 0);
-    assert_eq!(parsed.prices[0].bid, 0.0);
-    assert_eq!(parsed.prices[0].ask, 0.0);
-    assert_eq!(parsed.prices[0].funding_rate, 0.0);
-    assert_eq!(parsed.prices[0].funding_time, 0.0);
-    assert_eq!(parsed.prices[0].mark_price, 0.0);
-    assert!(!parsed.prices[0].mark_price_found);
-    assert!(!parsed.send_corr_markets);
+#[test]
+fn market_prices_rejects_impossible_huge_price_count() {
+    let mut buf = Vec::new();
+    buf.push(0); // send_funding=false
+    buf.extend_from_slice(&i32::MAX.to_le_bytes());
+
+    assert!(parse_markets_prices_response_with_local_shift(&buf, 0.0).is_none());
 }
 
 #[test]

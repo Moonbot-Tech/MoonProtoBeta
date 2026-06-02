@@ -1,5 +1,6 @@
 use crate::commands::candles::{CandlesAggregator, RequestCandlesMarket};
 use crate::commands::engine_api::EngineMethod;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::mpsc;
 use std::thread;
 // =============================================================================
@@ -13,7 +14,8 @@ use std::thread;
 /// [`CandlesAggregator`] and hands parsed market entries to Active Lib.
 #[derive(Debug, Clone)]
 pub(crate) struct MergedCandles {
-    /// Request UID used to correlate the chunked response.
+    /// Request UID used by diagnostics to correlate the chunked response.
+    #[cfg(any(test, feature = "diagnostics"))]
     pub uid: u64,
     /// Parsed market entries from the zipped stream.
     pub markets: Vec<RequestCandlesMarket>,
@@ -44,7 +46,15 @@ impl CandlesParseQueue {
             .name("moonproto-candles-parse".to_string())
             .spawn(move || {
                 while let Ok(job) = rx.recv() {
-                    parse_and_send_candles(job.uid, job.zipped_data, job.sender);
+                    if let Err(payload) = catch_unwind(AssertUnwindSafe(|| {
+                        parse_and_send_candles(job.uid, job.zipped_data, job.sender)
+                    })) {
+                        log::error!(
+                            target: "moonproto::client",
+                            "moonproto-candles-parse panicked: {}",
+                            panic_payload_message(payload.as_ref())
+                        );
+                    }
                 }
             }) {
             Ok(_) => Self { tx: Some(tx) },
@@ -83,6 +93,16 @@ impl CandlesParseQueue {
     }
 }
 
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(value) = payload.downcast_ref::<&'static str>() {
+        (*value).to_string()
+    } else if let Some(value) = payload.downcast_ref::<String>() {
+        value.clone()
+    } else {
+        "non-string panic payload".to_string()
+    }
+}
+
 fn parse_and_send_candles(uid: u64, zipped_data: Vec<u8>, sender: mpsc::Sender<MergedCandles>) {
     let markets = crate::commands::candles::parse_request_candles_data_response(&zipped_data)
         .unwrap_or_else(|| {
@@ -94,7 +114,11 @@ fn parse_and_send_candles(uid: u64, zipped_data: Vec<u8>, sender: mpsc::Sender<M
             crate::commands::candles::parse_request_candles_data_response_partial(&zipped_data)
                 .unwrap_or_default()
         });
-    let _ = sender.send(MergedCandles { uid, markets });
+    let _ = sender.send(MergedCandles {
+        #[cfg(any(test, feature = "diagnostics"))]
+        uid,
+        markets,
+    });
 }
 
 #[derive(Debug, Clone, Copy)]

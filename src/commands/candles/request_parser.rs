@@ -3,7 +3,9 @@
 use super::{
     current_local_time_shift_minutes, read_zero_tail, DeepPrice, RequestCandlesMarket, WallItem,
     WireDeepPricePack, WireDeepPricePackOld, DEEP_PRICE_PACK_OLD_SIZE, DEEP_PRICE_PACK_SIZE,
-    MINS_IN_DAY, REQUEST_CANDLES_MARKET_MIN_SIZE,
+    MAX_REQUEST_CANDLES_DECOMPRESSED_BYTES, MAX_REQUEST_CANDLES_MARKETS,
+    MAX_REQUEST_CANDLES_PER_MARKET, MAX_REQUEST_CANDLES_TOTAL, MINS_IN_DAY,
+    REQUEST_CANDLES_MARKET_MIN_SIZE,
 };
 use crate::commands::inflate::read_inflate_to_vec;
 use flate2::read::ZlibDecoder;
@@ -50,11 +52,15 @@ pub(crate) fn parse_request_candles_data_response_with_local_shift(
     local_time_shift_minutes: f64,
 ) -> Option<Vec<RequestCandlesMarket>> {
     let mut decoder = ZlibDecoder::new(zipped_data);
-    let data = read_inflate_to_vec(&mut decoder, zipped_data.len().saturating_mul(12))
-        .map_err(|e| {
-            log::warn!(target: "moonproto::candles", "RequestCandlesData zlib decode failed: {e}");
-        })
-        .ok()?;
+    let data = read_inflate_to_vec(
+        &mut decoder,
+        zipped_data.len().saturating_mul(12),
+        MAX_REQUEST_CANDLES_DECOMPRESSED_BYTES,
+    )
+    .map_err(|e| {
+        log::warn!(target: "moonproto::candles", "RequestCandlesData zlib decode failed: {e}");
+    })
+    .ok()?;
 
     let mut pos = 0usize;
     let legacy_count = read_i32(&data, &mut pos)?;
@@ -79,12 +85,17 @@ pub(crate) fn parse_request_candles_data_response_with_local_shift(
         return None;
     }
     let count = count_raw as usize;
+    if count > MAX_REQUEST_CANDLES_MARKETS {
+        log::warn!(target: "moonproto::candles",
+            "RequestCandlesData market count {count} exceeds cap {MAX_REQUEST_CANDLES_MARKETS}");
+        return None;
+    }
 
     let server_time_shift_minutes = read_f64(&data, &mut pos)?;
     let time_shift_days =
         (local_time_shift_minutes.round() - server_time_shift_minutes) / MINS_IN_DAY;
 
-    let min_required = count.saturating_mul(REQUEST_CANDLES_MARKET_MIN_SIZE);
+    let min_required = count.checked_mul(REQUEST_CANDLES_MARKET_MIN_SIZE)?;
     let remaining = data.len().saturating_sub(pos);
     if min_required > remaining {
         log::warn!(target: "moonproto::candles",
@@ -92,7 +103,13 @@ pub(crate) fn parse_request_candles_data_response_with_local_shift(
         return None;
     }
 
-    let mut markets = Vec::with_capacity(count);
+    let mut markets = Vec::new();
+    if markets.try_reserve_exact(count).is_err() {
+        log::warn!(target: "moonproto::candles",
+            "RequestCandlesData market count {count} cannot be allocated");
+        return None;
+    }
+    let mut total_candles = 0usize;
     for _ in 0..count {
         let market_name = read_delphi_utf16_string(&data, &mut pos)?;
         let candle_count_raw = read_i32(&data, &mut pos)?;
@@ -102,6 +119,21 @@ pub(crate) fn parse_request_candles_data_response_with_local_shift(
             return None;
         }
         let candle_count = candle_count_raw as usize;
+        if candle_count > MAX_REQUEST_CANDLES_PER_MARKET {
+            log::warn!(target: "moonproto::candles",
+                "RequestCandlesData candle count for {market_name} {candle_count} exceeds cap {MAX_REQUEST_CANDLES_PER_MARKET}");
+            return None;
+        }
+        let Some(new_total_candles) = total_candles.checked_add(candle_count) else {
+            log::warn!(target: "moonproto::candles", "RequestCandlesData total candle count overflow");
+            return None;
+        };
+        if new_total_candles > MAX_REQUEST_CANDLES_TOTAL {
+            log::warn!(target: "moonproto::candles",
+                "RequestCandlesData total candle count {new_total_candles} exceeds cap {MAX_REQUEST_CANDLES_TOTAL}");
+            return None;
+        }
+        total_candles = new_total_candles;
         let record_size = if ver >= 2 {
             DEEP_PRICE_PACK_SIZE
         } else {
@@ -115,7 +147,12 @@ pub(crate) fn parse_request_candles_data_response_with_local_shift(
             return None;
         }
 
-        let mut candles_5m = Vec::with_capacity(candle_count);
+        let mut candles_5m = Vec::new();
+        if candles_5m.try_reserve_exact(candle_count).is_err() {
+            log::warn!(target: "moonproto::candles",
+                "RequestCandlesData candle count for {market_name} {candle_count} cannot be allocated");
+            return None;
+        }
         for _ in 0..candle_count {
             let mut candle = if ver >= 2 {
                 read_deep_price_pack(&data, &mut pos)?
@@ -143,11 +180,15 @@ pub(crate) fn parse_request_candles_data_response_partial_with_local_shift(
     local_time_shift_minutes: f64,
 ) -> Option<Vec<RequestCandlesMarket>> {
     let mut decoder = ZlibDecoder::new(zipped_data);
-    let data = read_inflate_to_vec(&mut decoder, zipped_data.len().saturating_mul(12))
-        .map_err(|e| {
-            log::warn!(target: "moonproto::candles", "RequestCandlesData zlib decode failed: {e}");
-        })
-        .ok()?;
+    let data = read_inflate_to_vec(
+        &mut decoder,
+        zipped_data.len().saturating_mul(12),
+        MAX_REQUEST_CANDLES_DECOMPRESSED_BYTES,
+    )
+    .map_err(|e| {
+        log::warn!(target: "moonproto::candles", "RequestCandlesData zlib decode failed: {e}");
+    })
+    .ok()?;
 
     let mut pos = 0usize;
     let legacy_count = read_i32(&data, &mut pos)?;
@@ -171,7 +212,18 @@ pub(crate) fn parse_request_candles_data_response_partial_with_local_shift(
     }
 
     let count = count_raw as usize;
+    if count > MAX_REQUEST_CANDLES_MARKETS {
+        log::warn!(target: "moonproto::candles",
+            "RequestCandlesData partial market count {count} exceeds cap {MAX_REQUEST_CANDLES_MARKETS}");
+        return Some(Vec::new());
+    }
     let mut markets = Vec::new();
+    if markets.try_reserve_exact(count).is_err() {
+        log::warn!(target: "moonproto::candles",
+            "RequestCandlesData partial market count {count} cannot be allocated");
+        return None;
+    }
+    let mut total_candles = 0usize;
     for _ in 0..count {
         let Some(market_name) = read_delphi_utf16_string(&data, &mut pos) else {
             break;
@@ -183,6 +235,20 @@ pub(crate) fn parse_request_candles_data_response_partial_with_local_shift(
             break;
         }
         let candle_count = candle_count_raw as usize;
+        if candle_count > MAX_REQUEST_CANDLES_PER_MARKET {
+            log::warn!(target: "moonproto::candles",
+                "RequestCandlesData partial candle count for {market_name} {candle_count} exceeds cap {MAX_REQUEST_CANDLES_PER_MARKET}");
+            break;
+        }
+        let Some(new_total_candles) = total_candles.checked_add(candle_count) else {
+            break;
+        };
+        if new_total_candles > MAX_REQUEST_CANDLES_TOTAL {
+            log::warn!(target: "moonproto::candles",
+                "RequestCandlesData partial total candle count {new_total_candles} exceeds cap {MAX_REQUEST_CANDLES_TOTAL}");
+            break;
+        }
+        total_candles = new_total_candles;
         let record_size = if ver >= 2 {
             DEEP_PRICE_PACK_SIZE
         } else {
@@ -276,7 +342,8 @@ fn read_delphi_utf16_string(data: &[u8], pos: &mut usize) -> Option<String> {
     if *pos + bytes > data.len() {
         return None;
     }
-    let mut utf16 = Vec::with_capacity(chars);
+    let mut utf16 = Vec::new();
+    utf16.try_reserve_exact(chars).ok()?;
     for chunk in data[*pos..*pos + bytes].chunks_exact(2) {
         utf16.push(u16::from_le_bytes([chunk[0], chunk[1]]));
     }

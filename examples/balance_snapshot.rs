@@ -62,8 +62,7 @@ fn main() {
     let balances = snapshot.balances();
     let g = balances.global();
     println!(
-        "[snapshot] epoch={} markets={} total_pnl={} btc_total={} btc_locked={} btc_full={} special_coin={}",
-        balances.last_epoch,
+        "[snapshot] markets={} total_pnl={} btc_total={} btc_locked={} btc_full={} special_coin={}",
         snapshot.markets().market_count(),
         g.total_pnl,
         g.btc_balance_total,

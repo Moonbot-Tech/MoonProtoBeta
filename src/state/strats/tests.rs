@@ -158,7 +158,7 @@ fn sell_price_update_is_ignored() {
         strategy_id: 100,
         sell_price: 50.5,
     }));
-    assert!(matches!(ev, StratEvent::Ignored));
+    assert!(ev.is_none());
     assert_eq!(s.get(100).unwrap().sell_price, 0.0);
 }
 
@@ -167,7 +167,7 @@ fn sell_price_update_is_ignored() {
 fn incoming_schema_request_is_ignored() {
     let mut s = StratsState::new();
     let ev = s.apply(StratCommand::SchemaRequest { uid: 77 });
-    assert!(matches!(ev, StratEvent::Ignored));
+    assert!(ev.is_none());
 }
 
 #[test]
@@ -258,10 +258,12 @@ fn delete_removes_entry() {
         fields,
     });
     assert!(s.has_folder("F"));
-    let ev = s.apply(StratCommand::Delete(StratDelete {
-        strategy_id: 100,
-        folder_path: "".into(),
-    }));
+    let ev = s
+        .apply(StratCommand::Delete(StratDelete {
+            strategy_id: 100,
+            folder_path: "".into(),
+        }))
+        .expect("known strategy delete must emit a delete event");
     assert!(matches!(
         ev,
         StratEvent::Deleted {
@@ -290,10 +292,12 @@ fn delete_with_folder_path_deletes_strategy_then_empty_folder() {
         fields: StrategyFields::new(),
     });
 
-    let ev = s.apply(StratCommand::Delete(StratDelete {
-        strategy_id: 100,
-        folder_path: "Root/Sub".into(),
-    }));
+    let ev = s
+        .apply(StratCommand::Delete(StratDelete {
+            strategy_id: 100,
+            folder_path: "Root/Sub".into(),
+        }))
+        .expect("known strategy/folder delete must emit a delete event");
 
     assert!(matches!(
         ev,
@@ -325,13 +329,16 @@ fn delete_zero_strategy_id_can_delete_empty_folder() {
     s.apply(StratCommand::Delete(StratDelete {
         strategy_id: 100,
         folder_path: "".into(),
-    }));
+    }))
+    .expect("known strategy delete must emit a delete event");
     assert!(s.has_folder("Root/Sub"));
 
-    let ev = s.apply(StratCommand::Delete(StratDelete {
-        strategy_id: 0,
-        folder_path: "root/sub".into(),
-    }));
+    let ev = s
+        .apply(StratCommand::Delete(StratDelete {
+            strategy_id: 0,
+            folder_path: "root/sub".into(),
+        }))
+        .expect("known empty folder delete must emit a delete event");
 
     assert!(matches!(
         ev,
@@ -368,10 +375,12 @@ fn delete_folder_path_keeps_non_empty_folder() {
         fields: StrategyFields::new(),
     });
 
-    let ev = s.apply(StratCommand::Delete(StratDelete {
-        strategy_id: 100,
-        folder_path: "Root/Sub".into(),
-    }));
+    let ev = s
+        .apply(StratCommand::Delete(StratDelete {
+            strategy_id: 100,
+            folder_path: "Root/Sub".into(),
+        }))
+        .expect("known strategy delete must emit a delete event");
 
     assert!(matches!(
         ev,
@@ -394,7 +403,7 @@ fn delete_unknown_strategy_without_folder_change_is_ignored() {
         strategy_id: 404,
         folder_path: "".into(),
     }));
-    assert!(matches!(ev, StratEvent::Ignored));
+    assert!(ev.is_none());
 }
 
 #[test]
@@ -410,7 +419,7 @@ fn checked_sync_delta() {
         }],
         is_delta: true,
     });
-    let ev = s.apply(cmd);
+    let ev = s.apply(cmd).expect("checked sync must emit a sync event");
     assert!(matches!(
         ev,
         StratEvent::CheckedSynced {
@@ -535,13 +544,15 @@ fn in_place_complete_snapshot_seeds_serialized_reply_cache() {
     assert_eq!(cache.client_max_last_date, 1737000000042);
     assert_eq!(cache.data, payload);
 
-    let ev = s.apply(StratCommand::CheckedSync(StratCheckedSync {
-        items: vec![StratCheckedItem {
-            strategy_id: 777,
-            checked: true,
-        }],
-        is_delta: false,
-    }));
+    let ev = s
+        .apply(StratCommand::CheckedSync(StratCheckedSync {
+            items: vec![StratCheckedItem {
+                strategy_id: 777,
+                checked: true,
+            }],
+            is_delta: false,
+        }))
+        .expect("checked sync must emit a sync event");
     assert!(matches!(
         ev,
         StratEvent::CheckedSynced {
@@ -554,13 +565,15 @@ fn in_place_complete_snapshot_seeds_serialized_reply_cache() {
         "no-op checked sync must not discard serialized reply cache"
     );
 
-    let ev = s.apply(StratCommand::CheckedSync(StratCheckedSync {
-        items: vec![StratCheckedItem {
-            strategy_id: 777,
-            checked: false,
-        }],
-        is_delta: true,
-    }));
+    let ev = s
+        .apply(StratCommand::CheckedSync(StratCheckedSync {
+            items: vec![StratCheckedItem {
+                strategy_id: 777,
+                checked: false,
+            }],
+            is_delta: true,
+        }))
+        .expect("checked sync must emit a sync event");
     assert!(matches!(
         ev,
         StratEvent::CheckedSynced {
@@ -653,7 +666,7 @@ fn checked_sync_full_only_updates_items() {
         }],
         is_delta: false,
     });
-    let ev = s.apply(cmd);
+    let ev = s.apply(cmd).expect("checked sync must emit a sync event");
     assert!(matches!(
         ev,
         StratEvent::CheckedSynced {
@@ -684,7 +697,7 @@ fn checked_sync_ignores_unknown_strategy() {
         ],
         is_delta: true,
     });
-    let ev = s.apply(cmd);
+    let ev = s.apply(cmd).expect("checked sync must emit a sync event");
 
     assert!(matches!(
         ev,
@@ -767,7 +780,8 @@ fn local_checked_delta_waits_for_matching_echo() {
         }],
     });
     assert!(matches!(
-        s.apply(stale_echo),
+        s.apply(stale_echo)
+            .expect("checked echo must emit an echo event"),
         StratEvent::CheckedEcho { count: 1 }
     ));
     assert_eq!(
@@ -784,7 +798,7 @@ fn local_checked_delta_waits_for_matching_echo() {
             checked: false,
         }],
     });
-    s.apply(matching_echo);
+    let _ = s.apply(matching_echo);
     assert!(s.checked_delta().is_empty());
     assert!(!s.get(100).unwrap().prev_checked);
 }

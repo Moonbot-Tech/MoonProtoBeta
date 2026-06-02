@@ -15,11 +15,10 @@
 
 type Offsets = [usize; 4096];
 
-// A compressed MoonProto command still travels as one direct or Sliced command.
-// Sliced block numbers are u8 and PMTU is u16, so even the theoretical maximum
-// envelope is under 16 MiB. Real bulk data (5m candles) is chunked well below
-// that; larger SynLZ destlen values are malformed input, not useful payload.
-pub(crate) const MAX_DECOMPRESSED_SIZE: usize = ((u16::MAX as usize) - 15 - 4) * 256 - 12 - 1;
+// Current Delphi prod uses one large decompression fuse for SynLZ/RleLZ/raw
+// deflate. This is transient-memory hygiene, not a payload type limit: legal
+// large blobs pass, but a corrupt header cannot allocate until process OOM.
+pub(crate) const MAX_DECOMPRESSED_SIZE: usize = 512 * 1024 * 1024;
 
 // Thread-local scratch buffer for SynLZ decompress (32 KB = `[usize; 4096]` × 8 bytes).
 //

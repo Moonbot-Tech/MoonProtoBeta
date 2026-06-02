@@ -24,18 +24,14 @@ const CANDLE_5M_SLOT_BYTES: usize = size_of::<Candle5mRow>();
 /// API deviation for UI clients that want to retain only a subset locally while
 /// keeping the same wire `emk_SubscribeAllTrades` command.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum TradeStorageScope {
+pub(crate) enum TradeStorageScope {
     #[default]
     All,
     Markets(BTreeSet<String>),
 }
 
 impl TradeStorageScope {
-    pub fn all() -> Self {
-        Self::All
-    }
-
-    pub fn from_markets<I, S>(market_names: I) -> Self
+    pub(crate) fn from_markets<I, S>(market_names: I) -> Self
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
@@ -52,14 +48,15 @@ impl TradeStorageScope {
         }
     }
 
-    pub fn contains(&self, market_name: &str) -> bool {
+    pub(crate) fn contains(&self, market_name: &str) -> bool {
         match self {
             Self::All => true,
             Self::Markets(names) => names.contains(market_name),
         }
     }
 
-    pub fn is_all(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_all(&self) -> bool {
         matches!(self, Self::All)
     }
 }

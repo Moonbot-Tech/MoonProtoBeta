@@ -3,6 +3,10 @@ use crate::state::history::DELPHI_MSECS_PER_DAY;
 use crate::state::MarketHistoryConfig;
 use std::sync::Arc;
 
+fn mt(days: f64) -> MoonTime {
+    crate::state::history::moon_time_from_delphi_days(days)
+}
+
 #[test]
 fn worker_stores_enabled_futures_trades_after_flush() {
     let worker = MarketHistoryWorker::spawn(MarketHistoryConfig {
@@ -35,7 +39,7 @@ fn worker_stores_enabled_futures_trades_after_flush() {
         }],
         mm_order_rows: Vec::new(),
     });
-    assert!(worker.flush(now_time));
+    assert!(worker.flush(mt(now_time)));
 
     let mut out = Vec::new();
     futures.copy_last(8, &mut out);
@@ -44,7 +48,7 @@ fn worker_stores_enabled_futures_trades_after_flush() {
     assert_eq!(out[0].qty, 2.0);
     assert_eq!(
         out[0].time,
-        45_000.0 + 250.0 / DELPHI_MSECS_PER_DAY + 1.0 / 24.0
+        mt(45_000.0 + 250.0 / DELPHI_MSECS_PER_DAY + 1.0 / 24.0)
     );
 
     let volumes = worker
@@ -79,7 +83,7 @@ fn worker_does_not_create_market_from_stream_batch() {
         }],
         mm_order_rows: Vec::new(),
     });
-    assert!(worker.flush(45_000.0));
+    assert!(worker.flush(mt(45_000.0)));
 
     assert!(
         worker.readers("ETHUSDT").is_none(),
@@ -117,20 +121,20 @@ fn worker_stores_last_price_batch_for_enabled_market() {
                 is_base_usdt_market: false,
             }],
         });
-    assert!(worker.flush(45_000.25));
+    assert!(worker.flush(mt(45_000.25)));
 
     let mut out = Vec::new();
     last_prices.copy_last(4, &mut out);
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].current, 100.5);
-    assert_eq!(out[0].real_time, 45_000.25);
+    assert_eq!(out[0].time, mt(45_000.25));
 
     let mark_prices = worker.readers("BTCUSDT").unwrap().mark_prices.unwrap();
     let mut mark_out = Vec::new();
     mark_prices.copy_last(4, &mut mark_out);
     assert_eq!(mark_out.len(), 1);
     assert_eq!(mark_out[0].current, 100.75);
-    assert_eq!(mark_out[0].real_time, 45_000.25);
+    assert_eq!(mark_out[0].time, mt(45_000.25));
 }
 
 #[test]
@@ -178,7 +182,7 @@ fn worker_flush_compacts_evicted_futures_to_mini_candles() {
         ],
         mm_order_rows: Vec::new(),
     });
-    assert!(worker.flush(now_time));
+    assert!(worker.flush(mt(now_time)));
 
     let mut retained = Vec::new();
     futures.copy_last(8, &mut retained);
@@ -220,7 +224,7 @@ fn worker_applies_candles_snapshot_only_for_configured_scope() {
                 high: 102.0,
                 low: 99.0,
                 volume: 10.0,
-                time: 45_000.0,
+                time: mt(45_000.0),
             }],
         },
         MarketHistoryCandlesSnapshot {
@@ -231,11 +235,11 @@ fn worker_applies_candles_snapshot_only_for_configured_scope() {
                 high: 12.0,
                 low: 9.0,
                 volume: 1.0,
-                time: 45_000.0,
+                time: mt(45_000.0),
             }],
         },
     ]));
-    assert!(worker.flush(45_000.0));
+    assert!(worker.flush(mt(45_000.0)));
 
     let btc = worker.readers("BTCUSDT").unwrap().candles_5m.unwrap();
     let mut out = Vec::new();

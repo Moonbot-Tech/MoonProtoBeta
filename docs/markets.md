@@ -39,7 +39,7 @@ if let Some(market) = markets.get("BTCUSDT") {
         price.ask,
         price.mark_price,
         tail.last_trade_price,
-        price.funding_time_delphi().unix_millis()
+        price.funding_time().unix_millis()
     );
 }
 
@@ -65,6 +65,8 @@ Arbitrage relay packets also apply to the live market. Use
 `MarketHandle::arb_slot(ArbPlatformCode::...)` or
 `arb_now(ArbPlatformCode::...)` from the
 selected handle; raw arb `market_index` blocks are diagnostic protocol details.
+Arb price entries expose `time()` / `unix_millis()` helpers; the fixed ring
+cursor is diagnostics/test-only.
 
 ## Init and Refresh
 
@@ -103,9 +105,10 @@ pub enum MarketsEvent {
 ## Public State
 
 `MarketsState` is a read API over the live market catalog. Its internal COW
-maps/lists are not public surface: use `iter()`, `get()`, `market_*`,
-`price*`, `tags()`, `trade_state()`, and the count helpers instead of reaching
-into storage fields.
+maps/lists and server-index helpers are not the terminal surface. Normal UI code
+uses `iter()`, `get() -> MarketHandle`, `market_snapshot(name)`, `price(name)`,
+`tags(name)`, `trade_state(name)`, and the count helpers. Selected-market UI
+should keep the `MarketHandle` returned by `get()` and read through that handle.
 
 ```rust
 pub struct MarketPrice {
@@ -117,9 +120,12 @@ pub struct MarketPrice {
     pub min_lot_size: f64,
     pub chart_price_step: f64,
     pub funding_rate: f64,
-    pub funding_time: f64,
     pub mark_price: f64,
     pub mark_price_found: bool,
+}
+
+impl MarketPrice {
+    pub fn funding_time(self) -> MoonTime;
 }
 ```
 
@@ -152,12 +158,11 @@ The retained LastPrice line row is:
 ```rust
 let price = point.price();
 let unix_ms = point.unix_millis();
-let delphi_time = point.time_delphi();
+let time = point.time();
 ```
 
-The row keeps Delphi-compatible dense storage internally; UI code should use
-`price()`, `time_delphi()`, or `unix_millis()` instead of treating the raw time
-field as Unix time.
+UI code should use `price()`, `time()`, or `unix_millis()` instead of carrying
+raw protocol time.
 
 This row mirrors Delphi `THistoricalPrices`. It is not the last trade price.
 Delphi fills it from `UpdateMarketsList`: the server sends `Bid/Ask`, the
@@ -172,7 +177,7 @@ The retained MarkPrice line row has the same shape:
 
 ```rust
 let mark_price = point.price();
-let mark_time = point.time_delphi();
+let mark_time = point.time();
 ```
 
 It is filled from `UpdateMarketsList -> MarketPrice.mark_price` when the server
@@ -204,8 +209,7 @@ Known constants cover the currently named server values. Unknown future values
 are preserved as their original byte instead of being collapsed to
 `BaseCurrency::UNKNOWN`. For older servers that do not provide this field,
 `Market::futures_type` is `BaseCurrency::EMPTY`.
-Use `BaseCurrency::name()` for UI labels; `to_byte()` / `from_byte()` are for
-protocol diagnostics and roundtrip tests.
+Use `BaseCurrency::name()` for UI labels.
 
 `Market::listed_type()` returns the Delphi `TListedOnExchange`
 post-processing result for `GetMarketsList`: `BaseCurrency::EMPTY` means
@@ -333,16 +337,15 @@ post-assign fields from `TMoonProtoEngine.UpdateMarketsList`:
 can refresh it from the current ask; when `Ask > 0`, it becomes
 `max(eps, Ask / 5000)`, and when `Ask` is zero/missing, the previous value is
 kept.
-When funding is included, the same row also updates
-`Market::funding_rate` and `Market::funding_time`, matching Delphi's `TMarket`
-mutation in the `HasFunding` branch.
+When funding is included, the same row also updates the retained market funding
+rate/time, matching Delphi's `TMarket` mutation in the `HasFunding` branch.
 
 Funding timestamps match Delphi client state. The server serializes
 `FundingTime - TZShift`; Rust parsers add the local client timezone shift back,
-so `Market::funding_time` and `MarketPrice::funding_time` are client-local
-Delphi `TDateTime` values. A zero funding time stays zero.
-They are not Unix timestamps; use `funding_time_delphi().unix_millis()` when
-the UI needs wall-clock time.
+so retained funding time is client-local Delphi `TDateTime`. A zero funding
+time stays zero. It is not Unix time; UI code should use
+`MarketHandle::price().funding_time().unix_millis()` or
+`Market::funding_time()` instead of carrying a raw `f64` timestamp.
 
 Trades stream packets also update the bounded live trade tail kept by Delphi on
 `TMarket`. For futures trade rows, the runtime updates
@@ -372,11 +375,3 @@ is internal to the active library. User code should react to
 `UpdateMarketsList` carries server `mIndex` values. Price updates resolve those
 indexes through the current `GetMarketsIndexes` mapping, so stale mappings after
 a server restart are not used.
-
-`MarketsState::last_markets_list_apply_timing()` is diagnostics only. In test
-or `--features diagnostics` builds it records coarse total/loop timing for the
-latest active `GetMarketsList` apply; regular builds return `None` and do not
-pay for these timer reads.
-Per-row read/apply attribution is intentionally absent from production code:
-thousands of timer calls inside the market/CorrMarket loops distort the CPU
-path they are supposed to measure.

@@ -54,11 +54,25 @@ pub struct HyperDexIndex(u8);
 impl HyperDexIndex {
     pub const DEFAULT: Self = Self(0);
 
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub const fn from_byte(b: u8) -> Self {
         Self(b)
     }
 
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) const fn from_byte(b: u8) -> Self {
+        Self(b)
+    }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub const fn to_byte(self) -> u8 {
+        self.0
+    }
+
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) const fn to_byte(self) -> u8 {
         self.0
     }
 
@@ -104,7 +118,7 @@ pub struct AuthCheckResponse {
 /// DEX tail follows Delphi's soft stream-read shape: the declared `cnt` is read,
 /// `SetLength(KnownDexes, cnt)` creates zero-filled records, and each
 /// `TMemoryStream.Read` partially overwrites one 18-byte `THLDexInfo` slot.
-pub fn parse_auth_check_response(data: &[u8]) -> Option<AuthCheckResponse> {
+pub(crate) fn parse_auth_check_response(data: &[u8]) -> Option<AuthCheckResponse> {
     let mut pos = 0usize;
 
     // Required fields.

@@ -4,7 +4,7 @@ use super::{
     FieldValue, StrategyBatch, StrategyFields, StrategySnapshot, TID_BOOL, TID_BYTE, TID_DOUBLE,
     TID_INT32, TID_INT64, TID_SINGLE, TID_STRING, TID_UINT32, TID_UINT64, TID_WORD, TID_ZERO_FLAG,
 };
-use crate::commands::inflate::read_inflate_to_vec;
+use crate::commands::inflate::{read_inflate_to_vec, MAX_INFLATE_OUTPUT_SIZE};
 use crate::commands::registry::decode_utf8_delphi;
 use crate::commands::strategy_schema::StrategySchema;
 use crate::commands::strict_read::{read_i32, read_u16, read_u64, read_u8};
@@ -39,6 +39,7 @@ pub(crate) fn parse_strategy_batch_with_schema_field_types(
     let decompressed = read_inflate_to_vec(
         &mut decoder,
         strategy_plain_capacity_hint(deflate_bytes.len()),
+        MAX_INFLATE_OUTPUT_SIZE,
     )
     .ok()?;
     parse_strategy_batch_plain_with_schema_field_types(&decompressed, schema_field_types)
@@ -56,6 +57,7 @@ where
     let decompressed = read_inflate_to_vec(
         &mut decoder,
         strategy_plain_capacity_hint(deflate_bytes.len()),
+        MAX_INFLATE_OUTPUT_SIZE,
     )
     .ok()?;
     parse_strategy_batch_plain_for_each_with_schema_field_types(
@@ -250,7 +252,7 @@ fn read_strategy(
 
         let value: Option<FieldValue> = if is_zero {
             // Value bytes are absent (Delphi: `If (TypeID and TID_ZERO_FLAG) <> 0 then exit`).
-            FieldValue::zero(real_type)
+            FieldValue::zero_for_type_id(real_type)
         } else {
             try_read_field_value(data, pos, real_type)
         };

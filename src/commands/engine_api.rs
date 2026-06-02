@@ -8,12 +8,16 @@
 use std::time::{Duration, SystemTime};
 
 use super::registry::read_string;
+#[cfg(any(test, feature = "diagnostics"))]
+use crate::time::DelphiTime;
+use crate::MoonTime;
 mod auth_check;
 mod base_check;
 mod method;
 mod response;
 
-pub use self::auth_check::{parse_auth_check_response, AuthCheckResponse, DexInfo, HyperDexIndex};
+pub(crate) use self::auth_check::parse_auth_check_response;
+pub use self::auth_check::{AuthCheckResponse, DexInfo, HyperDexIndex};
 #[allow(unused_imports)]
 pub(crate) use self::base_check::{exchange_type_flags, parse_base_check_response};
 pub use self::base_check::{ExchangeTypeMask, ServerInfo};
@@ -21,6 +25,7 @@ pub use self::method::EngineMethod;
 pub(crate) use self::response::parse_engine_response;
 pub use self::response::EngineResponse;
 
+#[cfg(test)]
 const DELPHI_UNIX_EPOCH_DAYS: f64 = 25_569.0;
 const SECONDS_PER_DAY: f64 = 86_400.0;
 
@@ -46,24 +51,13 @@ fn read_u64_zero_tail(data: &[u8], pos: &mut usize) -> u64 {
     u64::from_le_bytes(read_zero_tail::<8>(data, pos))
 }
 
-/// Parse `EngineResponse.data` for `emk_GetBalance` (`EngineMethod::GetBalance`).
-///
-/// The Delphi server writes exactly one little-endian `Double` on success:
-/// `MoonProtoEngineServer.pas:315-319` (`resp.WriteDouble(q)`). Extra trailing
-/// bytes are ignored so newer servers can append fields without breaking old
-/// consumers.
-pub fn parse_get_balance_response(data: &[u8]) -> Option<f64> {
-    let mut pos = 0usize;
-    Some(f64::from_le_bytes(read_zero_tail::<8>(data, &mut pos)))
-}
-
 /// Parse `EngineResponse.data` for `emk_QueryHedgeMode`
 /// (`EngineMethod::QueryHedgeMode`).
 ///
 /// The Delphi server writes one `Boolean` byte on success:
 /// `MoonProtoEngineServer.pas:341-344` (`resp.WriteBool(hedgeMode)`). Extra
 /// trailing bytes are ignored for forward compatibility.
-pub fn parse_query_hedge_mode_response(data: &[u8]) -> Option<bool> {
+pub(crate) fn parse_query_hedge_mode_response(data: &[u8]) -> Option<bool> {
     let mut pos = 0usize;
     Some(read_u8_zero_tail(data, &mut pos) != 0)
 }
@@ -79,12 +73,34 @@ pub struct ApiExpirationTime {
 }
 
 impl ApiExpirationTime {
+    pub fn from_time(time: MoonTime) -> Self {
+        Self {
+            delphi_time: time.to_delphi_days(),
+        }
+    }
+
     /// Build from the raw Delphi `TDateTime` value.
-    pub fn from_delphi_time(delphi_time: f64) -> Self {
+    pub(crate) fn from_delphi_time(delphi_time: f64) -> Self {
         Self { delphi_time }
     }
 
+    /// API expiration time when the server reported a known value.
+    pub fn time(&self) -> Option<MoonTime> {
+        self.is_known()
+            .then(|| MoonTime::from_delphi_days(self.delphi_time))
+            .flatten()
+    }
+
+    /// API expiration as a typed Delphi `TDateTime` helper.
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
+    pub fn time_delphi(&self) -> DelphiTime {
+        DelphiTime::from_days(self.delphi_time)
+    }
+
     /// Raw Delphi `TDateTime` value retained for exact diagnostics.
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub fn delphi_time(&self) -> f64 {
         self.delphi_time
     }
@@ -97,14 +113,9 @@ impl ApiExpirationTime {
     /// Convert to whole Unix seconds when the value is known and representable
     /// by `SystemTime` on the Unix side of the epoch.
     pub fn unix_seconds(&self) -> Option<i64> {
-        if !self.is_known() {
-            return None;
-        }
-        let seconds = ((self.delphi_time - DELPHI_UNIX_EPOCH_DAYS) * SECONDS_PER_DAY).round();
-        if !seconds.is_finite() || seconds < 0.0 || seconds > i64::MAX as f64 {
-            return None;
-        }
-        Some(seconds as i64)
+        let seconds = self.time()?.unix_seconds().round();
+        (seconds.is_finite() && seconds >= 0.0 && seconds <= i64::MAX as f64)
+            .then_some(seconds as i64)
     }
 
     /// Convert to `SystemTime` when the value is known and not before the Unix epoch.

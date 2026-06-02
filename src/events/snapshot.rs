@@ -1,4 +1,4 @@
-//! Read-only Active Lib state snapshot for application callbacks.
+﻿//! Read-only Active Lib state snapshot for application callbacks.
 
 use super::*;
 use crate::commands::candles::{DeepHistoryKind, DeepPrice};
@@ -11,7 +11,7 @@ use crate::state::{MarketHandle, OrderBookKind, OrderBookSnapshot, TopOfBook};
 /// applying server data. User code can keep a snapshot for rendering without
 /// blocking protocol ACK/retry/send progress.
 #[derive(Debug, Clone)]
-pub struct EventDispatcherSnapshot {
+pub struct MoonStateSnapshot {
     orders: CowState<Orders>,
     order_books: CowState<OrderBooks>,
     account: CowState<AccountState>,
@@ -27,14 +27,7 @@ pub struct EventDispatcherSnapshot {
     auth_info: Option<std::sync::Arc<AuthCheckResponse>>,
 }
 
-/// Public name for the immutable Active Lib read model.
-///
-/// `EventDispatcherSnapshot` remains as a hidden compatibility name for
-/// protocol tests and older code. New application code should use
-/// `MoonStateSnapshot`.
-pub type MoonStateSnapshot = EventDispatcherSnapshot;
-
-impl EventDispatcherSnapshot {
+impl MoonStateSnapshot {
     /// Read-only order state, keyed by server order UID.
     pub fn orders(&self) -> &Orders {
         &self.orders
@@ -143,6 +136,10 @@ impl EventDispatcherSnapshot {
     }
 
     /// Clone the current strategy snapshot list in Delphi list order.
+    ///
+    /// This is an owned export helper. Normal UI/read paths should prefer
+    /// [`Self::strategy_snapshots`] so strategy rows are borrowed from the
+    /// retained active-library state instead of cloned on every render tick.
     pub fn strategy_snapshot_vec(&self) -> Vec<StrategySnapshot> {
         self.strats.snapshot_vec()
     }
@@ -179,7 +176,7 @@ impl EventDispatcherSnapshot {
     pub fn market_history_rolling_volumes(
         &self,
         market_name: &str,
-        now_time: f64,
+        now_time: crate::MoonTime,
     ) -> Option<RollingTradeVolumeSnapshot> {
         self.market_history
             .as_ref()?
@@ -190,18 +187,18 @@ impl EventDispatcherSnapshot {
     pub fn market_history_rolling_volumes_for(
         &self,
         market: &MarketHandle,
-        now_time: f64,
+        now_time: crate::MoonTime,
     ) -> Option<RollingTradeVolumeSnapshot> {
         self.market_history_rolling_volumes(market.name(), now_time)
     }
 
-    /// Current rolling volume snapshot at a typed Delphi time.
+    /// Current rolling volume snapshot at an explicit timestamp.
     pub fn market_history_rolling_volumes_at(
         &self,
         market_name: &str,
-        now_time: crate::DelphiTime,
+        now_time: crate::MoonTime,
     ) -> Option<RollingTradeVolumeSnapshot> {
-        self.market_history_rolling_volumes(market_name, now_time.as_days())
+        self.market_history_rolling_volumes(market_name, now_time)
     }
 
     /// Current rolling volume snapshot using the local system clock.
@@ -209,7 +206,7 @@ impl EventDispatcherSnapshot {
         &self,
         market_name: &str,
     ) -> Option<RollingTradeVolumeSnapshot> {
-        self.market_history_rolling_volumes_at(market_name, crate::DelphiTime::now())
+        self.market_history_rolling_volumes_at(market_name, crate::MoonTime::now())
     }
 
     /// Current rolling volume snapshot for a stable market handle using the
@@ -218,14 +215,14 @@ impl EventDispatcherSnapshot {
         &self,
         market: &MarketHandle,
     ) -> Option<RollingTradeVolumeSnapshot> {
-        self.market_history_rolling_volumes_for(market, crate::DelphiTime::now().as_days())
+        self.market_history_rolling_volumes_for(market, crate::MoonTime::now())
     }
 
     /// Current derived analytics snapshot for one market, if retained storage is active.
     pub fn market_history_derived_snapshot(
         &self,
         market_name: &str,
-        now_time: f64,
+        now_time: crate::MoonTime,
     ) -> Option<MarketDerivedSnapshot> {
         self.market_history
             .as_ref()?
@@ -236,18 +233,18 @@ impl EventDispatcherSnapshot {
     pub fn market_history_derived_snapshot_for(
         &self,
         market: &MarketHandle,
-        now_time: f64,
+        now_time: crate::MoonTime,
     ) -> Option<MarketDerivedSnapshot> {
         self.market_history_derived_snapshot(market.name(), now_time)
     }
 
-    /// Current derived analytics snapshot at a typed Delphi time.
+    /// Current derived analytics snapshot at an explicit timestamp.
     pub fn market_history_derived_snapshot_at(
         &self,
         market_name: &str,
-        now_time: crate::DelphiTime,
+        now_time: crate::MoonTime,
     ) -> Option<MarketDerivedSnapshot> {
-        self.market_history_derived_snapshot(market_name, now_time.as_days())
+        self.market_history_derived_snapshot(market_name, now_time)
     }
 
     /// Current derived analytics snapshot using the local system clock.
@@ -255,7 +252,7 @@ impl EventDispatcherSnapshot {
         &self,
         market_name: &str,
     ) -> Option<MarketDerivedSnapshot> {
-        self.market_history_derived_snapshot_at(market_name, crate::DelphiTime::now())
+        self.market_history_derived_snapshot_at(market_name, crate::MoonTime::now())
     }
 
     /// Current derived analytics snapshot for a stable market handle using the
@@ -264,7 +261,7 @@ impl EventDispatcherSnapshot {
         &self,
         market: &MarketHandle,
     ) -> Option<MarketDerivedSnapshot> {
-        self.market_history_derived_snapshot_for(market, crate::DelphiTime::now().as_days())
+        self.market_history_derived_snapshot_for(market, crate::MoonTime::now())
     }
 }
 
@@ -273,8 +270,8 @@ impl EventDispatcher {
     ///
     /// This is a read-only snapshot: it intentionally excludes mutable callback
     /// hooks and the one-shot queued-event buffer from the live dispatcher.
-    pub fn snapshot(&self) -> EventDispatcherSnapshot {
-        EventDispatcherSnapshot {
+    pub(crate) fn snapshot(&self) -> MoonStateSnapshot {
+        MoonStateSnapshot {
             orders: self.orders.clone(),
             order_books: self.order_books.clone(),
             account: self.account.clone(),

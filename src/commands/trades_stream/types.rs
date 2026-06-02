@@ -1,3 +1,5 @@
+#![cfg_attr(feature = "diagnostics", allow(dead_code))]
+
 use crate::commands::trade::OrderType;
 
 /// Flags stored in a watcher-fill record.

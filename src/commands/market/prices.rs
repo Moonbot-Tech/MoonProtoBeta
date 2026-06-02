@@ -5,7 +5,15 @@ use super::{
 };
 #[cfg(test)]
 use crate::commands::candles::current_local_time_shift_minutes;
+#[cfg(any(test, feature = "diagnostics"))]
 use crate::time::DelphiTime;
+use crate::time::MoonTime;
+
+pub(crate) const MAX_MARKET_PRICE_UPDATE_ROWS: usize = u16::MAX as usize + 1;
+pub(crate) const MARKET_PRICE_ROW_MIN_SIZE_NO_FUNDING: usize = 2 + 8 + 8 + 8 + 1;
+pub(crate) const MARKET_PRICE_ROW_MIN_SIZE_WITH_FUNDING: usize =
+    MARKET_PRICE_ROW_MIN_SIZE_NO_FUNDING + 8 + 8;
+pub(crate) const CORR_PRICE_ROW_MIN_SIZE: usize = 2 + 8;
 
 /// Price update for a single market (byte-exact with `WriteMarketPricesToStream`
 /// MoonProtoSerialization.pas:195-209).
@@ -25,6 +33,12 @@ pub struct MarketPriceUpdate {
 }
 
 impl MarketPriceUpdate {
+    pub fn funding_time(self) -> MoonTime {
+        MoonTime::from_delphi_days(self.funding_time).unwrap_or(MoonTime::ZERO)
+    }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub fn funding_time_delphi(self) -> DelphiTime {
         DelphiTime::from_days(self.funding_time)
     }
@@ -58,10 +72,18 @@ pub(super) fn parse_markets_prices_response_with_local_shift(
 ) -> Option<MarketsPricesResponse> {
     let mut r = EngineStreamReader::new(data);
     let send_funding = r.read_bool()?;
-    // MarketPriceUpdate minimum: m_index(2) + bid(8) + ask(8) + mark_price(8) + mark_found(1) = 27 bytes.
-    // If send_funding=true, +16 more. 27 is used only for bounded prealloc.
-    let count = r.read_count()?;
-    let mut prices = Vec::with_capacity(r.bounded_count_capacity(count, 27));
+    let min_price_row_size = if send_funding {
+        MARKET_PRICE_ROW_MIN_SIZE_WITH_FUNDING
+    } else {
+        MARKET_PRICE_ROW_MIN_SIZE_NO_FUNDING
+    };
+    let count = r.read_count_bounded(
+        min_price_row_size,
+        MAX_MARKET_PRICE_UPDATE_ROWS,
+        "UpdateMarketsList.prices",
+    )?;
+    let mut prices = Vec::new();
+    prices.try_reserve(count).ok()?;
     for _ in 0..count {
         let m_index = r.read_word()?;
         let bid = r.read_double()?;
@@ -89,9 +111,12 @@ pub(super) fn parse_markets_prices_response_with_local_shift(
     let send_corr_markets = r.read_bool()?;
     let mut corr_prices = Vec::new();
     if send_corr_markets {
-        // CorrMarketPriceUpdate: bn_market_name (string u16+chars) + last_price (8) = at least 10 bytes.
-        let corr_count = r.read_count()?;
-        corr_prices.reserve(r.bounded_count_capacity(corr_count, 10));
+        let corr_count = r.read_count_bounded(
+            CORR_PRICE_ROW_MIN_SIZE,
+            usize::MAX,
+            "UpdateMarketsList.corr_prices",
+        )?;
+        corr_prices.try_reserve(corr_count).ok()?;
         for _ in 0..corr_count {
             let bn_market_name = r.read_str()?;
             let last_price = r.read_double()?;

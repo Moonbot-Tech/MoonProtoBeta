@@ -20,20 +20,19 @@ impl<T> Default for AppQueue<T> {
 }
 
 impl<T> AppQueue<T> {
+    #[cfg(test)]
     pub(crate) fn as_slice(&self) -> &[T] {
         &self.items
     }
 
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.items.len()
     }
 
+    #[cfg(test)]
     pub(crate) fn max_len(&self) -> usize {
         self.max_len
-    }
-
-    pub(crate) fn clear(&mut self) {
-        self.items.clear();
     }
 
     pub(crate) fn take(&mut self) -> Vec<T> {

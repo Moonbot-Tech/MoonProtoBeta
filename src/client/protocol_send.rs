@@ -86,7 +86,6 @@ impl ProtocolCore<'_> {
             .client
             .send_lock
             .lock()
-            .unwrap()
             .take_send_snapshot(sliced, h_items, l_items, acks);
         if let Some(tmp_slider) = tmp_slider {
             self.client.recv.recvd_slider = tmp_slider;
@@ -105,7 +104,7 @@ impl ProtocolCore<'_> {
 
     #[cfg(test)]
     pub(crate) fn copy_recvd_data(&mut self) {
-        if let Some(tmp_slider) = self.client.send_lock.lock().unwrap().copy_tmp_slider() {
+        if let Some(tmp_slider) = self.client.send_lock.lock().copy_tmp_slider() {
             self.client.recv.recvd_slider = tmp_slider;
         }
     }

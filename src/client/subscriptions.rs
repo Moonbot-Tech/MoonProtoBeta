@@ -1,6 +1,7 @@
+use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 // =============================================================================
 //  Subscription Registry — active library principle
@@ -28,8 +29,7 @@ pub struct TradesSubscription {
 
 /// Read-only snapshot of the streams a session currently has subscribed.
 ///
-/// Returned by [`crate::client::Client::active_subscriptions`] and
-/// [`crate::MoonClient::active_subscriptions`]. Because the active library
+/// Returned by [`crate::MoonClient::active_subscriptions`]. Because the active library
 /// replays these after reconnect, they reflect the session's maintained intent,
 /// not just the last packet.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -160,7 +160,8 @@ pub(crate) struct Subscriptions {
 }
 
 impl Subscriptions {
-    pub(crate) fn new(
+    pub(crate) fn new_with_registry(
+        subscription_registry: Arc<Mutex<SubscriptionRegistry>>,
         subscription_summary: Arc<SubscriptionRegistrySummary>,
         subscription_trades_scope: Arc<
             parking_lot::RwLock<Option<Arc<crate::state::TradeStorageScope>>>,
@@ -168,7 +169,7 @@ impl Subscriptions {
         domain_ready_flag: Arc<AtomicBool>,
     ) -> Self {
         Self {
-            subscription_registry: Arc::new(Mutex::new(SubscriptionRegistry::default())),
+            subscription_registry,
             subscription_summary,
             subscription_trades_scope,
             domain_ready: false,

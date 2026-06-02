@@ -38,9 +38,17 @@ pub struct MarketArbSlot {
 Isolation snapshots are committed like Delphi: received temporary flags replace
 the current `isolated_flags`, then the temporary staging flags are cleared.
 Use `MarketHandle::arb_now(ArbPlatformCode::...)` when the UI only needs the
-latest price/time. If the UI needs the 10-point Delphi ring, use
-`MarketArbSlot::points_oldest_first()`; the raw storage ring and cursor are
-internal.
+latest price/time:
+
+```rust
+let Some(now) = btc.arb_now(ArbPlatformCode::ByBit) else { return; };
+let price = now.price;
+let time_ms = now.unix_millis();
+```
+
+If the UI needs the 10-point Delphi ring, use
+`MarketArbSlot::points_oldest_first()` and each point's `time()` /
+`unix_millis()` helpers. The raw storage ring and cursor are internal.
 
 ## Events
 

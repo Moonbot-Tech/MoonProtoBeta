@@ -41,6 +41,7 @@ impl ProtocolCore<'_> {
     }
 
     pub(crate) fn apply_hello_and_build_imfriend(&mut self, hello: handshake::Hello) -> Vec<u8> {
+        self.client.accepted_server_mix_ts(hello.mix_ts);
         self.client.server_token = hello.server_token;
         let prev_app_token = self.client.peer_app_token;
         self.client.peer_app_token = hello.app_token;
@@ -50,8 +51,13 @@ impl ProtocolCore<'_> {
             self.client.fire_lifecycle(LifecycleEvent::ServerRestart);
         }
 
-        let (encode_key, decode_key) =
-            crypto::generate_sub_keys(&self.client.cfg.master_key, self.client.server_token);
+        self.client.session_rnd = hello.rnd;
+        let (encode_key, decode_key) = crypto::generate_session_sub_keys(
+            &self.client.cfg.master_key,
+            self.client.cfg.client_id,
+            self.client.server_token,
+            &self.client.session_rnd,
+        );
         self.client.encode_key = encode_key;
         self.client.decode_key = decode_key;
         let encode_cipher = crate::crypto::cipher_from_key(&self.client.encode_key);
@@ -60,8 +66,8 @@ impl ProtocolCore<'_> {
             .recv
             .data_read_state
             .set_decode_cipher(crate::crypto::cipher_from_key(&self.client.decode_key));
+        self.client.refresh_ack_session32();
 
-        self.client.accepted_server_mix_ts(hello.mix_ts);
         self.client.handshake_peer_mix = hello.peer_mix;
         self.build_imfriend_packet().unwrap_or_default()
     }

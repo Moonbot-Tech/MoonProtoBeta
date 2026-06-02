@@ -128,14 +128,13 @@ Applications use lifecycle events for UI status and alerting, not for recovery.
 
 ## Time Values
 
-MoonProto inherits Delphi `TDateTime`: `f64` days since `1899-12-30`. That is
-not Unix time. Public dense rows keep raw day fields for compatibility and cheap
-history storage, but application code should convert through `DelphiTime` or
-the row helper methods:
+MoonProto public API uses `MoonTime`, a Unix-milliseconds timestamp. The
+protocol's Delphi `TDateTime` floats are converted at packet boundaries, so UI
+code should read row helper methods instead of carrying raw protocol time:
 
 ```rust
-let unix_ms = candle.time_delphi().unix_millis();
-let system_time = trade.time_delphi().system_time();
+let unix_ms = candle.time().unix_millis();
+let system_time = trade.time().system_time();
 ```
 
 ## Public Entry Points
@@ -146,7 +145,7 @@ let system_time = trade.time_delphi().system_time();
 | `client.md` | `MoonClient`, config, init, subscriptions, requests |
 | `events.md` | `MoonClient` events and immutable snapshots |
 | `lifecycle.md` | Connection and critical status events |
-| `time.md` | Delphi `TDateTime` conversion helpers |
+| `time.md` | `MoonTime` and timestamp helpers |
 | `engine_api.md` | Engine RPC wrappers and response parsing |
 | `trade_actions.md` | High-level trading commands |
 | `orders.md` | Order state and order events |

@@ -1,6 +1,7 @@
 //! `ProcessTradesStream` packet-number state machine.
 
 use super::*;
+#[cfg(test)]
 use crate::commands::trades_stream::TradesPacket;
 
 impl TradesState {
@@ -128,7 +129,8 @@ impl TradesState {
     /// lightweight [`TradesEvent::Applied`] notification; row storage belongs
     /// to the active dispatcher/SeqRing path.
     #[must_use = "TradesEvents must be processed for diagnostics and gap recovery"]
-    pub fn on_packet(&mut self, pkt: TradesPacket, now_ms: i64) -> Vec<TradesEvent> {
+    #[cfg(test)]
+    pub(crate) fn on_packet(&mut self, pkt: TradesPacket, now_ms: i64) -> Vec<TradesEvent> {
         let effects = self.on_packet_header(pkt.packet_num, now_ms);
         materialize_packet_effects(effects, pkt)
     }
@@ -273,7 +275,8 @@ impl TradesState {
     /// Resend packets do not advance `last_packet_num`; they only mark received
     /// bits in existing buckets. This mirrors Delphi
     /// `ProcessTradesStream(TrackPackets=False)`.
-    pub fn on_packet_resend(&mut self, pkt: TradesPacket) -> Vec<TradesEvent> {
+    #[cfg(test)]
+    pub(crate) fn on_packet_resend(&mut self, pkt: TradesPacket) -> Vec<TradesEvent> {
         let effects = self.on_packet_resend_header(pkt.packet_num);
         materialize_packet_effects(effects, pkt)
     }

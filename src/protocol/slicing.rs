@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 #[cfg(feature = "diagnostic-trace")]
 use std::sync::OnceLock;
-use zerocopy::byteorder::little_endian::U16 as LeU16;
+use zerocopy::byteorder::little_endian::{U16 as LeU16, U32 as LeU32};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 #[cfg(feature = "diagnostic-trace")]
@@ -238,30 +238,36 @@ impl SlicedData {
 struct WireSlicedAck {
     flags: [u8; 32],
     datagram_num: LeU16,
+    session: LeU32,
 }
 
-/// ACK256 wire format: 32 bytes flags + 2 bytes DatagramNum = 34 bytes
+/// ACK256 wire format: 32 bytes flags + 2 bytes DatagramNum + 4 bytes Session = 38 bytes.
 pub(crate) const ACK256_WIRE_SIZE: usize = std::mem::size_of::<WireSlicedAck>();
-const _: [(); 34] = [(); ACK256_WIRE_SIZE];
+const _: [(); 38] = [(); ACK256_WIRE_SIZE];
 pub(crate) type SlicedPayloadResult = Option<(u16, u8, Vec<u8>, u8, usize)>;
 pub(crate) type SlicedProcessResult = (SlicedPayloadResult, [u8; ACK256_WIRE_SIZE]);
 
-pub(crate) fn build_ack_bytes(flags: &[u8; 32], datagram_num: u16) -> [u8; ACK256_WIRE_SIZE] {
+pub(crate) fn build_ack_bytes(
+    flags: &[u8; 32],
+    datagram_num: u16,
+    session: u32,
+) -> [u8; ACK256_WIRE_SIZE] {
     let mut buf = [0u8; ACK256_WIRE_SIZE];
     let wire = WireSlicedAck {
         flags: *flags,
         datagram_num: LeU16::new(datagram_num),
+        session: LeU32::new(session),
     };
     buf.copy_from_slice(wire.as_bytes());
     buf
 }
 
-pub(crate) fn parse_ack_bytes(payload: &[u8]) -> Option<([u8; 32], u16)> {
+pub(crate) fn parse_ack_bytes(payload: &[u8]) -> Option<([u8; 32], u16, u32)> {
     if payload.len() < ACK256_WIRE_SIZE {
         return None;
     }
     let wire = WireSlicedAck::read_from_bytes(&payload[..ACK256_WIRE_SIZE]).ok()?;
-    Some((wire.flags, wire.datagram_num.get()))
+    Some((wire.flags, wire.datagram_num.get(), wire.session.get()))
 }
 
 /// Receiving state: tracks all in-progress datagrams.
@@ -332,7 +338,16 @@ impl SlicingReceiver {
     /// dictionary and returns the completed `TMoonProtoSlicedData` equivalent.
     /// The caller must run `DataReadInt` first and only then remove the datagram
     /// from `Receiving`, like `TMoonProtoBaseNet.OnNewSliced`.
+    #[cfg(test)]
     pub(crate) fn on_new_sliced(&mut self, payload: &[u8]) -> SlicedProcessResult {
+        self.on_new_sliced_with_session(payload, 0)
+    }
+
+    pub(crate) fn on_new_sliced_with_session(
+        &mut self,
+        payload: &[u8],
+        ack_session: u32,
+    ) -> SlicedProcessResult {
         let trace = trace_enabled();
         let hdr = match SliceHeader::from_bytes(payload) {
             Some(h) => h,
@@ -365,7 +380,7 @@ impl SlicingReceiver {
         } else if !self.receiving.contains_key(&datagram_num) {
             // Not new, not in receiving → already completed, send full ACK
             let flags = [0xFFu8; 32]; // SetAllFlags
-            let ack = build_ack_bytes(&flags, datagram_num);
+            let ack = build_ack_bytes(&flags, datagram_num, ack_session);
             if trace {
                 eprintln!(
                     "[slice-rx] t={} d={} b={}/{} len={} action=already-complete-full-ack",
@@ -401,7 +416,7 @@ impl SlicingReceiver {
             // removes it from the main-loop side, any later block that arrives
             // in this short gap must behave like Delphi's post-removal branch:
             // no state mutation, no second assembled payload, ACK.SetAllFlags.
-            let full_ack = build_ack_bytes(&[0xFFu8; 32], datagram_num);
+            let full_ack = build_ack_bytes(&[0xFFu8; 32], datagram_num, ack_session);
             if trace {
                 eprintln!(
                     "[slice-rx-complete] t={} d={} block_after_complete=true full_ack=true blocks={}",
@@ -411,7 +426,7 @@ impl SlicingReceiver {
             return (None, full_ack);
         }
         let complete = sliced.receive_piece(hdr.block_num, block_data);
-        let ack = build_ack_bytes(&sliced.ack_flags, datagram_num);
+        let ack = build_ack_bytes(&sliced.ack_flags, datagram_num, ack_session);
         if trace {
             let got = sliced.received_count;
             let total = sliced.blocks_count;

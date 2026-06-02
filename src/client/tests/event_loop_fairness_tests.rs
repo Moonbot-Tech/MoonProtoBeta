@@ -8,7 +8,7 @@ fn dummy_cfg() -> ClientConfig {
         server_port: 3000,
         master_key: [0; 16],
         mac_key: [0; 16],
-        mask_ver: TransportMode::V0,
+        transport_mode: TransportMode::V0,
         client_id: 0,
         ntp_host: None,
         refresh: RefreshConfig {
@@ -50,10 +50,17 @@ fn send_server_packet_to_client_socket(client: &Client, cmd: Command, payload: &
 
 fn install_send_session(client: &mut Client) {
     client.server_token = 1;
-    let (encode_key, decode_key) = crate::crypto::generate_sub_keys(&client.cfg.master_key, 1);
+    client.session_rnd = client.handshake_rnd;
+    let (encode_key, decode_key) = crate::crypto::generate_session_sub_keys(
+        &client.cfg.master_key,
+        client.cfg.client_id,
+        1,
+        &client.session_rnd,
+    );
     client.encode_key = encode_key;
     client.decode_key = decode_key;
     client.encode_cipher = Some(crate::crypto::cipher_from_key(&encode_key));
+    client.refresh_ack_session32();
 }
 
 #[test]
@@ -72,7 +79,7 @@ fn send_phase_runs_with_ready_send_queue() {
 
     client.run_dispatcher_steps_for_test(1, &mut dispatcher);
     assert!(
-        client.send_lock.lock().unwrap().is_empty(),
+        client.send_lock.lock().is_empty(),
         "writer must copy direct Delphi-style send queues without app-event bridge"
     );
     assert!(
@@ -274,7 +281,7 @@ fn production_protocol_step_does_not_drain_udp_until_empty() {
     let events_cb = Arc::clone(&events);
     let mut mode = RunMode::Callback {
         on_data: Box::new(move |cmd, payload| {
-            events_cb.lock().unwrap().push((cmd, payload.to_vec()));
+            events_cb.lock().push((cmd, payload.to_vec()));
         }),
     };
 
@@ -284,7 +291,7 @@ fn production_protocol_step_does_not_drain_udp_until_empty() {
     .run_step(&mut mode));
     drop(mode);
 
-    let events = Arc::try_unwrap(events).unwrap().into_inner().unwrap();
+    let events = Arc::try_unwrap(events).unwrap().into_inner();
     assert_eq!(
         events.len(),
         1,

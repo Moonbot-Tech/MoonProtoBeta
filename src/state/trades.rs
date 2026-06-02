@@ -1,4 +1,4 @@
-//! TradesStream sync state — gap detection + resend protocol + batch response parser.
+//! TradesStream recovery state — gap detection + resend protocol + batch response parser.
 //!
 //! Delphi source:
 //! `MoonProtoEngine.pas:21-36, 1364-1549, 1553-1921` (`TGapBucket`,
@@ -7,38 +7,13 @@
 //! `ProcessTradesResendBatch`).
 //!
 //! The server sends `MPC_TradesStream` packets with wrapping `packet_num: u16`.
-//! The client tracks sequence gaps. A missing range creates a `GapBucket`; the
-//! tail check sends `TradesResend` requests for missing packet numbers, with up
-//! to three retries and exponential backoff. The server answers with
-//! `MPC_TradesResendResponse`, a batch of raw inner TradesStream packets.
-//!
-//! Low-level usage:
-//!
-//! ```ignore
-//! let mut trades = TradesState::new();
-//!
-//! // 1. Normal MPC_TradesStream packet:
-//! let events = trades.on_packet(parsed_trades_packet, now_ms);
-//! for ev in events {
-//!     match ev {
-//!         TradesEvent::Applied { packet_num, .. } => /* read new rows from SeqRing */,
-//!         TradesEvent::GapDetected { start, end } => /* log only */,
-//!     }
-//! }
-//!
-//! // 2. MPC_TradesResendResponse: iterate inner packets and apply them:
-//! for raw_pkt in iter_trades_resend_response(payload) {
-//!     if let Some(tp) = commands::trades_stream::parse_trades_packet(raw_pkt) {
-//!         let _evts = trades.on_packet_resend(tp); // resend does not advance last_packet_num
-//!     }
-//! }
-//!
-//! // 3. Delphi-equivalent tail check after a successfully parsed trades packet:
-//! for resend_payload in trades.tick(rtt_ms, now_ms) {
-//!     client.send_api_request(&resend_payload);
-//! }
-//! ```
+//! The active client owns the sequence-gap bookkeeping, sends `TradesResend`
+//! requests, applies resend payloads, and writes retained history before it
+//! publishes the lightweight `TradesEvent::Applied` signal. Applications do not
+//! feed packets or drive recovery manually; they subscribe through `MoonClient`
+//! and read retained rows from `MarketHistoryReaders`.
 
+#[cfg(test)]
 use crate::commands::trades_stream::TradesPacket;
 
 mod gap_bucket;
@@ -48,7 +23,7 @@ mod resend_response;
 mod types;
 
 use self::gap_bucket::{is_packet_in_range, GapBucket};
-pub use self::resend_response::{iter_trades_resend_response, TradesResendResponsePackets};
+pub(crate) use self::resend_response::iter_trades_resend_response;
 pub use self::types::TradesEvent;
 pub(crate) use self::types::{TradesPacketEffect, TradesPacketEffects};
 
@@ -61,19 +36,20 @@ const MAX_RETRY_COUNT: u8 = 3;
 /// Delphi: `TRADES_PAUSE_TIMEOUT = 30 / 86400` (30 seconds).
 const TRADES_PAUSE_TIMEOUT_MS: i64 = 30_000;
 
+#[cfg(test)]
 fn materialize_packet_effects(effects: TradesPacketEffects, pkt: TradesPacket) -> Vec<TradesEvent> {
     let packet_num = pkt.packet_num;
     let base_time = pkt.base_time;
     let mut events = Vec::with_capacity(effects.len());
     for effect in effects.iter() {
-        events.push(effect.into_event(packet_num, base_time));
+        effect.push_event(packet_num, base_time, &mut events);
     }
     events
 }
 
 /// TradesStream sequence/gap recovery state.
 #[derive(Debug, Clone)]
-pub struct TradesState {
+pub(crate) struct TradesState {
     buckets: [GapBucket; MAX_GAP_BUCKETS],
     used_buckets: usize,
     last_packet_num: u16,
@@ -92,7 +68,7 @@ impl Default for TradesState {
 }
 
 impl TradesState {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             buckets: std::array::from_fn(|_| GapBucket::default()),
             used_buckets: 0,
@@ -104,13 +80,6 @@ impl TradesState {
         }
     }
 
-    /// Reset all gap buckets.
-    ///
-    /// Delphi source: `ResetGapBuckets`, `MoonProtoEngine.pas:1370-1384`.
-    pub fn reset_buckets(&mut self) {
-        self.reset_gap_buckets(self.last_packet_time_ms);
-    }
-
     fn reset_gap_buckets(&mut self, now_ms: i64) {
         for b in self.buckets.iter_mut() {
             b.active = false;
@@ -120,22 +89,19 @@ impl TradesState {
         self.trades_started = false;
     }
 
-    /// Full reset, for example after server token change or reconnect.
-    pub fn full_reset(&mut self) {
-        self.full_reset_at(0);
-    }
-
     pub(crate) fn full_reset_at(&mut self, now_ms: i64) {
         self.reset_gap_buckets(now_ms);
         self.last_packet_num = 0;
     }
 
     /// Number of active gap buckets.
-    pub fn used_buckets(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) fn used_buckets(&self) -> usize {
         self.used_buckets
     }
 
-    pub fn last_packet_num(&self) -> u16 {
+    #[cfg(test)]
+    pub(crate) fn last_packet_num(&self) -> u16 {
         self.last_packet_num
     }
 }

@@ -8,7 +8,6 @@ impl ProtocolCore<'_> {
             self.client.auth_status = AuthStatus::Connected;
         }
         self.client.metrics.total_recv += recv_bytes;
-        self.client.track_recv(recv_bytes, timestamp_ms);
         self.client.last_online = timestamp_ms;
     }
 

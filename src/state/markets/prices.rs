@@ -5,7 +5,9 @@ use std::sync::Arc;
 use crate::commands::candles::current_local_time_shift_minutes;
 use crate::commands::market::{
     apply_delphi_local_funding_shift, CorrMarketPriceUpdate, EngineStreamReader, Market,
-    MarketPriceUpdate, MarketsPricesResponse,
+    MarketPriceUpdate, MarketsPricesResponse, CORR_PRICE_ROW_MIN_SIZE,
+    MARKET_PRICE_ROW_MIN_SIZE_NO_FUNDING, MARKET_PRICE_ROW_MIN_SIZE_WITH_FUNDING,
+    MAX_MARKET_PRICE_UPDATE_ROWS,
 };
 
 use super::{same_text_ascii, MarketLastPriceHistoryInput, MarketsEvent, MarketsState};
@@ -71,7 +73,16 @@ impl MarketsState {
 
         let mut r = EngineStreamReader::new(data);
         let send_funding = r.read_bool()?;
-        let count = r.read_count()?;
+        let min_price_row_size = if send_funding {
+            MARKET_PRICE_ROW_MIN_SIZE_WITH_FUNDING
+        } else {
+            MARKET_PRICE_ROW_MIN_SIZE_NO_FUNDING
+        };
+        let count = r.read_count_bounded(
+            min_price_row_size,
+            MAX_MARKET_PRICE_UPDATE_ROWS,
+            "UpdateMarketsList.prices",
+        )?;
         let base_usdt_context = self.base_usdt_market_context();
 
         for _ in 0..count {
@@ -87,7 +98,11 @@ impl MarketsState {
 
         let send_corr_markets = r.read_bool()?;
         if send_corr_markets {
-            let corr_count = r.read_count()?;
+            let corr_count = r.read_count_bounded(
+                CORR_PRICE_ROW_MIN_SIZE,
+                usize::MAX,
+                "UpdateMarketsList.corr_prices",
+            )?;
             for _ in 0..corr_count {
                 let update = read_corr_price_update(&mut r)?;
                 self.apply_one_corr_price_update(&update);

@@ -1,10 +1,12 @@
 //! Fixed-size MoonProto service records: Ping, SizeTest, and ProbeMTU.
 
-use zerocopy::byteorder::little_endian::{F64 as LeF64, I32 as LeI32, U16 as LeU16, U64 as LeU64};
+use zerocopy::byteorder::little_endian::{
+    F64 as LeF64, I32 as LeI32, U16 as LeU16, U32 as LeU32, U64 as LeU64,
+};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 pub(crate) const PING_SIZE: usize = std::mem::size_of::<WirePing>();
-const _: [(); 50] = [(); PING_SIZE];
+const _: [(); 54] = [(); PING_SIZE];
 pub(crate) const SIZE_TEST_SIZE: usize = std::mem::size_of::<WireSizeTestData>();
 const _: [(); 6] = [(); SIZE_TEST_SIZE];
 pub(crate) const PROBE_MTU_SIZE: usize = std::mem::size_of::<WireProbeMtu>();
@@ -25,6 +27,7 @@ struct WirePing {
     total_recv_bytes: LeU64,
     rsq: u8,
     ack_start: LeU64,
+    ack_session: LeU32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -36,6 +39,7 @@ pub(crate) struct PingFrame {
     pub global_timing_orders: u16,
     pub overheat: u8,
     pub rsq: u8,
+    pub ack_session: u32,
 }
 
 impl PingFrame {
@@ -52,6 +56,7 @@ impl PingFrame {
             global_timing_orders: wire.global_timing_orders.get(),
             overheat: wire.overheat,
             rsq: wire.rsq,
+            ack_session: wire.ack_session.get(),
         })
     }
 
@@ -65,6 +70,7 @@ impl PingFrame {
         total_sent_bytes: u64,
         total_recv_bytes: u64,
         ack_start: u64,
+        ack_session: u32,
     ) -> Vec<u8> {
         let wire = WirePing {
             time: LeF64::new(corrected_now_dt),
@@ -77,6 +83,7 @@ impl PingFrame {
             total_recv_bytes: LeU64::new(total_recv_bytes),
             rsq: self.rsq,
             ack_start: LeU64::new(ack_start),
+            ack_session: LeU32::new(ack_session),
         };
         wire.as_bytes().to_vec()
     }
@@ -174,8 +181,8 @@ mod tests {
 
     #[test]
     fn service_records_have_delphi_sizes() {
-        assert_eq!(std::mem::size_of::<WirePing>(), 50);
-        assert_eq!(PING_SIZE, 50);
+        assert_eq!(std::mem::size_of::<WirePing>(), 54);
+        assert_eq!(PING_SIZE, 54);
         assert_eq!(std::mem::size_of::<WireSizeTestData>(), 6);
         assert_eq!(SIZE_TEST_SIZE, 6);
         assert_eq!(std::mem::size_of::<WireProbeMtu>(), 5);

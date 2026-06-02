@@ -18,12 +18,12 @@ pub fn client_config(
 ) -> Result<(ClientConfig, ImportedKeyInfo), String> {
     let info = parse_key_info(key_b64).ok_or_else(|| "invalid MoonBot key".to_string())?;
     let (host, port) = endpoint(endpoint_arg, &info);
-    let mask_ver = info
+    let transport_mode = info
         .network
-        .map(|network| network.mask_ver)
+        .map(|network| network.transport_mode)
         .unwrap_or(TransportMode::V0);
     let cfg = ClientConfig::new(host, port, info.keys.master_key, info.keys.mac_key)
-        .with_transport_mode(mask_ver);
+        .with_transport_mode(transport_mode);
     Ok((cfg, info))
 }
 

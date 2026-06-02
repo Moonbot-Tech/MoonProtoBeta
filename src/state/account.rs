@@ -22,23 +22,27 @@ pub struct AccountState {
 #[derive(Debug, Clone, PartialEq)]
 pub enum AccountEvent {
     HedgeModeUpdated {
+        #[cfg(any(test, feature = "diagnostics"))]
         #[doc(hidden)]
         request_uid: u64,
         hedge_mode: bool,
         revision: u64,
     },
     HedgeModeUpdateFailed {
+        #[cfg(any(test, feature = "diagnostics"))]
         #[doc(hidden)]
         request_uid: Option<u64>,
         error: String,
     },
     ApiExpirationUpdated {
+        #[cfg(any(test, feature = "diagnostics"))]
         #[doc(hidden)]
         request_uid: u64,
         expiration: ApiExpirationTime,
         revision: u64,
     },
     ApiExpirationUpdateFailed {
+        #[cfg(any(test, feature = "diagnostics"))]
         #[doc(hidden)]
         request_uid: Option<u64>,
         error: String,
@@ -55,6 +59,7 @@ impl AccountState {
     }
 
     #[doc(hidden)]
+    #[cfg(any(test, feature = "diagnostics"))]
     pub fn hedge_mode_request_uid(&self) -> Option<u64> {
         self.hedge_mode_request_uid
     }
@@ -64,6 +69,7 @@ impl AccountState {
     }
 
     #[doc(hidden)]
+    #[cfg(any(test, feature = "diagnostics"))]
     pub fn api_expiration_request_uid(&self) -> Option<u64> {
         self.api_expiration_request_uid
     }
@@ -75,18 +81,21 @@ impl AccountState {
     pub(crate) fn apply_hedge_mode_response(&mut self, resp: EngineResponse) -> AccountEvent {
         if resp.method != EngineMethod::QueryHedgeMode {
             return AccountEvent::HedgeModeUpdateFailed {
+                #[cfg(any(test, feature = "diagnostics"))]
                 request_uid: Some(resp.request_uid),
                 error: format!("unexpected EngineMethod {:?}", resp.method),
             };
         }
         if !resp.success {
             return AccountEvent::HedgeModeUpdateFailed {
+                #[cfg(any(test, feature = "diagnostics"))]
                 request_uid: Some(resp.request_uid),
                 error: format!("server error {} {}", resp.error_code, resp.error_msg.trim()),
             };
         }
         let Some(hedge_mode) = parse_query_hedge_mode_response(&resp.data) else {
             return AccountEvent::HedgeModeUpdateFailed {
+                #[cfg(any(test, feature = "diagnostics"))]
                 request_uid: Some(resp.request_uid),
                 error: format!("parse failed data_len={}", resp.data.len()),
             };
@@ -95,6 +104,7 @@ impl AccountState {
         self.hedge_mode_request_uid = Some(resp.request_uid);
         self.revision = self.revision.wrapping_add(1);
         AccountEvent::HedgeModeUpdated {
+            #[cfg(any(test, feature = "diagnostics"))]
             request_uid: resp.request_uid,
             hedge_mode,
             revision: self.revision,
@@ -104,18 +114,21 @@ impl AccountState {
     pub(crate) fn apply_api_expiration_response(&mut self, resp: EngineResponse) -> AccountEvent {
         if resp.method != EngineMethod::CheckAPIExpirationTime {
             return AccountEvent::ApiExpirationUpdateFailed {
+                #[cfg(any(test, feature = "diagnostics"))]
                 request_uid: Some(resp.request_uid),
                 error: format!("unexpected EngineMethod {:?}", resp.method),
             };
         }
         if !resp.success {
             return AccountEvent::ApiExpirationUpdateFailed {
+                #[cfg(any(test, feature = "diagnostics"))]
                 request_uid: Some(resp.request_uid),
                 error: format!("server error {} {}", resp.error_code, resp.error_msg.trim()),
             };
         }
         let Some(expiration) = parse_api_expiration_time_response(&resp.data) else {
             return AccountEvent::ApiExpirationUpdateFailed {
+                #[cfg(any(test, feature = "diagnostics"))]
                 request_uid: Some(resp.request_uid),
                 error: format!("parse failed data_len={}", resp.data.len()),
             };
@@ -124,6 +137,7 @@ impl AccountState {
         self.api_expiration_request_uid = Some(resp.request_uid);
         self.revision = self.revision.wrapping_add(1);
         AccountEvent::ApiExpirationUpdated {
+            #[cfg(any(test, feature = "diagnostics"))]
             request_uid: resp.request_uid,
             expiration,
             revision: self.revision,
@@ -135,7 +149,10 @@ impl AccountState {
         request_uid: Option<u64>,
         error: impl Into<String>,
     ) -> AccountEvent {
+        #[cfg(not(any(test, feature = "diagnostics")))]
+        let _ = request_uid;
         AccountEvent::HedgeModeUpdateFailed {
+            #[cfg(any(test, feature = "diagnostics"))]
             request_uid,
             error: error.into(),
         }
@@ -146,7 +163,10 @@ impl AccountState {
         request_uid: Option<u64>,
         error: impl Into<String>,
     ) -> AccountEvent {
+        #[cfg(not(any(test, feature = "diagnostics")))]
+        let _ = request_uid;
         AccountEvent::ApiExpirationUpdateFailed {
+            #[cfg(any(test, feature = "diagnostics"))]
             request_uid,
             error: error.into(),
         }

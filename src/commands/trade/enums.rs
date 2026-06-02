@@ -15,11 +15,26 @@ impl OrderType {
     pub const BuyLimit: Self = Self(3);
 
     /// Preserve a raw Delphi ordinal byte.
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
+    #[allow(dead_code)]
     pub const fn from_byte(b: u8) -> Self {
         Self(b)
     }
 
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) const fn from_byte(b: u8) -> Self {
+        Self(b)
+    }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub const fn to_byte(self) -> u8 {
+        self.0
+    }
+
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) const fn to_byte(self) -> u8 {
         self.0
     }
 
@@ -68,11 +83,26 @@ impl OrderSubType {
     pub const ReduceOnly: Self = Self(4);
     pub const Market: Self = Self(5);
 
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
+    #[allow(dead_code)]
     pub const fn from_byte(b: u8) -> Self {
         Self(b)
     }
 
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) const fn from_byte(b: u8) -> Self {
+        Self(b)
+    }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub const fn to_byte(self) -> u8 {
+        self.0
+    }
+
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) const fn to_byte(self) -> u8 {
         self.0
     }
 
@@ -158,20 +188,37 @@ impl OrderWorkerStatus {
     /// Sell order fully filled, position is closed.
     pub const SellDone: Self = Self(8);
     /// Delphi wire/source spelling kept for protocol parity tests.
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub const SelLDone: Self = Self::SellDone;
     /// Sell completed through an intermediate path; terminal for worker/state.
     pub const SellAlmostDone: Self = Self(9);
     /// Delphi wire/source spelling kept for protocol parity tests.
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub const SelLAlmostDone: Self = Self::SellAlmostDone;
 
     /// Preserve a raw Delphi ordinal byte.
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
+    #[allow(dead_code)]
     pub const fn from_byte(b: u8) -> Self {
         Self(b)
     }
 
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) const fn from_byte(b: u8) -> Self {
+        Self(b)
+    }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub const fn to_byte(self) -> u8 {
+        self.0
+    }
+
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) const fn to_byte(self) -> u8 {
         self.0
     }
 
@@ -229,11 +276,26 @@ impl FixedPosition {
     pub const Long: Self = Self(1);
     pub const Short: Self = Self(2);
 
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
+    #[allow(dead_code)]
     pub const fn from_byte(b: u8) -> Self {
         Self(b)
     }
 
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) const fn from_byte(b: u8) -> Self {
+        Self(b)
+    }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub const fn to_byte(self) -> u8 {
+        self.0
+    }
+
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) const fn to_byte(self) -> u8 {
         self.0
     }
 
@@ -275,11 +337,26 @@ impl MoveAllCmdType {
     /// Percent/personal mode, interpreted by the Delphi server branch.
     pub const Pers: Self = Self(2);
 
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
+    #[allow(dead_code)]
     pub const fn from_byte(b: u8) -> Self {
         Self(b)
     }
 
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) const fn from_byte(b: u8) -> Self {
+        Self(b)
+    }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub const fn to_byte(self) -> u8 {
+        self.0
+    }
+
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) const fn to_byte(self) -> u8 {
         self.0
     }
 
@@ -320,11 +397,26 @@ impl MoveAllBuysCmdType {
     pub const MoveKind: Self = Self(0);
     pub const Pers: Self = Self(2);
 
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
+    #[allow(dead_code)]
     pub const fn from_byte(b: u8) -> Self {
         Self(b)
     }
 
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) const fn from_byte(b: u8) -> Self {
+        Self(b)
+    }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub const fn to_byte(self) -> u8 {
+        self.0
+    }
+
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) const fn to_byte(self) -> u8 {
         self.0
     }
 
@@ -366,11 +458,26 @@ impl ReplaceMultiKind {
     pub const LastSet: Self = Self(6);
     pub const LastMoved: Self = Self(7);
 
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
+    #[allow(dead_code)]
     pub const fn from_byte(b: u8) -> Self {
         Self(b)
     }
 
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) const fn from_byte(b: u8) -> Self {
+        Self(b)
+    }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub const fn to_byte(self) -> u8 {
+        self.0
+    }
+
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) const fn to_byte(self) -> u8 {
         self.0
     }
 

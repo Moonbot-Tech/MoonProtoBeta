@@ -15,18 +15,12 @@ use super::{Market, MarketsState};
 
 impl MarketsState {
     // parity: MoonBot MoonProtoEngine.pas:ApplyBalanceItem (cmd dispatch)
-    pub(crate) fn apply_balance_update(&mut self, upd: &BalanceUpdate) -> BalanceEvent {
+    pub(crate) fn apply_balance_update(&mut self, upd: &BalanceUpdate) -> Option<BalanceEvent> {
         match upd.cmd_id {
-            2 => BalanceEvent::Ignored {
-                cmd_id: upd.cmd_id,
-                epoch: upd.epoch,
-            },
-            3 => self.apply_balance_snapshot(upd),
-            4 => self.apply_balance_increment(upd),
-            _ => BalanceEvent::Ignored {
-                cmd_id: upd.cmd_id,
-                epoch: upd.epoch,
-            },
+            2 => ignored_balance_event(upd.cmd_id, upd.epoch),
+            3 => Some(self.apply_balance_snapshot(upd)),
+            4 => Some(self.apply_balance_increment(upd)),
+            _ => ignored_balance_event(upd.cmd_id, upd.epoch),
         }
     }
 
@@ -76,6 +70,7 @@ impl MarketsState {
 
         BalanceEvent::SnapshotApplied {
             count,
+            #[cfg(any(test, feature = "diagnostics"))]
             epoch: upd.epoch,
         }
     }
@@ -101,6 +96,7 @@ impl MarketsState {
 
         BalanceEvent::IncrementalApplied {
             count,
+            #[cfg(any(test, feature = "diagnostics"))]
             epoch: upd.epoch,
             global_changed: upd.global_changed,
         }
@@ -168,4 +164,16 @@ fn reset_missing_balance(market: &mut Market) {
     market.total_profit_s = 0.0;
     market.leverage_x = 1;
     market.position_type = PositionType::Cross;
+}
+
+fn ignored_balance_event(cmd_id: u8, epoch: u16) -> Option<BalanceEvent> {
+    #[cfg(any(test, feature = "diagnostics"))]
+    {
+        Some(BalanceEvent::Ignored { cmd_id, epoch })
+    }
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    {
+        let _ = (cmd_id, epoch);
+        None
+    }
 }

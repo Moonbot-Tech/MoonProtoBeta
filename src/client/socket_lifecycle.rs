@@ -13,13 +13,14 @@ impl Client {
         self.rs = 1.0;
         self.used_sliced_limit = false;
         self.recv.data_read_state.reset();
-        self.send_lock.lock().unwrap().reset_tmp_slider();
+        self.send_lock.lock().reset_tmp_slider();
         self.recv.recvd_slider = Slider::new();
         self.transport.recv_slicer = slicing::SlicingReceiver::new();
         self.last_online = 0;
         self.last_sent_hello = NEVER_SENT_MS;
         self.clear_hello_wait_state();
         self.handshake_peer_mix = 0;
+        self.ack_session32_value = 0;
     }
 
     /// Matches TMoonProtoClient.ClearOutboundSessionData.

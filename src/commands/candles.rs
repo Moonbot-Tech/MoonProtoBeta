@@ -3,7 +3,8 @@
 //! Regular applications normally use `MoonClient`: retained 5m candles are
 //! loaded after trades storage is enabled and then read through market-history
 //! readers; demand-driven CoinCard candles are requested with
-//! `MoonClient::candles().request_coin_card(...)` and read from the snapshot.
+//! `MoonClient::candles().request_coin_card_for(...)` and read from the
+//! snapshot. The string-keyed request helper is kept for scripts/tools.
 //!
 //! The raw packed Delphi records and chunked `RequestCandlesData` parser remain
 //! in this module for protocol tests and custom tools, but they are hidden from
@@ -14,16 +15,26 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 use super::engine_api::EngineMethod;
 use super::engine_request::build_engine_request_full;
+#[cfg(any(test, feature = "diagnostics"))]
 use crate::time::DelphiTime;
+use crate::time::MoonTime;
 
 mod aggregator;
 mod request_parser;
 
 #[doc(hidden)]
+#[cfg(feature = "diagnostics")]
 pub use self::aggregator::CandlesAggregator;
+#[doc(hidden)]
+#[cfg(not(feature = "diagnostics"))]
+pub(crate) use self::aggregator::CandlesAggregator;
 pub(crate) use self::aggregator::CandlesChunkResult;
 #[doc(hidden)]
+#[cfg(feature = "diagnostics")]
 pub use self::request_parser::parse_request_candles_data_response;
+#[doc(hidden)]
+#[cfg(not(feature = "diagnostics"))]
+pub(crate) use self::request_parser::parse_request_candles_data_response;
 pub(crate) use self::request_parser::parse_request_candles_data_response_partial;
 #[cfg(test)]
 pub(crate) use self::request_parser::{
@@ -31,6 +42,28 @@ pub(crate) use self::request_parser::{
     parse_request_candles_data_response_with_local_shift, read_deep_price_pack,
     read_deep_price_pack_old,
 };
+
+/// Delphi `MaxDataLenCandles` is normally much lower and is capped at 25_000 in
+/// MoonBot UI sizing. Rust must reject absurd wire counts before allocation.
+pub(crate) const MAX_REQUEST_CANDLES_PER_MARKET: usize = 25_000;
+pub(crate) const MAX_REQUEST_CANDLES_MARKETS: usize = 4_096;
+pub(crate) const MAX_REQUEST_CANDLES_TOTAL: usize = 10_000_000;
+
+/// Chunk payload is the zlib stream from `StoreCandlesToZip` after the outer
+/// EngineResponse layer is decoded. Live full snapshots are single-digit MiB;
+/// this leaves large future headroom while preventing a second GiB-scale copy
+/// during chunk aggregation.
+pub(crate) const MAX_REQUEST_CANDLES_CHUNKED_PAYLOAD_BYTES: usize = 128 * 1024 * 1024;
+
+/// Domain cap for the decompressed `StoreCandlesToZip` stream. The global
+/// inflate cap stays larger for strategy blobs; candle snapshots have known row
+/// sizes and should not need unbounded transient memory.
+pub(crate) const MAX_REQUEST_CANDLES_DECOMPRESSED_BYTES: usize = 384 * 1024 * 1024;
+
+/// CoinCard is a demand-driven UI mini/history chart. A 2-billion row count is
+/// never meaningful here; cap it before allocation and before the zero-tail
+/// record loop.
+pub(crate) const MAX_COIN_CARD_CANDLES: usize = 10_000;
 
 /// Candle row used by CoinCard history and candle snapshots.
 ///
@@ -40,18 +73,18 @@ pub(crate) use self::request_parser::{
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DeepPrice {
     #[doc(hidden)]
-    pub open: f32,
+    pub(crate) open: f32,
     #[doc(hidden)]
-    pub close: f32,
+    pub(crate) close: f32,
     #[doc(hidden)]
-    pub high: f32,
+    pub(crate) high: f32,
     #[doc(hidden)]
-    pub low: f32,
+    pub(crate) low: f32,
     #[doc(hidden)]
-    pub volume: f32,
+    pub(crate) volume: f32,
     /// `TDateTime` (Delphi double, days since 1899-12-30).
     #[doc(hidden)]
-    pub time: f64,
+    pub(crate) time: f64,
 }
 
 #[repr(C, packed)]
@@ -97,13 +130,19 @@ impl DeepPrice {
     }
 
     #[inline]
+    pub fn time(self) -> MoonTime {
+        MoonTime::from_delphi_days(self.time).unwrap_or(MoonTime::ZERO)
+    }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub fn time_delphi(self) -> DelphiTime {
         DelphiTime::from_days(self.time)
     }
 
     #[inline]
-    pub fn unix_millis(self) -> Option<i64> {
-        self.time_delphi().unix_millis()
+    pub fn unix_millis(self) -> i64 {
+        self.time().unix_millis()
     }
 
     fn from_wire(wire: WireDeepPrice) -> Self {
@@ -129,8 +168,20 @@ impl DeepPrice {
     }
 
     /// Read one packed candle record from `data`.
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub fn read_from(data: &[u8], pos: &mut usize) -> Option<Self> {
+        if *pos + DEEP_PRICE_SIZE > data.len() {
+            return None;
+        }
+        let wire = WireDeepPrice::read_from_bytes(&data[*pos..*pos + DEEP_PRICE_SIZE]).ok()?;
+        *pos += DEEP_PRICE_SIZE;
+        Some(Self::from_wire(wire))
+    }
+
+    /// Read one packed candle record from `data`.
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) fn read_from(data: &[u8], pos: &mut usize) -> Option<Self> {
         if *pos + DEEP_PRICE_SIZE > data.len() {
             return None;
         }
@@ -150,8 +201,14 @@ impl DeepPrice {
         Some(Self::from_wire(wire))
     }
 
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub fn write_to(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(self.to_wire().as_bytes());
+    }
+
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) fn write_to(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(self.to_wire().as_bytes());
     }
 }
@@ -250,6 +307,11 @@ pub(crate) fn parse_coin_card_candles_response(data: &[u8]) -> Option<Vec<DeepPr
         return Some(Vec::new());
     }
     let count = count_raw as usize;
+    if count > MAX_COIN_CARD_CANDLES {
+        log::warn!(target: "moonproto::candles",
+            "CoinCard candle count {count} exceeds domain cap {MAX_COIN_CARD_CANDLES}");
+        return None;
+    }
     let mut out = Vec::new();
     if out.try_reserve_exact(count).is_err() {
         log::warn!(target: "moonproto::candles", "coin-card candle count {} cannot be allocated", count);

@@ -8,6 +8,9 @@ use zerocopy::byteorder::little_endian::{F32 as LeF32, F64 as LeF64, I64 as LeI6
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 use super::enums::{OrderSubType, OrderType};
+#[cfg(any(test, feature = "diagnostics"))]
+use crate::time::DelphiTime;
+use crate::MoonTime;
 
 /// Delphi packed `boolean` byte.
 ///
@@ -21,8 +24,7 @@ impl DelphiBool {
     pub const FALSE: Self = Self(0);
     pub const TRUE: Self = Self(1);
 
-    #[doc(hidden)]
-    pub const fn from_byte(raw: u8) -> Self {
+    pub(crate) const fn from_byte(raw: u8) -> Self {
         Self(raw)
     }
 
@@ -34,8 +36,7 @@ impl DelphiBool {
         }
     }
 
-    #[doc(hidden)]
-    pub const fn to_byte(self) -> u8 {
+    pub(crate) const fn to_byte(self) -> u8 {
         self.0
     }
 
@@ -128,28 +129,36 @@ pub struct OrderCompact {
     pub quantity_remaining: f64,
     pub total_btc: f64,
     pub spent_btc: f64,
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub open_time: f64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) open_time: f64,
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub close_time: f64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) close_time: f64,
     pub actual_price: f64,
     pub mean_price: f64,
     pub quantity_base: f64,
     pub actual_q: f64,
     pub tmp_btc: f64,
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub create_time: f64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) create_time: f64,
     pub panic_sell_down: f32,
     pub order_type: OrderType,
     pub sub_type: OrderSubType,
     pub stop_flag: u8,
     pub partial_done: u8,
     pub leverage: u8,
-    #[doc(hidden)]
-    pub is_opened: DelphiBool,
-    #[doc(hidden)]
-    pub is_closed: DelphiBool,
-    #[doc(hidden)]
-    pub canceled: DelphiBool,
-    #[doc(hidden)]
-    pub is_short: DelphiBool,
+    pub(crate) is_opened: DelphiBool,
+    pub(crate) is_closed: DelphiBool,
+    pub(crate) canceled: DelphiBool,
+    pub(crate) is_short: DelphiBool,
 }
 
 #[repr(C, packed)]
@@ -241,6 +250,7 @@ impl OrderCompact {
         }
     }
 
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
         if data.len() < ORDER_COMPACT_SIZE {
@@ -258,24 +268,40 @@ impl OrderCompact {
         Self::from_wire(wire)
     }
 
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub fn write_to(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(self.to_wire().as_bytes());
     }
 
-    /// Open time as Delphi `TDateTime`.
-    pub fn open_time_delphi(self) -> crate::DelphiTime {
-        crate::DelphiTime::from_days(self.open_time)
+    pub fn open_time(self) -> MoonTime {
+        MoonTime::from_delphi_days(self.open_time).unwrap_or(MoonTime::ZERO)
     }
 
-    /// Close time as Delphi `TDateTime`.
-    pub fn close_time_delphi(self) -> crate::DelphiTime {
-        crate::DelphiTime::from_days(self.close_time)
+    pub fn close_time(self) -> MoonTime {
+        MoonTime::from_delphi_days(self.close_time).unwrap_or(MoonTime::ZERO)
     }
 
-    /// Create time as Delphi `TDateTime`.
-    pub fn create_time_delphi(self) -> crate::DelphiTime {
-        crate::DelphiTime::from_days(self.create_time)
+    pub fn create_time(self) -> MoonTime {
+        MoonTime::from_delphi_days(self.create_time).unwrap_or(MoonTime::ZERO)
+    }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
+    pub fn open_time_delphi(self) -> DelphiTime {
+        DelphiTime::from_days(self.open_time)
+    }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
+    pub fn close_time_delphi(self) -> DelphiTime {
+        DelphiTime::from_days(self.close_time)
+    }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
+    pub fn create_time_delphi(self) -> DelphiTime {
+        DelphiTime::from_days(self.create_time)
     }
 
     pub fn is_opened(self) -> bool {
@@ -313,33 +339,22 @@ impl OrderCompact {
 /// `TStopSettings` (MarketsU.pas:215), 46-byte packed record.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StopSettings {
-    #[doc(hidden)]
-    pub stop_loss_on: DelphiBool,
-    #[doc(hidden)]
-    pub sl_fixed: DelphiBool,
-    #[doc(hidden)]
-    pub sl_level: f64,
-    #[doc(hidden)]
-    pub sl_spread: f64,
-    #[doc(hidden)]
-    pub trailing_on: DelphiBool,
-    #[doc(hidden)]
-    pub trailing_fixed: DelphiBool,
-    #[doc(hidden)]
-    pub trailing_level: f64,
-    #[doc(hidden)]
-    pub ts_spread: f64,
-    #[doc(hidden)]
-    pub use_take_profit: DelphiBool,
-    #[doc(hidden)]
-    pub take_profit: f64,
+    pub(crate) stop_loss_on: DelphiBool,
+    pub(crate) sl_fixed: DelphiBool,
+    pub(crate) sl_level: f64,
+    pub(crate) sl_spread: f64,
+    pub(crate) trailing_on: DelphiBool,
+    pub(crate) trailing_fixed: DelphiBool,
+    pub(crate) trailing_level: f64,
+    pub(crate) ts_spread: f64,
+    pub(crate) use_take_profit: DelphiBool,
+    pub(crate) take_profit: f64,
     /// "Trader explicitly set the take-profit" latch. On the inbound order state
     /// this is the server's value; on outbound stops the runtime computes it (see
     /// `Orders::send_stops_if_changed`) so callers never set it by hand. The
     /// server auto-defaults TP on the SELL transition only while this is false
     /// (Delphi `Unit1.pas:18760`).
-    #[doc(hidden)]
-    pub take_profit_changed: DelphiBool,
+    pub(crate) take_profit_changed: DelphiBool,
 }
 
 #[repr(C, packed)]
@@ -383,8 +398,28 @@ impl StopSettings {
         Self::default()
     }
 
-    /// Configure stop-loss fields.
-    pub fn with_stop_loss(mut self, enabled: bool, fixed: bool, level: f64, spread: f64) -> Self {
+    /// Configure percentage stop-loss fields.
+    pub fn with_stop_loss_percent(self, level: f64, spread: f64) -> Self {
+        self.with_stop_loss_fields(true, false, level, spread)
+    }
+
+    /// Configure fixed-price stop-loss fields.
+    pub fn with_stop_loss_fixed(self, level: f64, spread: f64) -> Self {
+        self.with_stop_loss_fields(true, true, level, spread)
+    }
+
+    /// Disable stop-loss while preserving trailing/take-profit fields.
+    pub fn without_stop_loss(self) -> Self {
+        self.with_stop_loss_fields(false, false, 0.0, 0.0)
+    }
+
+    fn with_stop_loss_fields(
+        mut self,
+        enabled: bool,
+        fixed: bool,
+        level: f64,
+        spread: f64,
+    ) -> Self {
         self.stop_loss_on = DelphiBool::from_bool(enabled);
         self.sl_fixed = DelphiBool::from_bool(fixed);
         self.sl_level = level;
@@ -392,8 +427,22 @@ impl StopSettings {
         self
     }
 
-    /// Configure trailing-stop fields.
-    pub fn with_trailing(mut self, enabled: bool, fixed: bool, level: f64, spread: f64) -> Self {
+    /// Configure percentage trailing-stop fields.
+    pub fn with_trailing_percent(self, level: f64, spread: f64) -> Self {
+        self.with_trailing_fields(true, false, level, spread)
+    }
+
+    /// Configure fixed-price trailing-stop fields.
+    pub fn with_trailing_fixed(self, level: f64, spread: f64) -> Self {
+        self.with_trailing_fields(true, true, level, spread)
+    }
+
+    /// Disable trailing stop while preserving stop-loss/take-profit fields.
+    pub fn without_trailing(self) -> Self {
+        self.with_trailing_fields(false, false, 0.0, 0.0)
+    }
+
+    fn with_trailing_fields(mut self, enabled: bool, fixed: bool, level: f64, spread: f64) -> Self {
         self.trailing_on = DelphiBool::from_bool(enabled);
         self.trailing_fixed = DelphiBool::from_bool(fixed);
         self.trailing_level = level;
@@ -401,12 +450,21 @@ impl StopSettings {
         self
     }
 
-    /// Configure take-profit fields.
+    /// Configure take-profit price.
     ///
     /// The outbound `take_profit_changed` latch is still computed by the
     /// runtime against the live order state before send, matching Delphi
     /// `SendStopsIfChanged`.
-    pub fn with_take_profit(mut self, enabled: bool, take_profit: f64) -> Self {
+    pub fn with_take_profit_price(self, take_profit: f64) -> Self {
+        self.with_take_profit_fields(true, take_profit)
+    }
+
+    /// Disable take-profit while preserving stop-loss/trailing fields.
+    pub fn without_take_profit(self) -> Self {
+        self.with_take_profit_fields(false, 0.0)
+    }
+
+    fn with_take_profit_fields(mut self, enabled: bool, take_profit: f64) -> Self {
         self.use_take_profit = DelphiBool::from_bool(enabled);
         self.take_profit = take_profit;
         self
@@ -484,6 +542,7 @@ impl StopSettings {
         }
     }
 
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
         if data.len() < STOP_SETTINGS_SIZE {
@@ -501,8 +560,7 @@ impl StopSettings {
         Self::from_wire(wire)
     }
 
-    #[doc(hidden)]
-    pub fn write_to(&self, out: &mut Vec<u8>) {
+    pub(crate) fn write_to(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(self.to_wire().as_bytes());
     }
 }
@@ -571,6 +629,7 @@ impl OrderUpdateData {
         }
     }
 
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
         if data.len() < ORDER_UPDATE_DATA_SIZE {
@@ -588,13 +647,20 @@ impl OrderUpdateData {
         Self::from_wire(wire)
     }
 
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub fn write_to(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(self.to_wire().as_bytes());
     }
 
-    /// Open time as Delphi `TDateTime`.
-    pub fn open_time_delphi(self) -> crate::DelphiTime {
-        crate::DelphiTime::from_days(self.open_time)
+    pub fn open_time(self) -> MoonTime {
+        MoonTime::from_delphi_days(self.open_time).unwrap_or(MoonTime::ZERO)
+    }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
+    pub fn open_time_delphi(self) -> DelphiTime {
+        DelphiTime::from_days(self.open_time)
     }
 
     pub fn adjust_time(&mut self, delta: f64) {

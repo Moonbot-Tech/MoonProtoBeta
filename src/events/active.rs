@@ -1,4 +1,4 @@
-//! Active-library action routing.
+﻿//! Active-library action routing.
 //!
 //! This is the Rust counterpart of Delphi receive-side domain effects that
 //! immediately schedule follow-up protocol commands: full orderbook refresh,
@@ -13,7 +13,9 @@ use crate::commands::trade::TradeCtx;
 use crate::protocol::Command;
 use crate::state::eps::EpsProfile;
 use crate::state::orders::OrderCancelSend;
-use crate::state::{MarketsEvent, OrderBookEvent, OrderEvent, TradesEvent};
+#[cfg(any(test, feature = "diagnostics"))]
+use crate::state::OrderBookEvent;
+use crate::state::{MarketsEvent, OrderBookControl, OrderEvent, TradesEvent};
 
 pub(crate) struct ActiveDispatchContext {
     pub(crate) peer_app_token: u64,
@@ -212,18 +214,32 @@ impl EventDispatcher {
                 && out[start_len..]
                     .iter()
                     .any(|ev| matches!(ev, Event::Trade(TradesEvent::Applied { .. })));
-        // Auto-action 1: OrderBookEvent::RequestFullNeeded -> send_api_request (sync, no pending).
+        // Auto-action 1: OrderBookControl::RequestFullNeeded -> send_api_request (sync, no pending).
         // Dedup via a small Vec with no heap when the set is empty: a grouped payload can contain several
         // RequestFullNeeded for the same book (corruption detection +
         // a subsequent update in one datagram). We send one request per pair.
         let mut to_request_full: Vec<(u16, u8)> = Vec::new();
-        // Auto-action 2: StratEvent::SnapshotRequested -> remember/send a fresh
-        // snapshot from the library-owned StratsState (or provider override).
+        for control in self.order_book_controls.drain(..) {
+            match control {
+                OrderBookControl::RequestFullNeeded { market_index, kind } => {
+                    let key = (market_index, kind.as_u8());
+                    if !to_request_full.contains(&key) {
+                        to_request_full.push(key);
+                    }
+                }
+            }
+        }
+        // Auto-action 2: internal TStratSnapshotRequest controls -> remember/send
+        // a fresh snapshot from the library-owned StratsState (or provider
+        // override).
         // If the request arrived before `domain_ready`, do not open the whole MPC_Strat
         // pre-init: only set a latch and reply post-init, once the schema/state
         // are ready. This preserves the obligation to reply without competing with
         // BaseCheck/AuthCheck and without a Rust-only early Strat-domain flow.
-        let mut snapshot_requested_uid: Option<u64> = None;
+        let snapshot_requested_uids = self
+            .strategy_snapshot_request_uids
+            .drain(..)
+            .collect::<Vec<_>>();
         let mut strategy_schema_applied = false;
         let mut new_markets_added = false;
         // Auto-action 3: OrderEvent::Snapshot -> CleanupMissingWorkers.
@@ -234,13 +250,9 @@ impl EventDispatcher {
         let mut idx = start_len;
         while idx < out.len() {
             let remove_event = match &out[idx] {
-                Event::OrderBook(OrderBookEvent::RequestFullNeeded { market_index, kind }) => {
-                    let key = (*market_index, kind.as_u8());
-                    if !to_request_full.contains(&key) {
-                        to_request_full.push(key);
-                    }
-                    true
-                }
+                #[cfg(any(test, feature = "diagnostics"))]
+                Event::OrderBook(OrderBookEvent::RequestFullNeeded { .. }) => true,
+                #[cfg(any(test, feature = "diagnostics"))]
                 Event::OrderBook(OrderBookEvent::Ignored { .. }) => {
                     // Active Lib UI path only publishes applied state changes.
                     // Ignored orderbook packets are protocol diagnostics; low-level
@@ -249,10 +261,6 @@ impl EventDispatcher {
                 }
                 Event::Order(OrderEvent::Snapshot) => {
                     order_snapshot_applied = true;
-                    false
-                }
-                Event::Strat(crate::state::StratEvent::SnapshotRequested { uid }) => {
-                    snapshot_requested_uid = Some(*uid);
                     false
                 }
                 Event::Strat(crate::state::StratEvent::SchemaApplied { .. }) => {
@@ -285,7 +293,7 @@ impl EventDispatcher {
                 book_kind: bk,
             });
         }
-        if let Some(uid) = snapshot_requested_uid {
+        for uid in snapshot_requested_uids {
             if ctx.domain_ready {
                 if let Some(snapshot) = self.strategy_snapshot_reply(uid) {
                     actions.push(ActiveAction::SendStrategySnapshot {
@@ -301,7 +309,6 @@ impl EventDispatcher {
             } else {
                 self.pending_strategy_snapshot_request_uid = Some(uid);
             }
-            // The event is emitted into `out` anyway for UI/diagnostics.
         }
         if strategy_schema_applied && ctx.domain_ready {
             if let Some(uid) = self.pending_strategy_snapshot_request_uid.take() {

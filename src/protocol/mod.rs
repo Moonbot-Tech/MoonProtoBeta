@@ -12,9 +12,11 @@ pub(crate) mod slicing;
 pub(crate) mod slider;
 
 /// MoonProto command ordinal matching Delphi `TMoonProtoCommand`.
+#[allow(unreachable_pub)] // re-exported only by diagnostics builds; normal API hides raw ordinals.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Command(u8);
 
+#[allow(unreachable_pub)] // see `Command`: diagnostics needs public methods, normal API keeps the module private.
 #[allow(non_upper_case_globals)]
 impl Command {
     pub const None: Self = Self(0);

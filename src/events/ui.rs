@@ -1,6 +1,6 @@
-//! Active `MPC_UI` and `MPC_LogMsg` dispatch.
+﻿//! Active `MPC_UI` and `MPC_LogMsg` dispatch.
 
-use super::{Event, EventDispatcher};
+use super::{Event, EventDispatcher, ServerLogEvent};
 use crate::commands::registry::decode_utf8_delphi;
 use crate::commands::ui::UICommand;
 use crate::protocol::Command;
@@ -21,17 +21,17 @@ impl EventDispatcher {
                     out.push(Event::Settings(ev));
                 }
             }
-            None => out.push(Self::parse_failed(Command::UI, payload)),
+            None => Self::push_parse_failed(out, Command::UI, payload),
         }
     }
 
     pub(super) fn client_new_data_log_msg(&mut self, payload: &[u8], out: &mut Vec<Event>) {
         if payload.len() < 8 {
-            out.push(Self::parse_failed(Command::LogMsg, payload));
+            Self::push_parse_failed(out, Command::LogMsg, payload);
             return;
         }
         let time = f64::from_le_bytes(payload[0..8].try_into().unwrap());
         let msg = decode_utf8_delphi(&payload[8..]);
-        out.push(Event::ServerLog { time, msg });
+        out.push(Event::ServerLog(ServerLogEvent::new(time, msg)));
     }
 }

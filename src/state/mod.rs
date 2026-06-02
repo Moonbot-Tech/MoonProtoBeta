@@ -41,37 +41,41 @@ pub use history::{
     RollingTradeVolumeSnapshot, TradeHistoryRow, TradeVolumeTotals, DELPHI_MSECS_PER_DAY,
     DELPHI_SAME_TRADES_TIME_DAYS,
 };
+pub(crate) use history_store::TradeStorageScope;
 pub use history_store::{MarketHistoryConfig, MarketHistoryReaders, MarketHistorySizing};
-#[doc(hidden)]
-pub use history_store::{MarketHistoryRegistry, MarketHistoryStore, TradeStorageScope};
-#[doc(hidden)]
-pub use history_worker::{
+pub(crate) use history_worker::{
     MarketHistoryCandlesSnapshot, MarketHistoryHandle, MarketHistoryLastPriceBatch,
     MarketHistoryLastPriceInput, MarketHistoryMMOrderInput, MarketHistoryStreamBatch,
     MarketHistoryStreamSection, MarketHistoryStreamSectionKind, MarketHistoryTradeInput,
     MarketHistoryWorker,
 };
-pub use markets::{
-    MarketBalancePosition, MarketHandle, MarketPrice, MarketTradeState, MarketsEvent,
-    MarketsListApplyTiming, MarketsState,
-};
-pub use order_books::{
-    ApplyResult as OrderBookApplyResult, OrderBookEvent, OrderBookKind, OrderBookLevel,
-    OrderBookSnapshot, OrderBooks, TopOfBook,
-};
-pub use orders::{
-    ApplyResult, Order, OrderEvent, OrderTraceChartPoint, OrderTraceLine, Orders, SellReason,
-};
+#[cfg(feature = "diagnostics")]
 #[doc(hidden)]
-pub use seq_ring::SeqRingWriter;
+pub use markets::MarketsListApplyTiming;
+pub use markets::{
+    BaseCurrencyPrice, MarketBalancePosition, MarketHandle, MarketPrice, MarketTradeState,
+    MarketsEvent, MarketsState,
+};
+pub(crate) use order_books::OrderBookControl;
+pub use order_books::{
+    OrderBookEvent, OrderBookKind, OrderBookLevel, OrderBookSnapshot, OrderBooks, TopOfBook,
+};
+#[cfg(any(test, feature = "diagnostics"))]
+#[doc(hidden)]
+pub use orders::ApplyResult;
+#[cfg(not(any(test, feature = "diagnostics")))]
+pub(crate) use orders::ApplyResult;
+pub use orders::{Order, OrderEvent, OrderTraceChartPoint, OrderTraceLine, Orders, SellReason};
+#[cfg(test)]
+pub(crate) use seq_ring::SeqRingWriter;
 pub use seq_ring::{
-    SeqRingBounds, SeqRingCursor, SeqRingError, SeqRingReadMeta, SeqRingReadView, SeqRingReader,
-    SeqRingRow, SeqRingTimedRow,
+    SeqRingBounds, SeqRingCursor, SeqRingReadMeta, SeqRingReadView, SeqRingReader, SeqRingRow,
+    SeqRingTimedRow,
 };
 pub use settings::{SettingsEvent, SettingsState};
 pub use strats::{StratEvent, StrategyInfo, StratsState};
-pub use trades::{
-    iter_trades_resend_response, TradesEvent, TradesResendResponsePackets, TradesState,
+pub use trades::TradesEvent;
+pub(crate) use trades::{
+    iter_trades_resend_response, TradesPacketEffect, TradesPacketEffects, TradesState,
 };
-pub(crate) use trades::{TradesPacketEffect, TradesPacketEffects};
 pub use transfer_assets::{ExchangeKind, TransferAssetsEvent, TransferAssetsState};

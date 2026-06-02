@@ -24,8 +24,9 @@
 //! }
 //! ```
 //!
-//! State models (`Orders`, `OrderBooks`, `TradesState`, and the other channel
-//! states) are owned by the runtime and exposed through read-only snapshots.
+//! State models (`Orders`, `OrderBooks`, retained history, and the other
+//! channel states) are owned by the runtime and exposed through read-only
+//! snapshots.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -37,15 +38,17 @@ use crate::commands::engine_api::{
 };
 use crate::commands::market::ExchangeCode;
 use crate::commands::trade::{OrderType, TradeCtx};
+#[cfg(test)]
 use crate::commands::ui::ClientSettingsCommand;
 use crate::protocol::Command;
 use crate::state::eps::EpsProfile;
 use crate::state::{
     AccountEvent, AccountState, BalanceEvent, BalancesState, Candle5mRow, MarketDerivedSnapshot,
     MarketHistoryCandlesSnapshot, MarketHistoryHandle, MarketHistoryReaders, MarketHistorySizing,
-    MarketHistoryWorker, MarketsEvent, MarketsState, OrderBookEvent, OrderBooks, OrderEvent,
-    Orders, RollingTradeVolumeSnapshot, SettingsEvent, SettingsState, StratEvent, StratsState,
-    TradeStorageScope, TradesEvent, TradesState, TransferAssetsEvent, TransferAssetsState,
+    MarketHistoryWorker, MarketsEvent, MarketsState, OrderBookControl, OrderBookEvent, OrderBooks,
+    OrderEvent, Orders, RollingTradeVolumeSnapshot, SettingsEvent, SettingsState, StratEvent,
+    StratsState, TradeStorageScope, TradesEvent, TradesState, TransferAssetsEvent,
+    TransferAssetsState,
 };
 use std::ops::{Deref, DerefMut};
 
@@ -63,13 +66,12 @@ mod types;
 mod ui;
 
 pub(crate) use active::{ActiveAction, ActiveDispatchContext};
-#[doc(hidden)]
-pub use snapshot::EventDispatcherSnapshot;
 pub use snapshot::MoonStateSnapshot;
 pub use types::{
-    ArbEvent, EngineActionEvent, EngineActionKind, Event, MissingOrderStatusRequest,
-    StrategySnapshotReply, WatcherFillEvent, WatcherFillsEvent,
+    ArbEvent, EngineActionEvent, EngineActionKind, Event, ServerLogEvent, WatcherFillEvent,
+    WatcherFillsEvent,
 };
+pub(crate) use types::{MissingOrderStatusRequest, StrategySnapshotReply};
 
 fn copy_max_leverage_from_markets_list(info: &ServerInfo) -> bool {
     info.exchange_code == Some(ExchangeCode::FGate)
@@ -122,16 +124,11 @@ impl<T: Clone> CowState<T> {
     }
 }
 
-/// State bundle + dispatch logic.
+/// Internal state bundle + dispatch logic.
 ///
-/// The dispatcher owns all channel state and exposes it read-only through
-/// getters [`Self::orders`], [`Self::order_books`], [`Self::trades_recovery`],
-/// [`Self::balances`], [`Self::strats`], [`Self::settings`], [`Self::markets`].
-/// Applications should not mutate protocol state directly; state is maintained
-/// by [`Self::dispatch`], [`Self::dispatch_into`], and the active action
-/// outbox path used by `MoonClient`.
-#[doc(hidden)]
-pub struct EventDispatcher {
+/// The active runtime owns this object. Applications see only typed events and
+/// immutable [`MoonStateSnapshot`] copies published by [`crate::MoonClient`].
+pub(crate) struct EventDispatcher {
     pub(crate) orders: CowState<Orders>,
     pub(crate) order_books: CowState<OrderBooks>,
     pub(crate) trades: CowState<TradesState>,
@@ -188,6 +185,11 @@ pub struct EventDispatcher {
     /// available. Non-empty typed strategy serialization waits for schema so
     /// Rust does not carry a stale hardcoded `TStrategy` field table.
     pending_strategy_snapshot_request_uid: Option<u64>,
+    /// Internal `TStratSnapshotRequest` controls produced by `MPC_Strat`.
+    ///
+    /// This is not a terminal event. The runtime answers from its owned local
+    /// strategy list or latches until the Init/schema gate opens.
+    strategy_snapshot_request_uids: Vec<u64>,
     /// Events produced before publication through the runtime event sink.
     ///
     /// Normal applications receive these through `MoonClient`'s `MoonEventSink`
@@ -195,6 +197,8 @@ pub struct EventDispatcher {
     queued_events: AppQueue<Event>,
     /// Reused hot-path buffer for `OrderBooks::on_packet_into`.
     order_book_events: Vec<OrderBookEvent>,
+    /// Reused hot-path buffer for internal orderbook recovery controls.
+    order_book_controls: Vec<OrderBookControl>,
     /// Optional retained-history writer. The dispatcher only queues typed
     /// batches into this handle; the worker owns `MarketHistoryStore`.
     market_history: Option<MarketHistoryHandle>,
@@ -242,8 +246,10 @@ impl Default for EventDispatcher {
             server_time_delta_source: None,
             strategy_snapshot_provider: None,
             pending_strategy_snapshot_request_uid: None,
+            strategy_snapshot_request_uids: Vec::new(),
             queued_events: AppQueue::default(),
             order_book_events: Vec::new(),
+            order_book_controls: Vec::new(),
             market_history: None,
             owned_market_history: None,
             market_history_auto_enabled: true,
@@ -257,16 +263,24 @@ impl Default for EventDispatcher {
 }
 
 impl EventDispatcher {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
-    fn parse_failed(cmd: Command, payload: &[u8]) -> Event {
-        Event::ParseFailed {
+    #[cfg(any(test, feature = "diagnostics"))]
+    fn push_parse_failed(out: &mut Vec<Event>, cmd: Command, payload: &[u8]) {
+        out.push(Event::ParseFailed {
             cmd,
             len: payload.len(),
             payload: payload.to_vec(),
-        }
+        });
+    }
+
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    fn push_parse_failed(_out: &mut Vec<Event>, _cmd: Command, _payload: &[u8]) {
+        // Parse-failure byte dumps are diagnostics-only. Normal terminal code
+        // should not branch on raw protocol failures; FireTest enables the
+        // diagnostics feature when it needs exact bytes.
     }
 
     fn set_eps_profile(&mut self, eps_profile: EpsProfile) {
@@ -297,7 +311,7 @@ impl EventDispatcher {
     /// Read-only order state, keyed by server order UID.
     ///
     /// It is updated automatically when order-channel payloads are dispatched.
-    pub fn orders(&self) -> &Orders {
+    pub(crate) fn orders(&self) -> &Orders {
         &self.orders
     }
 
@@ -307,7 +321,7 @@ impl EventDispatcher {
     /// exposed for outgoing actions such as `Client::set_immune`, where Delphi
     /// mutates the local worker before sending a command to the server.
     #[doc(hidden)]
-    pub fn orders_mut(&mut self) -> &mut Orders {
+    pub(crate) fn orders_mut(&mut self) -> &mut Orders {
         &mut self.orders
     }
 
@@ -318,7 +332,9 @@ impl EventDispatcher {
     /// returned `TOrderStatusRequest`s automatically. Raw `dispatch_into` has no
     /// `Client` handle by design, so the caller must decide whether to send
     /// them through `Client::request_order_status`.
-    pub fn missing_order_status_requests_after_snapshot(&self) -> Vec<MissingOrderStatusRequest> {
+    pub(crate) fn missing_order_status_requests_after_snapshot(
+        &self,
+    ) -> Vec<MissingOrderStatusRequest> {
         self.orders
             .missing_after_snapshot()
             .into_iter()
@@ -331,31 +347,10 @@ impl EventDispatcher {
             .collect()
     }
 
-    /// Drain deferred order removals after a reader-decoded batch.
-    ///
-    /// Delphi queues terminal/order-not-found effects into `BOrderWorker` and
-    /// removes the worker from `WCache` later, not inside
-    /// `ProcessCommandOrder` itself. The dispatcher mirrors that by letting
-    /// terminal orders remain addressable until the caller explicitly flushes
-    /// them, then emitting `OrderEvent::Removed` from this step. The active
-    /// client path uses `drain_deferred_order_removals_due` so `SellDone`
-    /// keeps Delphi's extra 400 ms final-trace window.
-    pub fn drain_deferred_order_removals(&mut self, out: &mut Vec<Event>) {
-        for uid in self.orders.drain_pending_removals() {
-            out.push(Event::Order(OrderEvent::Removed(uid)));
-        }
-    }
-
     pub(crate) fn drain_deferred_order_removals_due(&mut self, now_ms: i64, out: &mut Vec<Event>) {
         for uid in self.orders.drain_pending_removals_due(now_ms) {
             out.push(Event::Order(OrderEvent::Removed(uid)));
         }
-    }
-
-    /// Read-only orderbook state, including per-market/per-kind recovery
-    /// caches and the latest applied books.
-    pub fn order_books(&self) -> &OrderBooks {
-        &self.order_books
     }
 
     pub(crate) fn reset_orderbook_caches_keep_books(&mut self) {
@@ -365,46 +360,25 @@ impl EventDispatcher {
     /// Read-only trades-stream *recovery* state: packet counters, gap buckets,
     /// and resend bookkeeping. This is not the trade rows — read the retained
     /// trade history from the market history readers instead.
-    pub fn trades_recovery(&self) -> &TradesState {
+    #[cfg(test)]
+    pub(crate) fn trades_recovery(&self) -> &TradesState {
         &self.trades
-    }
-
-    /// Read-only account-level state such as hedge mode and API-key expiration.
-    ///
-    /// Delphi updates these from worker paths; Active Lib exposes the retained
-    /// state here and lets UI request refreshes asynchronously through
-    /// `MoonClient`.
-    pub fn account(&self) -> &AccountState {
-        &self.account
     }
 
     pub(crate) fn trades_server_token(&self) -> u64 {
         self.trades_server_token
     }
 
-    /// Read-only balance state for account totals and per-market balances.
-    pub fn balances(&self) -> &BalancesState {
-        &self.balances
-    }
-
     /// Read-only transferable asset lists by wallet kind.
     ///
     /// These are not market balances. They mirror Delphi `Markets.FAssets` and
     /// are refreshed asynchronously through `MoonClient::refresh_transfer_assets`.
-    pub fn transfer_assets(&self) -> &TransferAssetsState {
+    pub(crate) fn transfer_assets(&self) -> &TransferAssetsState {
         &self.transfer_assets
     }
 
-    /// Demand-driven CoinCard candles loaded through
-    /// `MoonClient::request_coin_card_candles`.
-    ///
-    /// This is separate from retained 5m market history.
-    pub fn coin_card_candles(&self) -> &crate::state::CoinCardCandlesState {
-        &self.coin_card_candles
-    }
-
     /// Apply one async `emk_UpdateTransferAssets` response to Active Lib state.
-    pub fn apply_transfer_assets_response(
+    pub(crate) fn apply_transfer_assets_response(
         &mut self,
         kind: crate::state::ExchangeKind,
         resp: EngineResponse,
@@ -412,12 +386,14 @@ impl EventDispatcher {
         let event = if resp.method != EngineMethod::UpdateTransferAssets {
             TransferAssetsEvent::UpdateFailed {
                 kind,
+                #[cfg(any(test, feature = "diagnostics"))]
                 request_uid: Some(resp.request_uid),
                 error: format!("unexpected EngineMethod {:?}", resp.method),
             }
         } else if !resp.success {
             TransferAssetsEvent::UpdateFailed {
                 kind,
+                #[cfg(any(test, feature = "diagnostics"))]
                 request_uid: Some(resp.request_uid),
                 error: format!("server error {} {}", resp.error_code, resp.error_msg.trim()),
             }
@@ -427,6 +403,7 @@ impl EventDispatcher {
         } else {
             TransferAssetsEvent::UpdateFailed {
                 kind,
+                #[cfg(any(test, feature = "diagnostics"))]
                 request_uid: Some(resp.request_uid),
                 error: format!("parse failed data_len={}", resp.data.len()),
             }
@@ -444,6 +421,7 @@ impl EventDispatcher {
         self.queued_events
             .extend([Event::TransferAssets(TransferAssetsEvent::UpdateFailed {
                 kind,
+                #[cfg(any(test, feature = "diagnostics"))]
                 request_uid: None,
                 error: error.into(),
             })]);
@@ -451,7 +429,7 @@ impl EventDispatcher {
 
     /// Apply one async `emk_QueryHedgeMode` response to Active Lib account
     /// state.
-    pub fn apply_hedge_mode_response(&mut self, resp: EngineResponse) -> bool {
+    pub(crate) fn apply_hedge_mode_response(&mut self, resp: EngineResponse) -> bool {
         let event = self.account.apply_hedge_mode_response(resp);
         let changed = matches!(event, AccountEvent::HedgeModeUpdated { .. });
         self.queued_events.extend([Event::Account(event)]);
@@ -469,7 +447,7 @@ impl EventDispatcher {
 
     /// Apply one async `emk_CheckAPIExpirationTime` response to Active Lib
     /// account state.
-    pub fn apply_api_expiration_response(&mut self, resp: EngineResponse) -> bool {
+    pub(crate) fn apply_api_expiration_response(&mut self, resp: EngineResponse) -> bool {
         let event = self.account.apply_api_expiration_response(resp);
         let changed = matches!(event, AccountEvent::ApiExpirationUpdated { .. });
         self.queued_events.extend([Event::Account(event)]);
@@ -493,7 +471,7 @@ impl EventDispatcher {
     /// Regular applications should call
     /// `MoonClient::request_coin_card_candles`; the runtime calls this method
     /// after receiving the matching server response.
-    pub fn apply_coin_card_candles_response(
+    pub(crate) fn apply_coin_card_candles_response(
         &mut self,
         market: String,
         kind: crate::commands::candles::DeepHistoryKind,
@@ -503,6 +481,7 @@ impl EventDispatcher {
             crate::state::CoinCardCandlesEvent::UpdateFailed {
                 market,
                 kind,
+                #[cfg(any(test, feature = "diagnostics"))]
                 request_uid: Some(resp.request_uid),
                 error: format!("unexpected EngineMethod {:?}", resp.method),
             }
@@ -510,6 +489,7 @@ impl EventDispatcher {
             crate::state::CoinCardCandlesEvent::UpdateFailed {
                 market,
                 kind,
+                #[cfg(any(test, feature = "diagnostics"))]
                 request_uid: Some(resp.request_uid),
                 error: format!("server error {} {}", resp.error_code, resp.error_msg.trim()),
             }
@@ -522,6 +502,7 @@ impl EventDispatcher {
             crate::state::CoinCardCandlesEvent::UpdateFailed {
                 market,
                 kind,
+                #[cfg(any(test, feature = "diagnostics"))]
                 request_uid: Some(resp.request_uid),
                 error: format!("parse failed data_len={}", resp.data.len()),
             }
@@ -538,10 +519,13 @@ impl EventDispatcher {
         request_uid: Option<u64>,
         error: impl Into<String>,
     ) {
+        #[cfg(not(any(test, feature = "diagnostics")))]
+        let _ = request_uid;
         self.queued_events.extend([Event::CoinCardCandles(
             crate::state::CoinCardCandlesEvent::UpdateFailed {
                 market,
                 kind,
+                #[cfg(any(test, feature = "diagnostics"))]
                 request_uid,
                 error: error.into(),
             },
@@ -597,12 +581,13 @@ impl EventDispatcher {
     }
 
     /// Read-only strategy state and decoded strategy snapshots.
-    pub fn strats(&self) -> &StratsState {
+    pub(crate) fn strats(&self) -> &StratsState {
         &self.strats
     }
 
     /// Read-only UI/settings state.
-    pub fn settings(&self) -> &SettingsState {
+    #[cfg(test)]
+    pub(crate) fn settings(&self) -> &SettingsState {
         &self.settings
     }
 
@@ -613,7 +598,8 @@ impl EventDispatcher {
     /// historical/append-only packets: Delphi keeps existing `cfg` values for
     /// missing soft-tail fields, so the active dispatcher needs the same current
     /// settings snapshot before parsing.
-    pub fn set_client_settings_fallback(&mut self, fallback: ClientSettingsCommand) {
+    #[cfg(test)]
+    pub(crate) fn set_client_settings_fallback(&mut self, fallback: ClientSettingsCommand) {
         self.settings.set_client_settings_fallback(fallback);
     }
 
@@ -622,7 +608,8 @@ impl EventDispatcher {
     ///
     /// `markets().indexes_synchronized` gates indexed streams such as
     /// TradesStream and OrderBook after server restarts.
-    pub fn markets(&self) -> &MarketsState {
+    #[cfg(test)]
+    pub(crate) fn markets(&self) -> &MarketsState {
         &self.markets
     }
 
@@ -630,12 +617,14 @@ impl EventDispatcher {
     /// the runtime event sink.
     ///
     /// Normal applications use `MoonClient` and never need this queue directly.
-    pub fn queued_events(&self) -> &[Event] {
+    #[cfg(test)]
+    pub(crate) fn queued_events(&self) -> &[Event] {
         self.queued_events.as_slice()
     }
 
     /// Number of currently queued one-shot events.
-    pub fn queued_event_count(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) fn queued_event_count(&self) -> usize {
         self.queued_events.len()
     }
 
@@ -643,18 +632,14 @@ impl EventDispatcher {
     ///
     /// This is diagnostics only. The queue has no fixed capacity and does not
     /// drop old events when this number grows.
-    pub fn queued_event_max_count(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) fn queued_event_max_count(&self) -> usize {
         self.queued_events.max_len()
     }
 
     /// Remove and return events accumulated during one-shot waits.
-    pub fn take_queued_events(&mut self) -> Vec<Event> {
+    pub(crate) fn take_queued_events(&mut self) -> Vec<Event> {
         self.queued_events.take()
-    }
-
-    /// Drop queued one-shot events without processing them.
-    pub fn clear_queued_events(&mut self) {
-        self.queued_events.clear();
     }
 
     pub(crate) fn queue_events<I>(&mut self, events: I)
@@ -664,44 +649,13 @@ impl EventDispatcher {
         self.queued_events.extend(events);
     }
 
-    /// Trades-gap recovery tail check.
-    ///
-    /// It returns serialized `TradesResend` Engine API requests for missing
-    /// packet numbers and closes expired gap buckets. Applications do not need
-    /// to call this when using [`crate::client::MoonClient`] or the low-level
-    /// active runtime path; they call the check after successfully parsed trades
-    /// packets.
-    ///
-    /// Custom loops that bypass the active runtime should call it after a valid
-    /// `TradesStream`/`TradesResendResponse` packet, with the current RTT and
-    /// monotonic timestamp, then send each returned request through the client.
-    pub fn tick_trades(&mut self, rtt_ms: i64, now_ms: i64) -> Vec<Vec<u8>> {
-        self.trades.tick(rtt_ms, now_ms)
-    }
-
-    /// Variant of [`Self::tick_trades`] that also returns tick-generated
-    /// [`TradesEvent`] diagnostics.
-    pub fn tick_trades_with_events(
-        &mut self,
-        rtt_ms: i64,
-        now_ms: i64,
-    ) -> (Vec<Vec<u8>>, Vec<TradesEvent>) {
-        self.trades.tick_with_events(rtt_ms, now_ms)
-    }
-
-    /// Attach this dispatcher to one client's `ServerTimeDelta` handle.
+    /// Attach this internal dispatcher to one client's `ServerTimeDelta` handle.
     ///
     /// After this, order-channel dispatch uses that client's time delta instead
-    /// of the process-global raw-dispatch fallback. Custom multi-server
-    /// runtimes should attach one dispatcher to the matching client. The
-    /// high-level [`crate::client::MoonClient`] path handles this internally.
-    ///
-    /// ```ignore
-    /// let client = Client::new(cfg);
-    /// let mut dispatcher = EventDispatcher::new();
-    /// dispatcher.set_server_time_delta_source(client.server_time_delta_handle());
-    /// ```
-    pub fn set_server_time_delta_source(&mut self, handle: Arc<AtomicU64>) {
+    /// of the process-global test fallback. The high-level
+    /// [`crate::client::MoonClient`] path handles this internally.
+    #[cfg(test)]
+    pub(crate) fn set_server_time_delta_source(&mut self, handle: Arc<AtomicU64>) {
         self.server_time_delta_source = Some(handle);
     }
 
@@ -720,7 +674,8 @@ impl EventDispatcher {
     /// Most channels produce zero or one event. OrderBook recovery and balance
     /// batches can produce several events for one payload.
     #[must_use = "Events must be processed or application notifications are lost."]
-    pub fn dispatch(&mut self, cmd: Command, payload: &[u8], now_ms: i64) -> Vec<Event> {
+    #[cfg(test)]
+    pub(crate) fn dispatch(&mut self, cmd: Command, payload: &[u8], now_ms: i64) -> Vec<Event> {
         // Convenience wrapper over `dispatch_into`.
         let mut out = Vec::new();
         self.dispatch_into(cmd, payload, now_ms, &mut out);
@@ -751,7 +706,8 @@ impl EventDispatcher {
     ///     for ev in &buf { /* handle */ }
     /// }
     /// ```
-    pub fn dispatch_into(
+    #[cfg(test)]
+    pub(crate) fn dispatch_into(
         &mut self,
         cmd: Command,
         payload: &[u8],
@@ -786,10 +742,13 @@ impl EventDispatcher {
             Command::UI => self.client_new_data_ui(payload, out),
             Command::API => self.client_new_data_api(payload, history_now_time_days, out),
             Command::LogMsg => self.client_new_data_log_msg(payload, out),
+            #[cfg(any(test, feature = "diagnostics"))]
             _ => out.push(Event::Raw {
                 cmd,
                 payload: payload.to_vec(),
             }),
+            #[cfg(not(any(test, feature = "diagnostics")))]
+            _ => {}
         }
     }
 }

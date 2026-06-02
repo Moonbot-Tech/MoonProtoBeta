@@ -1,6 +1,8 @@
 //! Public high-level Active Lib runtime types.
 
 use super::*;
+use parking_lot::MutexGuard;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
 /// Event emitted by the high-level [`MoonClient`](super::MoonClient) runtime.
 ///
@@ -72,7 +74,13 @@ impl MoonEventSink {
             .name("moonproto-event-sink".to_string())
             .spawn(move || {
                 while let Ok(event) = rx.recv() {
-                    emit(event);
+                    if let Err(payload) = catch_unwind(AssertUnwindSafe(|| emit(event))) {
+                        log::error!(
+                            target: "moonproto::runtime",
+                            "moonproto-event-sink callback panicked: {}",
+                            panic_payload_message(payload.as_ref())
+                        );
+                    }
                 }
             })
             .expect("spawn moonproto event sink worker");
@@ -134,6 +142,7 @@ impl MoonEventSink {
 #[cfg(test)]
 mod event_sink_tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
 
     #[test]
     fn callback_sink_does_not_run_user_callback_inline() {
@@ -159,6 +168,28 @@ mod event_sink_tests {
             .recv_timeout(Duration::from_secs(1))
             .expect("callback worker should finish callback");
     }
+
+    #[test]
+    fn callback_sink_survives_user_callback_panic() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let callback_calls = Arc::clone(&calls);
+        let (ok_tx, ok_rx) = mpsc::channel();
+        let sink = MoonEventSink::callback(move |_event| {
+            let call = callback_calls.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                panic!("synthetic callback panic");
+            }
+            let _ = ok_tx.send(call + 1);
+        });
+
+        sink.emit_lifecycle(LifecycleEvent::Connecting);
+        sink.emit_lifecycle(LifecycleEvent::Reconnecting);
+
+        let delivered = ok_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("callback worker should continue after one callback panic");
+        assert_eq!(delivered, 2);
+    }
 }
 
 /// Queue adapter returned by [`MoonEventSink::queue`].
@@ -178,7 +209,7 @@ impl MoonEventQueue {
     /// buffer is not cleared first, so callers can batch several sources if
     /// needed.
     pub fn drain_events_into(&self, out: &mut Vec<crate::events::Event>) {
-        let rx = self.events_rx.lock().unwrap();
+        let rx = lock_queue_mutex(&self.events_rx, "events");
         while let Ok(event) = rx.try_recv() {
             out.push(event);
         }
@@ -193,7 +224,7 @@ impl MoonEventQueue {
 
     /// Drain lifecycle events into a caller-owned buffer.
     pub fn drain_lifecycle_events_into(&self, out: &mut Vec<LifecycleEvent>) {
-        let rx = self.lifecycle_rx.lock().unwrap();
+        let rx = lock_queue_mutex(&self.lifecycle_rx, "lifecycle");
         while let Ok(event) = rx.try_recv() {
             out.push(event);
         }
@@ -208,13 +239,29 @@ impl MoonEventQueue {
 
     /// Try to receive one typed domain event without blocking.
     pub fn try_recv_event(&self) -> Option<crate::events::Event> {
-        self.events_rx.lock().unwrap().try_recv().ok()
+        lock_queue_mutex(&self.events_rx, "events").try_recv().ok()
     }
 
     /// Try to receive one lifecycle event without blocking.
     pub fn try_recv_lifecycle_event(&self) -> Option<LifecycleEvent> {
-        self.lifecycle_rx.lock().unwrap().try_recv().ok()
+        lock_queue_mutex(&self.lifecycle_rx, "lifecycle")
+            .try_recv()
+            .ok()
     }
+}
+
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(value) = payload.downcast_ref::<&'static str>() {
+        (*value).to_string()
+    } else if let Some(value) = payload.downcast_ref::<String>() {
+        value.clone()
+    } else {
+        "non-string panic payload".to_string()
+    }
+}
+
+fn lock_queue_mutex<'a, T>(mutex: &'a Mutex<T>, _name: &'static str) -> MutexGuard<'a, T> {
+    mutex.lock()
 }
 
 /// Ticket returned after Active Lib has queued a non-blocking Engine API action.
@@ -225,9 +272,23 @@ impl MoonEventQueue {
 pub struct EngineActionTicket {
     pub kind: crate::events::EngineActionKind,
     #[doc(hidden)]
-    pub request_uid: Option<u64>,
+    pub(crate) request_uid: Option<u64>,
     #[doc(hidden)]
-    pub method: crate::commands::EngineMethod,
+    pub(crate) method: crate::commands::engine_api::EngineMethod,
+}
+
+impl EngineActionTicket {
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
+    pub fn request_uid(&self) -> Option<u64> {
+        self.request_uid
+    }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
+    pub fn method(&self) -> crate::commands::engine_api::EngineMethod {
+        self.method
+    }
 }
 
 /// Ticket returned after a demand-driven CoinCard candles request is queued.
@@ -239,7 +300,15 @@ pub struct CoinCardCandlesTicket {
     pub market: String,
     pub kind: crate::commands::candles::DeepHistoryKind,
     #[doc(hidden)]
-    pub request_uid: Option<u64>,
+    pub(crate) request_uid: Option<u64>,
+}
+
+impl CoinCardCandlesTicket {
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
+    pub fn request_uid(&self) -> Option<u64> {
+        self.request_uid
+    }
 }
 
 /// User-facing VStop settings for one tracked order.
@@ -261,20 +330,6 @@ impl VStopParams {
             fixed: false,
             level: 0.0,
             volume: 0.0,
-        }
-    }
-
-    /// Positional compatibility constructor.
-    ///
-    /// Prefer a struct literal so the two booleans stay named at the call site:
-    /// `VStopParams { enabled: true, fixed: false, level, volume }`.
-    #[doc(hidden)]
-    pub const fn new(enabled: bool, fixed: bool, level: f64, volume: f64) -> Self {
-        Self {
-            enabled,
-            fixed,
-            level,
-            volume,
         }
     }
 }

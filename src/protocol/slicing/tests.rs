@@ -4,8 +4,8 @@ use super::*;
 fn slice_header_and_ack_use_private_wire_structs() {
     assert_eq!(std::mem::size_of::<WireSliceHeader>(), 4);
     assert_eq!(SLICE_HEADER_SIZE, 4);
-    assert_eq!(std::mem::size_of::<WireSlicedAck>(), 34);
-    assert_eq!(ACK256_WIRE_SIZE, 34);
+    assert_eq!(std::mem::size_of::<WireSlicedAck>(), 38);
+    assert_eq!(ACK256_WIRE_SIZE, 38);
 
     let header = SliceHeader {
         datagram_num: 0x1234,
@@ -23,12 +23,15 @@ fn slice_header_and_ack_use_private_wire_structs() {
     let mut flags = [0u8; 32];
     flags[0] = 0b0000_0011;
     flags[31] = 0x80;
-    let ack = build_ack_bytes(&flags, 0xABCD);
+    let ack = build_ack_bytes(&flags, 0xABCD, 0x1122_3344);
     assert_eq!(&ack[0..32], &flags);
     assert_eq!(&ack[32..34], &0xABCDu16.to_le_bytes());
-    let (parsed_flags, parsed_datagram) = parse_ack_bytes(&ack).expect("valid ACK256");
+    assert_eq!(&ack[34..38], &0x1122_3344u32.to_le_bytes());
+    let (parsed_flags, parsed_datagram, parsed_session) =
+        parse_ack_bytes(&ack).expect("valid ACK256");
     assert_eq!(parsed_flags, flags);
     assert_eq!(parsed_datagram, 0xABCD);
+    assert_eq!(parsed_session, 0x1122_3344);
 }
 
 #[test]

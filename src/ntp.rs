@@ -14,6 +14,7 @@
 //! `(T4 - T1) - (T3 - T2)`.
 use log::{debug, warn};
 use std::net::UdpSocket;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -187,7 +188,8 @@ fn system_time_to_ntp() -> (u32, u32) {
 /// Convert NTP time offset to Delphi TDateTime offset.
 /// Delphi: GlobalMPTimeOffset used as `Now + GlobalMPTimeOffset` to get corrected time.
 /// Since TDateTime is in days: offset_days = offset_seconds / 86400.
-pub fn offset_to_delphi_days(offset_seconds: f64) -> f64 {
+#[cfg(test)]
+pub(crate) fn offset_to_delphi_days(offset_seconds: f64) -> f64 {
     offset_seconds / 86400.0
 }
 
@@ -286,8 +288,9 @@ fn release_process_sync() {
 ///    - If `GetTimeTryCount < 4` → another `get_best_ntp(host, 2)`; if `NewDelay < MinDelay` → update the offset.
 ///    - If `GetTimeTryCount > 1000` (~500s) → reset the cycle (`MinDelay *= 1.1`), repeat the refinement.
 ///
-/// `apply_fn` is called with the offset in **seconds** on every improvement. Usually
-/// `client::set_ntp_offset` is passed to atomically update the global offset.
+/// `apply_fn` is called with the offset in **seconds** on every improvement.
+/// The managed `ClientConfig` path uses the crate-internal offset setter; tools
+/// that call this function directly can supply their own storage/callback.
 ///
 /// Returns an `Arc<AtomicBool>` shutdown flag. Setting it to `true` causes the loop
 /// to exit on the next iteration (at most ~500ms delay before exit). If the spawn
@@ -315,50 +318,58 @@ where
     if let Err(e) = std::thread::Builder::new()
         .name("moonproto-ntp-sync".into())
         .spawn(move || {
-            let mut ntp_state = NtpState::default();
+            if let Err(payload) = catch_unwind(AssertUnwindSafe(|| {
+                let mut ntp_state = NtpState::default();
 
-            // Initial sync (try_count=4) — skip if already shutdown
-            if shutdown_thread.load(Ordering::Relaxed) {
-                return;
-            }
-            let first = get_best_ntp_with_state(&mut ntp_state, 4, |timeout_ms| {
-                sntp_request(&host, timeout_ms)
-            });
-            let mut min_delay_ms: i64 = if first.synced {
-                apply_fn(first.time_offset);
-                first.round_trip_ms
-            } else {
-                i64::MAX
-            };
-            let mut try_count: u32 = 1;
+                // Initial sync (try_count=4) — skip if already shutdown
+                if shutdown_thread.load(Ordering::Relaxed) {
+                    return;
+                }
+                let first = get_best_ntp_with_state(&mut ntp_state, 4, |timeout_ms| {
+                    sntp_request(&host, timeout_ms)
+                });
+                let mut min_delay_ms: i64 = if first.synced {
+                    apply_fn(first.time_offset);
+                    first.round_trip_ms
+                } else {
+                    i64::MAX
+                };
+                let mut try_count: u32 = 1;
 
-            loop {
-                // Sleep 5 × 100ms = 500ms (like Delphi pas:1273-1275) with a shutdown check
-                // every 100ms — exit within ~100ms after `store(true)`.
-                for _ in 0..5 {
-                    if shutdown_thread.load(Ordering::Relaxed) {
-                        return;
+                loop {
+                    // Sleep 5 × 100ms = 500ms (like Delphi pas:1273-1275) with a shutdown check
+                    // every 100ms — exit within ~100ms after `store(true)`.
+                    for _ in 0..5 {
+                        if shutdown_thread.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        std::thread::sleep(Duration::from_millis(100));
                     }
-                    std::thread::sleep(Duration::from_millis(100));
-                }
 
-                try_count += 1;
-                if try_count > 1000 {
-                    try_count = 2;
-                    // Widen the acceptance window — let a worse RTT win (Delphi pas:1281)
-                    min_delay_ms = ((min_delay_ms as f64 * 1.1) as i64) + 10;
-                }
-
-                if try_count < 4 {
-                    let r = get_best_ntp_with_state(&mut ntp_state, 2, |timeout_ms| {
-                        sntp_request(&host, timeout_ms)
-                    });
-                    if r.synced && r.round_trip_ms < min_delay_ms {
-                        min_delay_ms = r.round_trip_ms;
-                        apply_fn(r.time_offset);
+                    try_count += 1;
+                    if try_count > 1000 {
+                        try_count = 2;
+                        // Widen the acceptance window — let a worse RTT win (Delphi pas:1281)
+                        min_delay_ms = ((min_delay_ms as f64 * 1.1) as i64) + 10;
                     }
+
+                    if try_count < 4 {
+                        let r = get_best_ntp_with_state(&mut ntp_state, 2, |timeout_ms| {
+                            sntp_request(&host, timeout_ms)
+                        });
+                        if r.synced && r.round_trip_ms < min_delay_ms {
+                            min_delay_ms = r.round_trip_ms;
+                            apply_fn(r.time_offset);
+                        }
+                    }
+                    // try_count >= 4 and <= 1000 — idle (silent, like Delphi)
                 }
-                // try_count >= 4 and <= 1000 — idle (silent, like Delphi)
+            })) {
+                log::error!(
+                    target: "moonproto::ntp",
+                    "moonproto-ntp-sync panicked: {}",
+                    panic_payload_message(payload.as_ref())
+                );
             }
         })
     {
@@ -368,6 +379,16 @@ where
         shutdown.store(true, Ordering::Relaxed);
     }
     shutdown
+}
+
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(value) = payload.downcast_ref::<&'static str>() {
+        (*value).to_string()
+    } else if let Some(value) = payload.downcast_ref::<String>() {
+        value.clone()
+    } else {
+        "non-string panic payload".to_string()
+    }
 }
 
 #[cfg(test)]

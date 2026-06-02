@@ -76,7 +76,7 @@ impl ClientSender {
             return Err(SubscribeError::Disconnected);
         }
         {
-            let mut registry = self.shared.subscription_registry.lock().unwrap();
+            let mut registry = self.shared.subscription_registry.lock();
             registry.mm_orders_sub = Some(subscribe);
         }
         let uid = rand::random();

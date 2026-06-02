@@ -62,7 +62,7 @@ fn dummy_cfg() -> ClientConfig {
         server_port: 3000,
         master_key: [0; 16],
         mac_key: [0; 16],
-        mask_ver: TransportMode::V0,
+        transport_mode: TransportMode::V0,
         client_id: 0,
         ntp_host: None,
         refresh: RefreshConfig {
@@ -126,7 +126,13 @@ fn build_engine_response_payload(request_uid: u64, method: EngineMethod, data: &
 }
 
 fn install_server_decode_session(client: &mut Client, server_token: u64) -> MoonKey {
-    let (encode_key, decode_key) = crypto::generate_sub_keys(&client.cfg.master_key, server_token);
+    client.session_rnd = client.handshake_rnd;
+    let (encode_key, decode_key) = crypto::generate_session_sub_keys(
+        &client.cfg.master_key,
+        client.cfg.client_id,
+        server_token,
+        &client.session_rnd,
+    );
     client.server_token = server_token;
     client.encode_key = encode_key;
     client.decode_key = decode_key;
@@ -135,6 +141,7 @@ fn install_server_decode_session(client: &mut Client, server_token: u64) -> Moon
         .recv
         .data_read_state
         .set_decode_cipher(crypto::cipher_from_key(&decode_key));
+    client.refresh_ack_session32();
     decode_key
 }
 
@@ -873,29 +880,20 @@ fn pending_api_response_is_not_duplicated_to_callback_sink() {
 }
 
 #[test]
-// parity: MoonBot MoonProtoClient.pas:ClientNewData
-fn failed_compressed_payload_is_delivered_with_real_cmd() {
+// parity: MoonBot MoonProtoCommon.pas:DataReadInt
+fn failed_compressed_payload_is_dropped_before_dispatch() {
     let mut client = Client::new(dummy_cfg());
     let compressed_garbage = vec![4, 0, 1, 0, 0, 0, 0x0F, 0];
-    let mut payloads = Vec::new();
-    // OrderBook stands in for "a non-sensitive data command": S1 drops plaintext
-    // sensitive cmds (Order/Strat/UI/Balance) in decode, so this compressed-fail
-    // delivery test uses a non-sensitive command.
-    let (cmd, payload) = Client::decode_command_payload_shared(
+    let decoded = Client::decode_command_payload_shared(
         &mut client.recv.data_read_state,
         Command::OrderBook.to_byte() | COMPRESSED_FLAG,
         &compressed_garbage,
-    )
-    .expect("failed compressed payload still has a decoded real command");
+    );
 
-    {
-        let mut sink = DispatchSink::Buffer(&mut payloads);
-        client.client_new_data_decoded(cmd, payload, false, false, &mut sink);
-    }
-
-    assert_eq!(payloads.len(), 1);
-    assert_eq!(payloads[0].0, Command::OrderBook);
-    assert_eq!(payloads[0].1, compressed_garbage);
+    assert!(
+        decoded.is_none(),
+        "failed decompression must set CanProceed=false and not dispatch the compressed stream"
+    );
 }
 
 #[test]

@@ -48,10 +48,6 @@ impl<'a> EngineStreamReader<'a> {
     }
 
     /// Read i32 count like Delphi `resp.ReadInt`.
-    ///
-    /// Do not pre-reject `count * elem_size > remaining`: Delphi readers do not
-    /// check collection size up front and fail only at the concrete field read.
-    /// Callers should use [`Self::bounded_count_capacity`] for allocation only.
     pub(crate) fn read_count(&mut self) -> Option<usize> {
         let raw = self.read_int()?;
         if raw < 0 {
@@ -66,6 +62,28 @@ impl<'a> EngineStreamReader<'a> {
         self.remaining()
             .checked_div(min_elem_size)
             .map_or(count, |max| count.min(max))
+    }
+
+    pub(crate) fn read_count_bounded(
+        &mut self,
+        min_elem_size: usize,
+        hard_max: usize,
+        label: &str,
+    ) -> Option<usize> {
+        let count = self.read_count()?;
+        if count > hard_max {
+            log::warn!(target: "moonproto::commands",
+                "{}: count {} exceeds hard max {}", label, count, hard_max);
+            return None;
+        }
+        let max_by_remaining = self.remaining().checked_div(min_elem_size).unwrap_or(0);
+        if count > max_by_remaining {
+            log::warn!(target: "moonproto::commands",
+                "{}: count {} exceeds remaining payload: remaining={}, min_elem_size={}, max={}",
+                label, count, self.remaining(), min_elem_size, max_by_remaining);
+            return None;
+        }
+        Some(count)
     }
 
     fn read_zero_tail<const N: usize>(&mut self) -> [u8; N] {

@@ -103,7 +103,7 @@ fn runtime_smoke_full_happy_path() {
         snapshot.markets().market_count(),
         snapshot.orders().len(),
         snapshot.balances().global().total_pnl,
-        snapshot.strategy_snapshot_vec().len()
+        snapshot.strategy_snapshots().count()
     );
 
     client
@@ -118,11 +118,6 @@ fn runtime_smoke_full_happy_path() {
                 Event::Balance(_) => {
                     balance_events += 1;
                     break;
-                }
-                Event::ParseFailed { cmd, len, .. } => {
-                    panic!(
-                        "FAIL: ParseFailed while waiting balance snapshot cmd={cmd:?} len={len}"
-                    );
                 }
                 _ => {}
             }
@@ -154,7 +149,6 @@ fn runtime_smoke_full_happy_path() {
 
     let mut trades_packets = 0u32;
     let mut orderbook_applied = 0u32;
-    let mut parse_failures = 0u32;
     let deadline = Instant::now() + Duration::from_secs(STREAM_DURATION_SECS);
 
     while Instant::now() < deadline {
@@ -162,19 +156,13 @@ fn runtime_smoke_full_happy_path() {
             match event {
                 Event::Trade(_) => trades_packets += 1,
                 Event::OrderBook(OrderBookEvent::Apply { .. }) => orderbook_applied += 1,
-                Event::ParseFailed { cmd, len, .. } => {
-                    parse_failures += 1;
-                    eprintln!("WARN: ParseFailed cmd={cmd:?} len={len}");
-                }
                 _ => {}
             }
         }
         thread::sleep(Duration::from_millis(50));
     }
 
-    println!(
-        "streaming stats: trades={trades_packets} books={orderbook_applied} parse_failed={parse_failures}"
-    );
+    println!("streaming stats: trades={trades_packets} books={orderbook_applied}");
     assert!(
         trades_packets > 0,
         "FAIL: 0 Trades packets in {STREAM_DURATION_SECS}s"
@@ -185,12 +173,6 @@ fn runtime_smoke_full_happy_path() {
         "FAIL: 0 OrderBook Apply events in {STREAM_DURATION_SECS}s"
     );
     println!("OK: order_book_stream ({orderbook_applied} apply events)");
-    assert!(
-        parse_failures == 0,
-        "FAIL: {parse_failures} ParseFailed events"
-    );
-    println!("OK: no_parse_failures");
-
     client
         .disconnect()
         .expect("FAIL: MoonClient::disconnect failed");

@@ -5,11 +5,11 @@
 //! user-visible/history concept rather than only a wire packet.
 
 use crate::state::seq_ring::SeqRingTimedRow;
-use crate::time::DelphiTime;
+use crate::MoonTime;
 
 const SECONDS_PER_DAY: f64 = 86_400.0;
 pub const DELPHI_MSECS_PER_DAY: f64 = 86_400_000.0;
-const MINI_CANDLE_SPLIT_DAYS: f64 = 5.0 / SECONDS_PER_DAY;
+const MINI_CANDLE_SPLIT_MS: i64 = 5_000;
 const ROLLING_VOLUME_BUCKET_SECONDS: i64 = 5;
 const ROLLING_VOLUME_BUCKETS: usize = 5 * 60 / ROLLING_VOLUME_BUCKET_SECONDS as usize;
 pub const DELPHI_SAME_TRADES_TIME_DAYS: f64 = 0.2 / SECONDS_PER_DAY;
@@ -29,11 +29,13 @@ pub struct CandlesSnapshotApplySummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CandlesSnapshotEvent {
     Ready {
+        #[cfg(any(test, feature = "diagnostics"))]
         #[doc(hidden)]
         request_uid: u64,
         summary: CandlesSnapshotApplySummary,
     },
     Failed {
+        #[cfg(any(test, feature = "diagnostics"))]
         #[doc(hidden)]
         request_uid: Option<u64>,
         error: String,
@@ -67,13 +69,18 @@ impl TradesPacketTimeShift {
         base_time: f64,
         time_delta_ms: i16,
         now_time: f64,
-    ) -> f64 {
+    ) -> MoonTime {
         let row_time = base_time + f64::from(time_delta_ms) / DELPHI_MSECS_PER_DAY;
         let shift = *self
             .shift_days
             .get_or_insert_with(|| ((now_time - row_time) * 24.0).round() / 24.0);
-        row_time + shift
+        moon_time_from_delphi_days(row_time + shift)
     }
+}
+
+#[inline]
+pub(crate) fn moon_time_from_delphi_days(days: f64) -> MoonTime {
+    MoonTime::from_delphi_days(days).unwrap_or(MoonTime::ZERO)
 }
 
 /// Delphi `TTrade`: detailed trade/liquidation row stored in market history.
@@ -85,20 +92,20 @@ impl TradesPacketTimeShift {
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 #[repr(C)]
 pub struct TradeHistoryRow {
-    pub time: f64,
+    pub time: MoonTime,
     pub price: f32,
     pub qty: f32,
 }
 
 impl TradeHistoryRow {
     #[inline]
-    pub fn time_delphi(self) -> DelphiTime {
-        DelphiTime::from_days(self.time)
+    pub fn time(self) -> MoonTime {
+        self.time
     }
 
     #[inline]
-    pub fn unix_millis(self) -> Option<i64> {
-        self.time_delphi().unix_millis()
+    pub fn unix_millis(self) -> i64 {
+        self.time.unix_millis()
     }
 
     pub fn quantity(self) -> f32 {
@@ -119,8 +126,8 @@ impl TradeHistoryRow {
 }
 
 impl SeqRingTimedRow for TradeHistoryRow {
-    fn seq_ring_time(&self) -> f64 {
-        self.time
+    fn seq_ring_time_ms(&self) -> i64 {
+        self.time.unix_millis()
     }
 }
 
@@ -133,26 +140,26 @@ impl SeqRingTimedRow for TradeHistoryRow {
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 #[repr(C)]
 pub struct MMOrderHistoryRow {
-    pub time: f64,
+    pub time: MoonTime,
     pub volume: f64,
     pub q: f64,
 }
 
 impl MMOrderHistoryRow {
     #[inline]
-    pub fn time_delphi(self) -> DelphiTime {
-        DelphiTime::from_days(self.time)
+    pub fn time(self) -> MoonTime {
+        self.time
     }
 
     #[inline]
-    pub fn unix_millis(self) -> Option<i64> {
-        self.time_delphi().unix_millis()
+    pub fn unix_millis(self) -> i64 {
+        self.time.unix_millis()
     }
 }
 
 impl SeqRingTimedRow for MMOrderHistoryRow {
-    fn seq_ring_time(&self) -> f64 {
-        self.time
+    fn seq_ring_time_ms(&self) -> i64 {
+        self.time.unix_millis()
     }
 }
 
@@ -193,10 +200,8 @@ pub fn hl_address_color(taker: [u8; 20]) -> u32 {
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 #[repr(C)]
 pub struct LastPricePoint {
-    #[doc(hidden)]
-    pub current: f32,
-    #[doc(hidden)]
-    pub real_time: f64,
+    pub(crate) current: f32,
+    pub(crate) time: MoonTime,
 }
 
 impl LastPricePoint {
@@ -206,19 +211,19 @@ impl LastPricePoint {
     }
 
     #[inline]
-    pub fn time_delphi(self) -> DelphiTime {
-        DelphiTime::from_days(self.real_time)
+    pub fn time(self) -> MoonTime {
+        self.time
     }
 
     #[inline]
-    pub fn unix_millis(self) -> Option<i64> {
-        self.time_delphi().unix_millis()
+    pub fn unix_millis(self) -> i64 {
+        self.time.unix_millis()
     }
 }
 
 impl SeqRingTimedRow for LastPricePoint {
-    fn seq_ring_time(&self) -> f64 {
-        self.real_time
+    fn seq_ring_time_ms(&self) -> i64 {
+        self.time.unix_millis()
     }
 }
 
@@ -230,10 +235,8 @@ impl SeqRingTimedRow for LastPricePoint {
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 #[repr(C)]
 pub struct MarkPricePoint {
-    #[doc(hidden)]
-    pub current: f32,
-    #[doc(hidden)]
-    pub real_time: f64,
+    pub(crate) current: f32,
+    pub(crate) time: MoonTime,
 }
 
 impl MarkPricePoint {
@@ -243,19 +246,19 @@ impl MarkPricePoint {
     }
 
     #[inline]
-    pub fn time_delphi(self) -> DelphiTime {
-        DelphiTime::from_days(self.real_time)
+    pub fn time(self) -> MoonTime {
+        self.time
     }
 
     #[inline]
-    pub fn unix_millis(self) -> Option<i64> {
-        self.time_delphi().unix_millis()
+    pub fn unix_millis(self) -> i64 {
+        self.time.unix_millis()
     }
 }
 
 impl SeqRingTimedRow for MarkPricePoint {
-    fn seq_ring_time(&self) -> f64 {
-        self.real_time
+    fn seq_ring_time_ms(&self) -> i64 {
+        self.time.unix_millis()
     }
 }
 
@@ -269,18 +272,12 @@ impl SeqRingTimedRow for MarkPricePoint {
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 #[repr(C)]
 pub struct Candle5mRow {
-    #[doc(hidden)]
-    pub open: f32,
-    #[doc(hidden)]
-    pub close: f32,
-    #[doc(hidden)]
-    pub high: f32,
-    #[doc(hidden)]
-    pub low: f32,
-    #[doc(hidden)]
-    pub volume: f32,
-    #[doc(hidden)]
-    pub time: f64,
+    pub(crate) open: f32,
+    pub(crate) close: f32,
+    pub(crate) high: f32,
+    pub(crate) low: f32,
+    pub(crate) volume: f32,
+    pub(crate) time: MoonTime,
 }
 
 impl Candle5mRow {
@@ -291,7 +288,7 @@ impl Candle5mRow {
             high: row.high,
             low: row.low,
             volume: row.volume,
-            time: row.time,
+            time: moon_time_from_delphi_days(row.time),
         }
     }
 
@@ -321,19 +318,19 @@ impl Candle5mRow {
     }
 
     #[inline]
-    pub fn time_delphi(self) -> DelphiTime {
-        DelphiTime::from_days(self.time)
+    pub fn time(self) -> MoonTime {
+        self.time
     }
 
     #[inline]
-    pub fn unix_millis(self) -> Option<i64> {
-        self.time_delphi().unix_millis()
+    pub fn unix_millis(self) -> i64 {
+        self.time.unix_millis()
     }
 }
 
 impl SeqRingTimedRow for Candle5mRow {
-    fn seq_ring_time(&self) -> f64 {
-        self.time
+    fn seq_ring_time_ms(&self) -> i64 {
+        self.time.unix_millis()
     }
 }
 
@@ -344,7 +341,7 @@ impl SeqRingTimedRow for Candle5mRow {
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 #[repr(C)]
 pub struct MiniCandle {
-    pub time: f64,
+    pub time: MoonTime,
     pub cnt: i32,
     pub min_price: f32,
     pub max_price: f32,
@@ -354,13 +351,13 @@ pub struct MiniCandle {
 
 impl MiniCandle {
     #[inline]
-    pub fn time_delphi(self) -> DelphiTime {
-        DelphiTime::from_days(self.time)
+    pub fn time(self) -> MoonTime {
+        self.time
     }
 
     #[inline]
-    pub fn unix_millis(self) -> Option<i64> {
-        self.time_delphi().unix_millis()
+    pub fn unix_millis(self) -> i64 {
+        self.time.unix_millis()
     }
 
     #[inline]
@@ -385,8 +382,8 @@ impl MiniCandle {
 }
 
 impl SeqRingTimedRow for MiniCandle {
-    fn seq_ring_time(&self) -> f64 {
-        self.time
+    fn seq_ring_time_ms(&self) -> i64 {
+        self.time.unix_millis()
     }
 }
 
@@ -400,8 +397,8 @@ impl SeqRingTimedRow for MiniCandle {
 // parity: MoonBot MarketsU.pas:TMarket.ResizeOrdersHistory (UseTradesCompression)
 pub(crate) fn compact_trades_to_mini_candles(
     rows: &[TradeHistoryRow],
-    last_mini_time: f64,
-    now_time: f64,
+    last_mini_time: MoonTime,
+    now_time: MoonTime,
     out: &mut Vec<MiniCandle>,
 ) {
     let Some(first) = rows.first() else {
@@ -413,7 +410,9 @@ pub(crate) fn compact_trades_to_mini_candles(
     let mut candle = empty_mini_candle(anchor_time);
 
     for row in rows {
-        if (anchor_time - row.time).abs() > MINI_CANDLE_SPLIT_DAYS && candle.cnt > 0 {
+        if (anchor_time.unix_millis() - row.time.unix_millis()).abs() > MINI_CANDLE_SPLIT_MS
+            && candle.cnt > 0
+        {
             if candle.time > newest_mini_time && candle.time < now_time {
                 out.push(candle);
                 newest_mini_time = candle.time;
@@ -441,7 +440,7 @@ pub(crate) fn compact_trades_to_mini_candles(
     }
 }
 
-fn empty_mini_candle(time: f64) -> MiniCandle {
+fn empty_mini_candle(time: MoonTime) -> MiniCandle {
     MiniCandle {
         time,
         cnt: 0,
@@ -634,7 +633,7 @@ impl RollingTradeVolumes {
         bucket.totals.add_trade(row);
     }
 
-    pub(crate) fn snapshot(&self, now_time: f64) -> RollingTradeVolumeSnapshot {
+    pub(crate) fn snapshot(&self, now_time: MoonTime) -> RollingTradeVolumeSnapshot {
         let now_bucket = volume_bucket_id(now_time);
         let one_minute_oldest = oldest_volume_bucket(now_bucket, 60);
         let three_minutes_oldest = oldest_volume_bucket(now_bucket, 3 * 60);
@@ -663,8 +662,8 @@ fn oldest_volume_bucket(now_bucket: i64, window_seconds: i64) -> i64 {
     now_bucket - buckets_back + 1
 }
 
-fn volume_bucket_id(time: f64) -> i64 {
-    ((time * SECONDS_PER_DAY).floor() as i64).div_euclid(ROLLING_VOLUME_BUCKET_SECONDS)
+fn volume_bucket_id(time: MoonTime) -> i64 {
+    (time.unix_millis() / 1_000).div_euclid(ROLLING_VOLUME_BUCKET_SECONDS)
 }
 
 fn volume_bucket_index(bucket_id: i64) -> usize {

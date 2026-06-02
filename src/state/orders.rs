@@ -20,7 +20,7 @@
 //!   `TAllStatuses`; orders without the fresh flag are returned by
 //!   `missing_after_snapshot()`).
 //! - BulkReplace tracking.
-//! - Trace points accumulation.
+//! - Trace line chart state.
 //! - Corridor state.
 //! - VStop state.
 //! - Deferred removal on terminal statuses / `TOrderNotFound`.
@@ -39,12 +39,19 @@ mod model;
 mod types;
 
 pub use self::model::Order;
-pub use self::types::{ApplyResult, OrderEvent, OrderTraceChartPoint, OrderTraceLine, SellReason};
+#[cfg(any(test, feature = "diagnostics"))]
+#[doc(hidden)]
+pub use self::types::ApplyResult;
+#[cfg(not(any(test, feature = "diagnostics")))]
+pub(crate) use self::types::ApplyResult;
 pub(crate) use self::types::{OrderCancelSend, PanicSellSend};
+pub use self::types::{OrderEvent, OrderTraceChartPoint, OrderTraceLine, SellReason};
 
 const BULK_REPLACE_TIMEOUT_MS: i64 = 5000;
 const SELL_DONE_REMOVAL_GRACE_MS: i64 = 400;
 const PENDING_CANCEL_REPEAT_MS: i64 = 32;
+const ORDER_TRACE_LINE_SHRINK_TO: usize = 800;
+const ORDER_TRACE_LINE_SHRINK_INTERVAL_MS: i64 = 30_000;
 
 /// Wrapping-safe epoch comparison.
 /// Matches MoonProtoFunc.pas:188-203 `EpochIsOK`:
@@ -149,6 +156,8 @@ pub struct Orders {
     /// command `TDateTime` fields.
     pub server_time_delta: f64,
     eps_profile: EpsProfile,
+    /// Last periodic trace-line shrink pass.
+    last_order_line_shrink_ms: i64,
 }
 
 impl Orders {
@@ -160,6 +169,7 @@ impl Orders {
             current_snapshot_flag: 0,
             server_time_delta: 0.0,
             eps_profile: EpsProfile::default(),
+            last_order_line_shrink_ms: 0,
         }
     }
 
@@ -195,14 +205,27 @@ impl Orders {
     ///    `TAllStatuses` handling.
     /// 7. event generation.
     ///
-    /// Client-originated request commands (`AllStatusesRequest`,
-    /// `OrderStatusRequest`) return `Ignored / NotApplicable`: they are outgoing
-    /// commands, not inbound state updates.
+    /// Diagnostics/tests keep the ignored reason visible. Normal terminal code
+    /// reads order state and user-facing events only; stale/outgoing packets are
+    /// internal state-machine facts, not UI events.
+    #[cfg(any(test, feature = "diagnostics"))]
     pub fn apply(&mut self, cmd: TradeCommand) -> (ApplyResult, OrderEvent) {
-        self.apply_at(cmd, 0)
+        let uid = cmd.uid();
+        let (result, event) = self.apply_at(cmd, 0);
+        (
+            result,
+            event.unwrap_or(OrderEvent::Ignored {
+                uid,
+                reason: result,
+            }),
+        )
     }
 
-    pub(crate) fn apply_at(&mut self, cmd: TradeCommand, now_ms: i64) -> (ApplyResult, OrderEvent) {
+    pub(crate) fn apply_at(
+        &mut self,
+        cmd: TradeCommand,
+        now_ms: i64,
+    ) -> (ApplyResult, Option<OrderEvent>) {
         let uid = cmd.uid();
         let current_snapshot_flag = self.current_snapshot_flag;
         let server_time_delta = self.server_time_delta;
@@ -217,13 +240,7 @@ impl Orders {
                 let new_order = !self.map.contains_key(&uid);
                 let status = st.epoch_header.status;
                 if new_order && st.from_cache {
-                    return (
-                        ApplyResult::OrderNotFound,
-                        OrderEvent::Ignored {
-                            uid,
-                            reason: ApplyResult::OrderNotFound,
-                        },
-                    );
+                    return ignored_order_event(uid, ApplyResult::OrderNotFound);
                 }
                 let pending_local_visual_order = self.pending_local_visual_orders.remove(&uid);
                 let eps_m = self.eps_profile.eps_m;
@@ -239,7 +256,7 @@ impl Orders {
                     // FServerLatestEpoch for the first full status.
                     if !new_order {
                         if let Err(reason) = Self::accept_epoch_and_phase(entry, &st.epoch_header) {
-                            return (reason, OrderEvent::Ignored { uid, reason });
+                            return ignored_order_event(uid, reason);
                         }
                     }
 
@@ -259,9 +276,9 @@ impl Orders {
                 }
 
                 if new_order {
-                    (ApplyResult::Applied, OrderEvent::Created(uid))
+                    (ApplyResult::Applied, Some(OrderEvent::Created(uid)))
                 } else {
-                    (ApplyResult::Applied, OrderEvent::Updated(uid))
+                    (ApplyResult::Applied, Some(OrderEvent::Updated(uid)))
                 }
             }
 
@@ -271,17 +288,11 @@ impl Orders {
                 let is_terminal = status.is_terminal();
                 {
                     let Some(entry) = self.order_mut(uid) else {
-                        return (
-                            ApplyResult::OrderNotFound,
-                            OrderEvent::Ignored {
-                                uid,
-                                reason: ApplyResult::OrderNotFound,
-                            },
-                        );
+                        return ignored_order_event(uid, ApplyResult::OrderNotFound);
                     };
 
                     if let Err(reason) = Self::accept_epoch_and_phase(entry, &up.epoch_header) {
-                        return (reason, OrderEvent::Ignored { uid, reason });
+                        return ignored_order_event(uid, reason);
                     }
 
                     if matches!(
@@ -340,27 +351,21 @@ impl Orders {
 
                 if is_terminal {
                     self.mark_pending_removal(uid, now_ms, terminal_removal_delay_ms(status));
-                    return (ApplyResult::Applied, OrderEvent::Updated(uid));
+                    return (ApplyResult::Applied, Some(OrderEvent::Updated(uid)));
                 }
 
-                (ApplyResult::Applied, OrderEvent::Updated(uid))
+                (ApplyResult::Applied, Some(OrderEvent::Updated(uid)))
             }
 
             // --- Replace response ---
             TradeCommand::OrderReplaceResponse(rr) => {
                 let rr = *rr;
                 let Some(entry) = self.order_mut(uid) else {
-                    return (
-                        ApplyResult::OrderNotFound,
-                        OrderEvent::Ignored {
-                            uid,
-                            reason: ApplyResult::OrderNotFound,
-                        },
-                    );
+                    return ignored_order_event(uid, ApplyResult::OrderNotFound);
                 };
 
                 if let Err(reason) = Self::accept_epoch_and_phase(entry, &rr.epoch_header) {
-                    return (reason, OrderEvent::Ignored { uid, reason });
+                    return ignored_order_event(uid, reason);
                 }
 
                 let mut data = rr.update_data;
@@ -395,80 +400,55 @@ impl Orders {
                     entry.bulk_replace_sell = false;
                 }
 
-                (ApplyResult::Applied, OrderEvent::Updated(uid))
+                (ApplyResult::Applied, Some(OrderEvent::Updated(uid)))
             }
 
             // --- Stops update ---
             TradeCommand::OrderStopsUpdate(su) => {
                 let Some(entry) = self.order_mut(uid) else {
-                    return (
-                        ApplyResult::OrderNotFound,
-                        OrderEvent::Ignored {
-                            uid,
-                            reason: ApplyResult::OrderNotFound,
-                        },
-                    );
+                    return ignored_order_event(uid, ApplyResult::OrderNotFound);
                 };
                 if let Err(reason) = Self::accept_epoch_and_phase(entry, &su.epoch_header) {
-                    return (reason, OrderEvent::Ignored { uid, reason });
+                    return ignored_order_event(uid, reason);
                 }
                 entry.stops = su.stops;
-                (ApplyResult::Applied, OrderEvent::StopsChanged(uid))
+                (ApplyResult::Applied, Some(OrderEvent::StopsChanged(uid)))
             }
 
             // --- VStop update ---
             TradeCommand::VStopUpdate(vs) => {
                 let Some(entry) = self.order_mut(uid) else {
-                    return (
-                        ApplyResult::OrderNotFound,
-                        OrderEvent::Ignored {
-                            uid,
-                            reason: ApplyResult::OrderNotFound,
-                        },
-                    );
+                    return ignored_order_event(uid, ApplyResult::OrderNotFound);
                 };
                 if let Err(reason) = Self::accept_epoch_and_phase(entry, &vs.epoch_header) {
-                    return (reason, OrderEvent::Ignored { uid, reason });
+                    return ignored_order_event(uid, reason);
                 }
                 entry.vstop_on = vs.vstop_on;
                 entry.vstop_fixed = vs.vstop_fixed;
                 entry.vstop_level = vs.vstop_level;
                 entry.vstop_vol = vs.vstop_vol;
-                (ApplyResult::Applied, OrderEvent::VStopChanged(uid))
+                (ApplyResult::Applied, Some(OrderEvent::VStopChanged(uid)))
             }
 
             // --- Corridor update ---
             TradeCommand::CorridorUpdate(cu) => {
                 let Some(entry) = self.order_mut(uid) else {
-                    return (
-                        ApplyResult::OrderNotFound,
-                        OrderEvent::Ignored {
-                            uid,
-                            reason: ApplyResult::OrderNotFound,
-                        },
-                    );
+                    return ignored_order_event(uid, ApplyResult::OrderNotFound);
                 };
                 entry.is_moon_shot = true;
                 entry.corridor_price_down = cu.price_down;
                 entry.corridor_price_up = cu.price_up;
-                (ApplyResult::Applied, OrderEvent::CorridorChanged(uid))
+                (ApplyResult::Applied, Some(OrderEvent::CorridorChanged(uid)))
             }
 
             // --- Trace point ---
             TradeCommand::OrderTracePoint(mut tp) => {
                 let Some(entry) = self.order_mut(uid) else {
-                    return (
-                        ApplyResult::OrderNotFound,
-                        OrderEvent::Ignored {
-                            uid,
-                            reason: ApplyResult::OrderNotFound,
-                        },
-                    );
+                    return ignored_order_event(uid, ApplyResult::OrderNotFound);
                 };
                 tp.adjust_time(server_time_delta);
                 Self::apply_trace_line(entry, &tp);
-                entry.trace_points.push_back(tp);
-                (ApplyResult::Applied, OrderEvent::TracePoint { uid })
+                (ApplyResult::Applied, Some(OrderEvent::TracePoint { uid }))
             }
 
             // --- Bulk replace notification ---
@@ -486,20 +466,14 @@ impl Orders {
                     }
                 }
                 if affected.is_empty() {
-                    return (
-                        ApplyResult::OrderNotFound,
-                        OrderEvent::Ignored {
-                            uid,
-                            reason: ApplyResult::OrderNotFound,
-                        },
-                    );
+                    return ignored_order_event(uid, ApplyResult::OrderNotFound);
                 }
                 (
                     ApplyResult::Applied,
-                    OrderEvent::BulkReplaced {
+                    Some(OrderEvent::BulkReplaced {
                         order_type: brn.order_type,
                         uids: affected,
-                    },
+                    }),
                 )
             }
 
@@ -515,26 +489,14 @@ impl Orders {
                 };
                 if found {
                     self.mark_pending_removal(uid, now_ms, 0);
-                    (ApplyResult::Applied, OrderEvent::Updated(uid))
+                    (ApplyResult::Applied, Some(OrderEvent::Updated(uid)))
                 } else {
-                    (
-                        ApplyResult::OrderNotFound,
-                        OrderEvent::Ignored {
-                            uid,
-                            reason: ApplyResult::OrderNotFound,
-                        },
-                    )
+                    ignored_order_event(uid, ApplyResult::OrderNotFound)
                 }
             }
 
             // --- Dispatcher-level aggregate, handled before ProcessCommandOrder ---
-            TradeCommand::AllStatuses(_) => (
-                ApplyResult::NotApplicable,
-                OrderEvent::Ignored {
-                    uid,
-                    reason: ApplyResult::NotApplicable,
-                },
-            ),
+            TradeCommand::AllStatuses(_) => ignored_order_event(uid, ApplyResult::NotApplicable),
 
             // --- Client-originated outgoing commands: ignored by state ---
             TradeCommand::OrderReplace(c) => self.apply_noop_trade_epoch(uid, &c.epoch_header),
@@ -554,32 +516,16 @@ impl Orders {
             | TradeCommand::DoMarketSplitPosition(_)
             | TradeCommand::DoSellOrder(_)
             | TradeCommand::NewOrder(_)
-            | TradeCommand::SetImmune(_) => (
-                ApplyResult::NotApplicable,
-                OrderEvent::Ignored {
-                    uid,
-                    reason: ApplyResult::NotApplicable,
-                },
-            ),
+            | TradeCommand::SetImmune(_) => ignored_order_event(uid, ApplyResult::NotApplicable),
 
             // --- Other commands ---
             TradeCommand::Penalty(_)
             | TradeCommand::TradeVisual(_)
-            | TradeCommand::BaseMarket(_) => (
-                ApplyResult::NotApplicable,
-                OrderEvent::Ignored {
-                    uid,
-                    reason: ApplyResult::NotApplicable,
-                },
-            ),
+            | TradeCommand::BaseMarket(_) => ignored_order_event(uid, ApplyResult::NotApplicable),
 
-            TradeCommand::Unknown { uid, .. } => (
-                ApplyResult::NotApplicable,
-                OrderEvent::Ignored {
-                    uid,
-                    reason: ApplyResult::NotApplicable,
-                },
-            ),
+            TradeCommand::Unknown { uid, .. } => {
+                ignored_order_event(uid, ApplyResult::NotApplicable)
+            }
         }
     }
 
@@ -587,28 +533,28 @@ impl Orders {
         &mut self,
         uid: u64,
         header: &TradeEpochHeader,
-    ) -> (ApplyResult, OrderEvent) {
+    ) -> (ApplyResult, Option<OrderEvent>) {
         let Some(entry) = self.order_mut(uid) else {
-            return (
-                ApplyResult::OrderNotFound,
-                OrderEvent::Ignored {
-                    uid,
-                    reason: ApplyResult::OrderNotFound,
-                },
-            );
+            return ignored_order_event(uid, ApplyResult::OrderNotFound);
         };
 
         if let Err(reason) = Self::accept_epoch_and_phase(entry, header) {
-            return (reason, OrderEvent::Ignored { uid, reason });
+            return ignored_order_event(uid, reason);
         }
 
-        (
-            ApplyResult::NotApplicable,
-            OrderEvent::Ignored {
-                uid,
-                reason: ApplyResult::NotApplicable,
-            },
-        )
+        ignored_order_event(uid, ApplyResult::NotApplicable)
+    }
+}
+
+fn ignored_order_event(uid: u64, reason: ApplyResult) -> (ApplyResult, Option<OrderEvent>) {
+    #[cfg(any(test, feature = "diagnostics"))]
+    {
+        (reason, Some(OrderEvent::Ignored { uid, reason }))
+    }
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    {
+        let _ = uid;
+        (reason, None)
     }
 }
 

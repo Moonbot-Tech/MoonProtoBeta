@@ -486,7 +486,6 @@ pub(crate) fn send_post_init_resync(
         .subscriptions
         .subscription_registry
         .lock()
-        .unwrap()
         .mm_orders_sub;
     let mm_orders = cfg
         .mm_orders_subscribe

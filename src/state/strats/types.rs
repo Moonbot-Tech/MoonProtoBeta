@@ -78,14 +78,6 @@ pub enum StratEvent {
     CheckedSynced { changed: usize, is_delta: bool },
     /// Server echo for a checked-state sync sent by this client.
     CheckedEcho { count: usize },
-    /// Server requests this client's strategy snapshot.
-    ///
-    /// This is inbound `TStratSnapshotRequest`. Delphi answers by rebuilding a
-    /// fresh `TStratSnapshot` from live `Strats`; the Rust dispatcher does the
-    /// same from `StratsState`. If the application has not provided local
-    /// strategies yet and no server snapshot was applied, the answer is a valid
-    /// empty `TStratSnapshot`.
-    SnapshotRequested { uid: u64 },
     /// Strategy schema (`TStratSchema`, CmdId=8) was received and parsed.
     SchemaApplied {
         raw_len: usize,
@@ -95,15 +87,6 @@ pub enum StratEvent {
     },
     /// Server sent `TStratSchema`, but the raw-deflate/body parse failed.
     SchemaParseFailed { raw_len: usize },
-    /// Diagnostic variant for raw parser users. The client receive path does
-    /// not emit it because the Delphi client ignores incoming
-    /// `TStratSchemaRequest`.
-    SchemaRequested { uid: u64 },
-    /// Low-level diagnostic for commands that the client state does not apply.
-    /// The active dispatcher does not emit this for Delphi-inapplicable
-    /// incoming command classes such as unknown/skipped, schema request, or
-    /// sell-price update.
-    Ignored,
 }
 
 impl StratEvent {

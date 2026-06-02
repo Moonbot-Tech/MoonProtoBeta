@@ -68,7 +68,7 @@ impl Client {
         } else {
             self.lifecycle.lifecycle_cb.take().map(|cb| {
                 let (tx, rx) = mpsc::channel::<LifecycleEvent>();
-                *self.lifecycle.lifecycle_app_tx.lock().unwrap() = Some(tx);
+                *self.lifecycle.lifecycle_app_tx.lock() = Some(tx);
                 (rx, cb)
             })
         };
@@ -96,7 +96,7 @@ impl Client {
                 drop(stepper);
             }
             if clear_lifecycle_app_tx {
-                *lifecycle_app_tx.lock().unwrap() = None;
+                *lifecycle_app_tx.lock() = None;
             }
             if let Some(handle) = lifecycle_handle {
                 restored_lifecycle_cb = Some(
@@ -123,7 +123,7 @@ impl Client {
         } else {
             self.lifecycle.lifecycle_cb.take().map(|cb| {
                 let (tx, rx) = mpsc::channel::<LifecycleEvent>();
-                *self.lifecycle.lifecycle_app_tx.lock().unwrap() = Some(tx);
+                *self.lifecycle.lifecycle_app_tx.lock() = Some(tx);
                 (rx, cb)
             })
         };
@@ -151,7 +151,7 @@ impl Client {
                 }
             }
             if clear_lifecycle_app_tx {
-                *lifecycle_app_tx.lock().unwrap() = None;
+                *lifecycle_app_tx.lock() = None;
             }
             if let Some(handle) = lifecycle_handle {
                 restored_lifecycle_cb = Some(

@@ -1,5 +1,7 @@
 //! Inbound `MPC_UI` command parser.
 
+#![cfg_attr(feature = "diagnostics", allow(dead_code))]
+
 use super::*;
 impl UICommand {
     /// Parse a TBaseUICommand payload (after MPC_UI dispatch in data_read_int).
@@ -161,8 +163,12 @@ impl UICommand {
             }
 
             CMD_RESET_PROFIT => {
-                let reset_kind = read_u8_zero_tail(payload, &mut pos);
-                Some(UICommand::ResetProfit(ResetProfit { uid, reset_kind }))
+                let kind = ResetProfitKind::from_byte(read_u8_zero_tail(payload, &mut pos));
+                Some(UICommand::ResetProfit(ResetProfit {
+                    #[cfg(any(test, feature = "diagnostics"))]
+                    uid,
+                    kind,
+                }))
             }
 
             CMD_ARB_ACTIVATE_NOTIFY => {
@@ -274,8 +280,12 @@ fn parse_client_settings(
         return None;
     }
     let temp_bl_count = temp_bl_count_raw as usize;
-    let mut temp_bl_symbols = Vec::with_capacity(temp_bl_count);
-    let mut temp_bl_times = Vec::with_capacity(temp_bl_count);
+    let temp_bl_capacity =
+        bounded_collection_capacity(data, *pos, temp_bl_count, TEMP_BL_MIN_WIRE_ITEM_SIZE);
+    let mut temp_bl_symbols = Vec::new();
+    temp_bl_symbols.try_reserve(temp_bl_capacity).ok()?;
+    let mut temp_bl_times = Vec::new();
+    temp_bl_times.try_reserve(temp_bl_capacity).ok()?;
     for _ in 0..temp_bl_count {
         let sym = read_string(data, pos)?;
         let t = f64::from_bits(read_u64_zero_tail(data, pos));
@@ -523,6 +533,23 @@ fn read_i32_preserve_tail(data: &[u8], pos: &mut usize, current: i32) -> i32 {
     let mut bytes = current.to_le_bytes();
     read_into_prefix(data, pos, &mut bytes);
     i32::from_le_bytes(bytes)
+}
+
+const TEMP_BL_MIN_WIRE_ITEM_SIZE: usize = 10; // string length prefix + f64 time
+
+fn bounded_collection_capacity(
+    data: &[u8],
+    pos: usize,
+    count: usize,
+    min_item_size: usize,
+) -> usize {
+    if min_item_size == 0 {
+        return count;
+    }
+    data.len()
+        .saturating_sub(pos)
+        .checked_div(min_item_size)
+        .map_or(count, |max| count.min(max))
 }
 
 fn read_u16_preserve_tail(data: &[u8], pos: &mut usize, current: u16) -> u16 {

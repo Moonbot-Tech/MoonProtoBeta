@@ -142,7 +142,7 @@ impl ProtocolCore<'_> {
             crate::transport::transport_unpack_with_mac(
                 &self.client.transport.mac_ctx,
                 datagram,
-                self.client.cfg.mask_ver.to_byte(),
+                self.client.cfg.transport_mode.to_byte(),
             ) {
             #[cfg(any(test, feature = "diagnostics"))]
             {
@@ -166,26 +166,52 @@ impl ProtocolCore<'_> {
             }
 
             let timestamp_ms = self.client.now_ms();
-            self.apply_recv_side_effects(recv_bytes, timestamp_ms);
-            let total_recv_after = self
-                .client
-                .metrics
-                .total_recv_shared
-                .fetch_add(recv_bytes, Ordering::Relaxed)
-                + recv_bytes;
+            if Command::from_byte(hdr.cmd) == Command::WantNewHello {
+                let total_recv_after = self
+                    .client
+                    .metrics
+                    .total_recv_shared
+                    .load(Ordering::Relaxed);
+                self.route_command(
+                    hdr.cmd,
+                    &payload,
+                    recv_bytes,
+                    total_recv_after,
+                    timestamp_ms,
+                    mode,
+                    &mut protocol_wait,
+                )
+            } else {
+                self.apply_recv_side_effects(recv_bytes, timestamp_ms);
+                let total_recv_after = self
+                    .client
+                    .metrics
+                    .total_recv_shared
+                    .fetch_add(recv_bytes, Ordering::Relaxed)
+                    + recv_bytes;
 
-            #[cfg(any(test, feature = "diagnostics"))]
-            {
-                if let Some(decision) = err_emu_drop_decision(hdr.cmd) {
-                    self.client
-                        .metrics
-                        .err_emu_diagnostics
-                        .lock()
-                        .unwrap()
-                        .record_packet(hdr.cmd, &payload, decision);
-                    if decision.dropped {
-                        Self::on_err_emu_drop(hdr.cmd, &payload);
-                        true
+                #[cfg(any(test, feature = "diagnostics"))]
+                {
+                    if let Some(decision) = err_emu_drop_decision(hdr.cmd) {
+                        self.client
+                            .metrics
+                            .err_emu_diagnostics
+                            .lock()
+                            .record_packet(hdr.cmd, &payload, decision);
+                        if decision.dropped {
+                            Self::on_err_emu_drop(hdr.cmd, &payload);
+                            true
+                        } else {
+                            self.route_command(
+                                hdr.cmd,
+                                &payload,
+                                recv_bytes,
+                                total_recv_after,
+                                timestamp_ms,
+                                mode,
+                                &mut protocol_wait,
+                            )
+                        }
                     } else {
                         self.route_command(
                             hdr.cmd,
@@ -197,7 +223,9 @@ impl ProtocolCore<'_> {
                             &mut protocol_wait,
                         )
                     }
-                } else {
+                }
+                #[cfg(not(any(test, feature = "diagnostics")))]
+                {
                     self.route_command(
                         hdr.cmd,
                         &payload,
@@ -208,18 +236,6 @@ impl ProtocolCore<'_> {
                         &mut protocol_wait,
                     )
                 }
-            }
-            #[cfg(not(any(test, feature = "diagnostics")))]
-            {
-                self.route_command(
-                    hdr.cmd,
-                    &payload,
-                    recv_bytes,
-                    total_recv_after,
-                    timestamp_ms,
-                    mode,
-                    &mut protocol_wait,
-                )
             }
         } else {
             if trace_io_enabled() {
@@ -265,6 +281,11 @@ impl ProtocolCore<'_> {
         mode: &mut RunMode<'_>,
         protocol_wait: &mut Duration,
     ) -> bool {
+        if Command::from_byte(raw_cmd) == Command::WantNewHello {
+            self.on_handshake_control(Command::WantNewHello, payload, recv_bytes, timestamp_ms);
+            return true;
+        }
+
         self.client
             .transport
             .recv_slicer
@@ -283,7 +304,12 @@ impl ProtocolCore<'_> {
                 self.on_new_ping(payload, recv_bytes, total_recv_after, timestamp_ms, mode);
             }
             Command::WrongHello | Command::WantNewHello => {
-                self.on_handshake_control(Command::from_byte(raw_cmd), recv_bytes, timestamp_ms);
+                self.on_handshake_control(
+                    Command::from_byte(raw_cmd),
+                    payload,
+                    recv_bytes,
+                    timestamp_ms,
+                );
             }
             Command::WhoAreYou => {
                 *protocol_wait += self.on_who_are_you(payload, recv_bytes, timestamp_ms);
@@ -332,7 +358,7 @@ impl ProtocolCore<'_> {
         apply_recv_effects_first: bool,
         mode: &mut RunMode<'_>,
     ) {
-        if Command::from_byte(raw_cmd) != Command::Grouped {
+        if Command::from_byte(raw_cmd & 0x7F) != Command::Grouped {
             self.dispatch_command(
                 raw_cmd,
                 payload,
@@ -342,6 +368,12 @@ impl ProtocolCore<'_> {
                 None,
                 mode,
             );
+            return;
+        }
+        if raw_cmd & COMPRESSED_FLAG != 0 {
+            if apply_recv_effects_first {
+                self.apply_recv_side_effects(recv_bytes, timestamp_ms);
+            }
             return;
         }
 
@@ -491,7 +523,6 @@ impl ProtocolCore<'_> {
                 .metrics
                 .err_emu_diagnostics
                 .lock()
-                .unwrap()
                 .record_sliced_complete(stats.datagram_num, stats.blocks_count, cmd, &payload);
         }
         if trace_io_enabled() {

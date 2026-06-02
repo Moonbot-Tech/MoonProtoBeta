@@ -1,8 +1,17 @@
 use super::*;
 use crate::state::history::DerivedDeltaSnapshot;
+use crate::time::SECONDS_PER_DAY;
 
 fn trade(time: f64, price: f32, qty: f32) -> TradeHistoryRow {
-    TradeHistoryRow { time, price, qty }
+    TradeHistoryRow {
+        time: mt(time),
+        price,
+        qty,
+    }
+}
+
+fn mt(days: f64) -> MoonTime {
+    crate::state::history::moon_time_from_delphi_days(days)
 }
 
 #[test]
@@ -168,10 +177,14 @@ fn registry_allocates_market_history_only_from_configured_scope() {
         &["BTCUSDT".to_string(), "ETHUSDT".to_string()],
         Some(&TradeStorageScope::All),
     );
-    registry
-        .get_mut("BTCUSDT")
-        .unwrap()
-        .append_last_price(100.0, 45_000.0, 99.0, 101.0, true, false);
+    registry.get_mut("BTCUSDT").unwrap().append_last_price(
+        100.0,
+        mt(45_000.0),
+        99.0,
+        101.0,
+        true,
+        false,
+    );
     registry
         .get_mut("ETHUSDT")
         .unwrap()
@@ -192,7 +205,7 @@ fn registry_allocates_market_history_only_from_configured_scope() {
         last_prices,
         vec![LastPricePoint {
             current: 100.0,
-            real_time: 45_000.0,
+            time: mt(45_000.0),
         }]
     );
 }
@@ -210,19 +223,19 @@ fn last_price_appends_only_delphi_history_price_markets() {
     });
 
     assert_eq!(
-        store.append_last_price(10.0, 45_000.0, 9.0, 11.0, false, false),
+        store.append_last_price(10.0, mt(45_000.0), 9.0, 11.0, false, false),
         None
     );
     assert_eq!(
-        store.append_last_price(0.0, 45_000.0, 9.0, 11.0, true, false),
+        store.append_last_price(0.0, mt(45_000.0), 9.0, 11.0, true, false),
         None
     );
     assert_eq!(
-        store.append_last_price(10.0, 45_000.0, 0.0, 0.0, true, false),
+        store.append_last_price(10.0, mt(45_000.0), 0.0, 0.0, true, false),
         None
     );
     assert_eq!(
-        store.append_last_price(10.0, 45_000.0, 9.0, 11.0, true, false),
+        store.append_last_price(10.0, mt(45_000.0), 9.0, 11.0, true, false),
         Some(0)
     );
 
@@ -232,7 +245,7 @@ fn last_price_appends_only_delphi_history_price_markets() {
         out,
         vec![LastPricePoint {
             current: 10.0,
-            real_time: 45_000.0
+            time: mt(45_000.0)
         }]
     );
 }
@@ -252,17 +265,17 @@ fn last_price_history_feeds_delphi_hourly_delta_windows() {
 
     store.append_last_price(
         100.0,
-        now - 50.0 / SECONDS_PER_DAY,
+        mt(now - 50.0 / SECONDS_PER_DAY),
         99.0,
         101.0,
         true,
         false,
     );
-    store.append_last_price(130.0, now - 14.0 / 1440.0, 129.0, 131.0, true, false);
-    store.append_last_price(170.0, now - 59.0 / 1440.0, 169.0, 171.0, true, false);
-    store.append_last_price(250.0, now - 60.0 / 1440.0, 249.0, 251.0, true, false);
+    store.append_last_price(130.0, mt(now - 14.0 / 1440.0), 129.0, 131.0, true, false);
+    store.append_last_price(170.0, mt(now - 59.0 / 1440.0), 169.0, 171.0, true, false);
+    store.append_last_price(250.0, mt(now - 60.0 / 1440.0), 249.0, 251.0, true, false);
 
-    store.refresh_derived_analytics(now);
+    store.refresh_derived_analytics(mt(now));
     let derived = store.derived_snapshot();
 
     assert!((derived.last_price_deltas.one_minute - 0.0).abs() < 1e-9);
@@ -320,7 +333,7 @@ fn futures_trades_append_directly_and_update_volumes() {
         ]
     );
 
-    let volumes = store.rolling_volumes_snapshot(sec(12.0));
+    let volumes = store.rolling_volumes_snapshot(mt(sec(12.0)));
     assert_eq!(volumes.five_minutes.buy_value, 520.0);
     assert_eq!(volumes.five_minutes.sell_value, 240.0);
     assert_eq!(volumes.five_minutes.trade_count, 4);
@@ -348,9 +361,9 @@ fn stream_append_helpers_share_delphi_packet_time_shift() {
     let (spot_time, spot_seq) =
         store.append_spot_stream_trade(base, -300, base - 10.0, 90.0, -1.0, &mut shift);
     assert_eq!(shift.shift_days(), Some(2.0 / 24.0));
-    assert_eq!(fut_time, base + 100.0 / 86_400_000.0 + 2.0 / 24.0);
-    assert_eq!(mm_time, base + 200.0 / 86_400_000.0 + 2.0 / 24.0);
-    assert_eq!(spot_time, base - 300.0 / 86_400_000.0 + 2.0 / 24.0);
+    assert_eq!(fut_time, mt(base + 100.0 / 86_400_000.0 + 2.0 / 24.0));
+    assert_eq!(mm_time, mt(base + 200.0 / 86_400_000.0 + 2.0 / 24.0));
+    assert_eq!(spot_time, mt(base - 300.0 / 86_400_000.0 + 2.0 / 24.0));
     assert_eq!(mm_seq, Some(0));
     assert_eq!(spot_seq, Some(0));
 
@@ -400,7 +413,7 @@ fn evicted_futures_compact_to_mini_candles() {
         store.append_futures_trade(trade(10.0 + i as f64 / 86_400.0, 100.0 + i as f32, 1.0));
     }
     assert_eq!(store.pending_evicted_futures_for_compaction(), 2);
-    assert_eq!(store.compact_evicted_futures(20.0), 1);
+    assert_eq!(store.compact_evicted_futures(mt(20.0)), 1);
 
     let mut out = Vec::new();
     store.readers().mini_candles.unwrap().copy_last(8, &mut out);
@@ -425,7 +438,7 @@ fn candles_snapshot_replaces_retained_5m_rows_and_feeds_deltas() {
     let now = 45_000.0;
     store.replace_candles_5m_from_snapshot(&[
         Candle5mRow {
-            time: now - 10.0 / 1440.0,
+            time: mt(now - 10.0 / 1440.0),
             low: 90.0,
             high: 110.0,
             close: 100.0,
@@ -433,7 +446,7 @@ fn candles_snapshot_replaces_retained_5m_rows_and_feeds_deltas() {
             volume: 1_000.0,
         },
         Candle5mRow {
-            time: now,
+            time: mt(now),
             low: 100.0,
             high: 120.0,
             close: 115.0,
@@ -465,7 +478,7 @@ fn candles_snapshot_replaces_retained_5m_rows_and_feeds_deltas() {
 
     // refresh with a time >= the trade (in prod `now` is always >= the time of the last trade),
     // otherwise the live candle (now+1s) would fall outside the delta window.
-    store.refresh_derived_analytics(now + 1.0 / 86_400.0);
+    store.refresh_derived_analytics(mt(now + 1.0 / 86_400.0));
     let derived = store.derived_snapshot();
     // The trade went into the live candle (Delphi `FCandle`), exposed separately from the sealed ring.
     let live = derived.current_candle.expect("live candle from trade");
@@ -492,7 +505,7 @@ fn futures_trades_roll_current_candle_after_five_minutes() {
     });
     let now = 45_000.0;
     store.replace_candles_5m_from_snapshot(&[Candle5mRow {
-        time: now,
+        time: mt(now),
         low: 100.0,
         high: 110.0,
         close: 105.0,
@@ -516,9 +529,9 @@ fn futures_trades_roll_current_candle_after_five_minutes() {
         1,
         "snapshot candle is sealed; live candle is separate, not in the ring"
     );
-    assert_eq!(candles[0].time, now);
+    assert_eq!(candles[0].time, mt(now));
     assert_eq!(candles[0].close, 105.0);
-    store.refresh_derived_analytics(t1);
+    store.refresh_derived_analytics(mt(t1));
     let live = store
         .derived_snapshot()
         .current_candle
@@ -541,15 +554,16 @@ fn futures_trades_roll_current_candle_after_five_minutes() {
         2,
         "first live candle is sealed and added to the ring"
     );
-    assert_eq!(candles[0].time, now);
+    assert_eq!(candles[0].time, mt(now));
     assert_eq!(
-        candles[1].time, t2,
+        candles[1].time,
+        mt(t2),
         "sealed candle is stamped with the seal time (end of period)"
     );
     assert_eq!(candles[1].open, 120.0);
     assert_eq!(candles[1].close, 120.0);
     assert_eq!(candles[1].volume, 240.0);
-    store.refresh_derived_analytics(t2);
+    store.refresh_derived_analytics(mt(t2));
     let live2 = store
         .derived_snapshot()
         .current_candle
@@ -571,7 +585,7 @@ fn retained_trades_update_current_candle_and_derived_volumes() {
     let now = 45_000.0;
     store.append_futures_trade(trade(now - 10.0 / 86_400.0, 100.0, 2.0));
     store.append_futures_trade(trade(now - 5.0 / 86_400.0, 110.0, -1.0));
-    store.refresh_derived_analytics(now);
+    store.refresh_derived_analytics(mt(now));
 
     let derived = store.derived_snapshot();
     assert_eq!(derived.trade_volumes.one_minute.buy_value, 200.0);
@@ -631,7 +645,7 @@ fn candle_long_delta_windows_match_delphi_trunc_hour_buckets() {
     });
     store.replace_candles_5m_from_snapshot(&[
         Candle5mRow {
-            time: now - 2.5 / 24.0,
+            time: mt(now - 2.5 / 24.0),
             low: 100.0,
             high: 130.0,
             close: 100.0,
@@ -639,7 +653,7 @@ fn candle_long_delta_windows_match_delphi_trunc_hour_buckets() {
             volume: 1.0,
         },
         Candle5mRow {
-            time: now - 3.0 / 24.0,
+            time: mt(now - 3.0 / 24.0),
             low: 100.0,
             high: 190.0,
             close: 100.0,
@@ -647,7 +661,7 @@ fn candle_long_delta_windows_match_delphi_trunc_hour_buckets() {
             volume: 8.0,
         },
         Candle5mRow {
-            time: now - 3.5 / 24.0,
+            time: mt(now - 3.5 / 24.0),
             low: 100.0,
             high: 140.0,
             close: 100.0,
@@ -655,7 +669,7 @@ fn candle_long_delta_windows_match_delphi_trunc_hour_buckets() {
             volume: 2.0,
         },
         Candle5mRow {
-            time: now - 24.5 / 24.0,
+            time: mt(now - 24.5 / 24.0),
             low: 100.0,
             high: 150.0,
             close: 100.0,
@@ -663,7 +677,7 @@ fn candle_long_delta_windows_match_delphi_trunc_hour_buckets() {
             volume: 4.0,
         },
         Candle5mRow {
-            time: now - 25.0 / 24.0,
+            time: mt(now - 25.0 / 24.0),
             low: 100.0,
             high: 220.0,
             close: 100.0,
@@ -672,7 +686,7 @@ fn candle_long_delta_windows_match_delphi_trunc_hour_buckets() {
         },
     ]);
 
-    store.refresh_derived_analytics(now);
+    store.refresh_derived_analytics(mt(now));
     let derived = store.derived_snapshot();
 
     assert!((derived.candle_deltas.two_hours - 30.0).abs() < 1e-9);
@@ -699,7 +713,7 @@ fn candle_windows_exclude_exact_old_boundary() {
     });
     store.replace_candles_5m_from_snapshot(&[
         Candle5mRow {
-            time: now - 15.0 / 1440.0,
+            time: mt(now - 15.0 / 1440.0),
             low: 100.0,
             high: 200.0,
             close: 100.0,
@@ -707,7 +721,7 @@ fn candle_windows_exclude_exact_old_boundary() {
             volume: 5.0,
         },
         Candle5mRow {
-            time: now - (15.0 * 60.0 - 1.0) / SECONDS_PER_DAY,
+            time: mt(now - (15.0 * 60.0 - 1.0) / SECONDS_PER_DAY),
             low: 100.0,
             high: 150.0,
             close: 100.0,
@@ -716,7 +730,7 @@ fn candle_windows_exclude_exact_old_boundary() {
         },
     ]);
 
-    store.refresh_derived_analytics(now);
+    store.refresh_derived_analytics(mt(now));
     let derived = store.derived_snapshot();
 
     assert!((derived.candle_deltas.fifteen_minutes - 50.0).abs() < 1e-9);

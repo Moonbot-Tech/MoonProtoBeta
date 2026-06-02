@@ -19,7 +19,8 @@
 //! - It does not encrypt payloads. AES-128-GCM lives above the transport layer in
 //!   `moonproto::crypto`.
 //! - It does not perform the handshake; see `moonproto::client`.
-//! - It does not parse application commands; see `moonproto::commands`.
+//! - It does not parse application commands; the public API exposes retained
+//!   state and typed events instead of raw command parsers.
 //!
 //! ## Example
 //!
@@ -53,9 +54,7 @@ mod outer_crypt;
 use log::warn;
 
 pub(crate) use extended::ClientTransportModeState;
-pub(crate) use header::{ClientMsgHeader, TRANSPORT_VER};
-// `ServerMsgHeader` is re-exported from the crate root (`moonproto::ServerMsgHeader`).
-pub use header::ServerMsgHeader;
+pub(crate) use header::{ClientMsgHeader, ServerMsgHeader, TRANSPORT_VER};
 pub(crate) use mac::MacContext;
 pub(crate) use outer_crypt::outer_light_crypt;
 

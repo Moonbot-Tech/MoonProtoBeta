@@ -23,10 +23,11 @@
 
 use std::collections::HashMap;
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::commands::engine_api::EngineResponse;
+use parking_lot::{Mutex, MutexGuard};
 
 /// Default request/response timeout — 12 seconds. Matches Delphi
 /// `TMoonProtoEngine.FTimeout = 12000` (MoonProtoEngine.pas) for `SendAndWait`.
@@ -45,7 +46,7 @@ struct PendingState {
 
 /// Registry of pending Engine API requests.
 ///
-/// Thread-safe (internally `Arc<Mutex>`). `Arc<ApiPending>` can be cloned and passed to any threads.
+/// Thread-safe (internally `Arc<parking_lot::Mutex>`). `Arc<ApiPending>` can be cloned and passed to any threads.
 ///
 pub(crate) struct ApiPending {
     state: Mutex<PendingState>,
@@ -58,22 +59,11 @@ impl ApiPending {
         Arc::new(Self::default())
     }
 
-    /// D-V2-02 fix: graceful recovery after Mutex poisoning. On a long-running client
-    /// it is impossible to guarantee that no thread panics while holding the lock — in that
-    /// case Rust marks the Mutex as poisoned and a plain `.lock().unwrap()` would
-    /// also panic in a cascade. We recover the guard from PoisonError — let the API
-    /// pending registry keep working (losing some in-flight responses is tolerable,
-    /// crashing the whole client is not).
+    /// L5: use a non-poisoning lock. A panic while holding this registry should
+    /// not cascade into every future Engine API dispatch path.
     #[inline]
-    fn lock_state(&self) -> std::sync::MutexGuard<'_, PendingState> {
-        match self.state.lock() {
-            Ok(g) => g,
-            Err(poisoned) => {
-                log::warn!(target: "moonproto::api_pending",
-                    "ApiPending mutex poisoned — recovering, in-flight requests may be lost");
-                poisoned.into_inner()
-            }
-        }
+    fn lock_state(&self) -> MutexGuard<'_, PendingState> {
+        self.state.lock()
     }
 
     #[inline]

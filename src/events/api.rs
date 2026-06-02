@@ -1,9 +1,10 @@
-//! Active `MPC_API` response dispatch.
+﻿//! Active `MPC_API` response dispatch.
 //!
 //! Mirrors Delphi `ProcessApiCommand`: unmatched/fire-and-forget responses apply
-//! active side effects first, then emit the original `EngineResponse`. Responses
-//! consumed by a Delphi-style pending caller are applied by that caller after
-//! `SendAndWait`/receiver completion.
+//! active side effects first. Diagnostics builds may also emit the original
+//! raw response; normal application code observes typed state/events instead.
+//! Responses consumed by a Delphi-style pending caller are applied by that
+//! caller after `SendAndWait`/receiver completion.
 
 use super::{copy_max_leverage_from_markets_list, Event, EventDispatcher};
 use crate::commands::engine_api::{
@@ -24,7 +25,7 @@ impl EventDispatcher {
     ) {
         match parse_engine_response(payload) {
             Some(resp) => self.process_api_command(resp, history_now_time_days, out),
-            None => out.push(Self::parse_failed(Command::API, payload)),
+            None => Self::push_parse_failed(out, Command::API, payload),
         }
     }
 
@@ -68,6 +69,7 @@ impl EventDispatcher {
                 _ => {}
             }
         }
+        #[cfg(any(test, feature = "diagnostics"))]
         out.push(Event::EngineResponse(resp));
     }
 

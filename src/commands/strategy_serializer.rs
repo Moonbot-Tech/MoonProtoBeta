@@ -85,6 +85,7 @@ mod types;
 mod writer;
 
 #[doc(hidden)]
+#[cfg(any(test, feature = "diagnostics"))]
 pub use self::reader::parse_strategy_batch;
 pub(crate) use self::reader::parse_strategy_batch_with_schema;
 #[cfg(test)]

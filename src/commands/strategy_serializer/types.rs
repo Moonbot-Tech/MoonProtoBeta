@@ -35,7 +35,13 @@ pub enum FieldValue {
 
 impl FieldValue {
     /// Zero value for one TypeID, used when `TID_ZERO_FLAG` is set.
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub fn zero(type_id: u8) -> Option<Self> {
+        Self::zero_for_type_id(type_id)
+    }
+
+    pub(crate) fn zero_for_type_id(type_id: u8) -> Option<Self> {
         Some(match type_id & 0x7F {
             TID_BOOL => FieldValue::Bool(false),
             TID_INT32 => FieldValue::Int32(0),
@@ -51,7 +57,13 @@ impl FieldValue {
         })
     }
 
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub fn type_id(&self) -> u8 {
+        self.type_id_inner()
+    }
+
+    pub(crate) fn type_id_inner(&self) -> u8 {
         match self {
             FieldValue::Bool(_) => TID_BOOL,
             FieldValue::Int32(_) => TID_INT32,
@@ -66,8 +78,14 @@ impl FieldValue {
         }
     }
 
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub fn matches_type_id(&self, type_id: u8) -> bool {
-        self.type_id() == (type_id & 0x7F)
+        self.matches_type_id_inner(type_id)
+    }
+
+    pub(crate) fn matches_type_id_inner(&self, type_id: u8) -> bool {
+        self.type_id_inner() == (type_id & 0x7F)
     }
 
     /// True when this value is equivalent to zero for its own TypeID.
@@ -87,14 +105,26 @@ impl FieldValue {
         }
     }
 
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub fn is_zero_for_type_id(&self, type_id: u8) -> bool {
-        self.matches_type_id(type_id) && self.is_zero()
+        self.is_zero_for_type_id_inner(type_id)
+    }
+
+    pub(crate) fn is_zero_for_type_id_inner(&self, type_id: u8) -> bool {
+        self.matches_type_id_inner(type_id) && self.is_zero()
     }
 
     /// Compare like Delphi `IsDefaultValue`: floats use `1e-10`, other types
     /// compare exactly, and both sides must match the given TypeID.
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub fn equals_delphi_value_for_type_id(&self, other: &Self, type_id: u8) -> bool {
-        if !self.matches_type_id(type_id) || !other.matches_type_id(type_id) {
+        self.equals_delphi_value_for_type_id_inner(other, type_id)
+    }
+
+    pub(crate) fn equals_delphi_value_for_type_id_inner(&self, other: &Self, type_id: u8) -> bool {
+        if !self.matches_type_id_inner(type_id) || !other.matches_type_id_inner(type_id) {
             return false;
         }
         match (type_id & 0x7F, self, other) {
@@ -125,7 +155,11 @@ pub struct StrategySnapshot {
     /// Unix epoch milliseconds, converted to Delphi time by the server.
     pub last_date: u64,
     pub checked: bool,
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub kind: u8,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) kind: u8,
     /// Folder path from `PathDict` by `PathID`; empty when `PathID` is out of range.
     ///
     /// `Arc<str>`: many strategies share the same folder path, so the reader
@@ -269,11 +303,36 @@ impl StrategyKind {
     pub const ALERTS: Self = Self(22);
     pub const WATCHER: Self = Self(23);
 
+    /// Build from the Delphi `TStrategyKind` ordinal exposed by
+    /// [`StrategySchemaKind`](crate::StrategySchemaKind).
+    pub const fn from_ordinal(value: u8) -> Self {
+        Self(value)
+    }
+
+    /// Delphi `TStrategyKind` ordinal.
+    pub const fn ordinal(self) -> u8 {
+        self.0
+    }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub const fn from_byte(value: u8) -> Self {
         Self(value)
     }
 
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) const fn from_byte(value: u8) -> Self {
+        Self(value)
+    }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub const fn to_byte(self) -> u8 {
+        self.0
+    }
+
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) const fn to_byte(self) -> u8 {
         self.0
     }
 }
@@ -290,6 +349,33 @@ pub enum StrategyActiveMode {
 }
 
 impl StrategySnapshot {
+    /// Build one local strategy snapshot for [`InitialStrategies`](crate::InitialStrategies)
+    /// or [`MoonStrategies::sync_local_strategies`](crate::MoonStrategies::sync_local_strategies).
+    ///
+    /// `kind` is typed so terminal code does not pass raw Delphi ordinals.
+    pub fn new<P>(
+        strategy_id: u64,
+        strategy_ver: i32,
+        last_date: u64,
+        checked: bool,
+        kind: StrategyKind,
+        path: P,
+        fields: StrategyFields,
+    ) -> Self
+    where
+        P: Into<Arc<str>>,
+    {
+        Self {
+            strategy_id,
+            strategy_ver,
+            last_date,
+            checked,
+            kind: kind.to_byte(),
+            path: path.into(),
+            fields,
+        }
+    }
+
     // parity: MoonBot Strategies.pas:TStrategy.StrategyKind
     pub fn kind(&self) -> StrategyKind {
         StrategyKind(self.kind)

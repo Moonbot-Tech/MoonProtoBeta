@@ -2,8 +2,8 @@
 //!
 //! Regular applications read live position, liquidation, leverage, and wallet
 //! values from retained Active Lib state. The parser/builder functions in this
-//! module are byte-exact protocol tools, kept public for advanced diagnostics
-//! and tests but hidden from the normal API guide surface.
+//! module are byte-exact protocol tools kept inside the crate for diagnostics
+//! and tests, not terminal-facing data models.
 use super::registry::read_string;
 use crate::commands::market::PositionType;
 use crate::commands::trade::OrderType;
@@ -13,7 +13,7 @@ use crate::commands::trade::OrderType;
 /// Normal chart/order UI should read the active values from `Market`; this row
 /// remains useful for account tables, diagnostics, and full balance snapshots.
 #[derive(Debug, Clone, Default)]
-pub struct BalanceItem {
+pub(crate) struct BalanceItem {
     pub market_name: String,
     pub balance_hash: u64,
 
@@ -48,20 +48,13 @@ pub struct BalanceItem {
     pub position_type: PositionType,
 }
 
-impl BalanceItem {
-    /// Delphi `TMarket.FTotalProfit = FTotalProfitB + FTotalProfitL + FTotalProfitS`.
-    pub fn total_profit(&self) -> f64 {
-        self.total_profit_b + self.total_profit_l + self.total_profit_s
-    }
-}
-
 /// Balance update payload.
 ///
 /// `cmd_id=2` has the same item layout as a full snapshot, but the Delphi
 /// client parses the object and then ignores it in `ProcessBalanceCommand`.
 #[doc(hidden)]
 #[derive(Debug, Clone)]
-pub struct BalanceUpdate {
+pub(crate) struct BalanceUpdate {
     pub cmd_id: u8, // 002=base ignored by client, 003=full, 004=incremental
     pub epoch: u16,
     pub global_changed: bool, // only for incremental (004)

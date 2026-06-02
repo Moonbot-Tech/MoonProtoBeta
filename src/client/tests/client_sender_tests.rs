@@ -49,7 +49,6 @@ fn take_send_items(q: &Arc<Mutex<SendLockState>>) -> Vec<SendItem> {
     let mut high = Vec::new();
     let mut low = Vec::new();
     q.lock()
-        .unwrap()
         .send_queues
         .take_into(&mut sliced, &mut high, &mut low);
     sliced.extend(high);
@@ -119,7 +118,7 @@ fn market_names_count(payload: &[u8]) -> Option<i32> {
 fn subscribe_orderbook_updates_registry_and_sends_wire_request() {
     let (sender, registry, send_q, _, _, _) = make_sender();
     sender.subscribe_orderbook("BTCUSDT");
-    assert!(registry.lock().unwrap().orderbook_subs.contains("BTCUSDT"));
+    assert!(registry.lock().orderbook_subs.contains("BTCUSDT"));
     let sent = take_send_items(&send_q);
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].cmd, Command::API.to_byte());
@@ -139,7 +138,7 @@ fn pre_init_sender_subscription_records_intent_without_wire() {
     sender.ui_mm_subscribe(false);
 
     {
-        let registry = registry.lock().unwrap();
+        let registry = registry.lock();
         assert!(registry.orderbook_subs.contains("BTCUSDT"));
         assert_eq!(
             registry.trades_sub,
@@ -153,13 +152,9 @@ fn pre_init_sender_subscription_records_intent_without_wire() {
 #[test]
 fn unsubscribe_orderbook_updates_registry_and_sends_wire_request() {
     let (sender, registry, send_q, _, _, _) = make_sender();
-    registry
-        .lock()
-        .unwrap()
-        .orderbook_subs
-        .insert("ETHUSDT".to_string());
+    registry.lock().orderbook_subs.insert("ETHUSDT".to_string());
     sender.unsubscribe_orderbook("ETHUSDT");
-    assert!(!registry.lock().unwrap().orderbook_subs.contains("ETHUSDT"));
+    assert!(!registry.lock().orderbook_subs.contains("ETHUSDT"));
     let sent = take_send_items(&send_q);
     assert_eq!(sent.len(), 1);
     assert_eq!(
@@ -172,7 +167,7 @@ fn unsubscribe_orderbook_updates_registry_and_sends_wire_request() {
 fn subscribe_orderbooks_sends_one_batched_wire_request() {
     let (sender, registry, send_q, _, _, _) = make_sender();
     sender.subscribe_orderbooks(["BTCUSDT", "ETHUSDT"]);
-    let registry = registry.lock().unwrap();
+    let registry = registry.lock();
     assert!(registry.orderbook_subs.contains("BTCUSDT"));
     assert!(registry.orderbook_subs.contains("ETHUSDT"));
     drop(registry);
@@ -189,11 +184,10 @@ fn unsubscribe_orderbooks_sends_one_batched_wire_request() {
     let (sender, registry, send_q, _, _, _) = make_sender();
     registry
         .lock()
-        .unwrap()
         .orderbook_subs
         .extend(["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
     sender.unsubscribe_orderbooks(["BTCUSDT", "ETHUSDT"]);
-    assert!(registry.lock().unwrap().orderbook_subs.is_empty());
+    assert!(registry.lock().orderbook_subs.is_empty());
     let sent = take_send_items(&send_q);
     assert_eq!(sent.len(), 1);
     assert_eq!(
@@ -205,13 +199,9 @@ fn unsubscribe_orderbooks_sends_one_batched_wire_request() {
 #[test]
 fn unsubscribe_all_orderbooks_clears_registry_and_sends_existing_names() {
     let (sender, registry, send_q, _, _, _) = make_sender();
-    registry
-        .lock()
-        .unwrap()
-        .orderbook_subs
-        .insert("BTCUSDT".to_string());
+    registry.lock().orderbook_subs.insert("BTCUSDT".to_string());
     sender.unsubscribe_all_orderbooks();
-    assert!(registry.lock().unwrap().orderbook_subs.is_empty());
+    assert!(registry.lock().orderbook_subs.is_empty());
     let sent = take_send_items(&send_q);
     assert_eq!(sent.len(), 1);
     assert_eq!(
@@ -226,7 +216,7 @@ fn subscribe_all_trades_carries_want_mm_flag() {
     let (sender, registry, send_q, _, _, _) = make_sender();
     sender.subscribe_all_trades(true);
     sender.subscribe_all_trades(false);
-    let registry = registry.lock().unwrap();
+    let registry = registry.lock();
     assert_eq!(
         registry.trades_sub,
         Some(TradesSubscription { want_mm: false })
@@ -243,9 +233,9 @@ fn subscribe_all_trades_carries_want_mm_flag() {
 #[test]
 fn unsubscribe_all_trades_clears_registry_and_sends_wire_request() {
     let (sender, registry, send_q, _, _, _) = make_sender();
-    registry.lock().unwrap().trades_sub = Some(TradesSubscription { want_mm: true });
+    registry.lock().trades_sub = Some(TradesSubscription { want_mm: true });
     sender.unsubscribe_all_trades();
-    assert!(registry.lock().unwrap().trades_sub.is_none());
+    assert!(registry.lock().trades_sub.is_none());
     let sent = take_send_items(&send_q);
     assert_eq!(sent.len(), 1);
     assert_eq!(
@@ -420,7 +410,7 @@ fn cloned_sender_updates_same_registry_and_send_queues() {
     let sender_b = sender_a.clone();
     sender_a.subscribe_orderbook("A");
     sender_b.subscribe_orderbook("B");
-    let registry = registry.lock().unwrap();
+    let registry = registry.lock();
     assert!(registry.orderbook_subs.contains("A"));
     assert!(registry.orderbook_subs.contains("B"));
     drop(registry);

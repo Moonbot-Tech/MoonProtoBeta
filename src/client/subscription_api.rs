@@ -1,3 +1,5 @@
+#[cfg(test)]
+use super::send_queue::UK_TURN_MM_DETECTION;
 use super::*;
 
 impl Client {
@@ -61,7 +63,7 @@ impl Client {
     /// library reconnects and restores subscriptions after the flag is cleared.
     #[doc(hidden)]
     #[cfg(any(test, feature = "diagnostics"))]
-    pub fn debug_set_outgoing_blackhole(&mut self, enabled: bool) {
+    pub(crate) fn debug_set_outgoing_blackhole(&mut self, enabled: bool) {
         self.metrics
             .debug_outgoing_blackhole
             .store(enabled, Ordering::Relaxed);
@@ -82,7 +84,7 @@ impl Client {
     /// callers may subscribe before `emk_GetMarketsList` has completed. The
     /// call is idempotent; futures and spot books are distinguished by incoming
     /// `book_kind`, not by the subscribe request.
-    pub fn subscribe_orderbook(&self, market_name: &str) {
+    pub(crate) fn subscribe_orderbook(&self, market_name: &str) {
         self.sender_internal().subscribe_orderbook(market_name);
     }
 
@@ -91,7 +93,7 @@ impl Client {
     /// Already remembered market names are ignored. Newly added names are sent
     /// through one `emk_SubscribeOrderBook` request, matching the server's
     /// batch-oriented `MarketNames` field.
-    pub fn subscribe_orderbooks<I, S>(&self, market_names: I)
+    pub(crate) fn subscribe_orderbooks<I, S>(&self, market_names: I)
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
@@ -102,12 +104,12 @@ impl Client {
     /// Unsubscribe from one market's orderbook stream.
     ///
     /// See [`Client::subscribe_orderbook`] for registry and reconnect behavior.
-    pub fn unsubscribe_orderbook(&self, market_name: &str) {
+    pub(crate) fn unsubscribe_orderbook(&self, market_name: &str) {
         self.sender_internal().unsubscribe_orderbook(market_name);
     }
 
     /// Unsubscribe from several orderbook streams in one registry-aware batch.
-    pub fn unsubscribe_orderbooks<I, S>(&self, market_names: I)
+    pub(crate) fn unsubscribe_orderbooks<I, S>(&self, market_names: I)
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
@@ -122,7 +124,7 @@ impl Client {
     /// remembered. Prefer this high-level method over raw Engine API calls; the
     /// raw call does not update the registry and reconnect would restore stale
     /// subscriptions.
-    pub fn unsubscribe_all_orderbooks(&self) {
+    pub(crate) fn unsubscribe_all_orderbooks(&self) {
         self.sender_internal().unsubscribe_all_orderbooks();
     }
 
@@ -132,7 +134,7 @@ impl Client {
     /// stored in the registry and restored automatically after reconnect once
     /// init has completed. Calling it again with a different `want_mm` updates
     /// the remembered intent and sends a fresh subscribe request.
-    pub fn subscribe_all_trades(&self, want_mm: bool) {
+    pub(crate) fn subscribe_all_trades(&self, want_mm: bool) {
         self.sender_internal().subscribe_all_trades(want_mm);
     }
 
@@ -140,7 +142,7 @@ impl Client {
     /// only for selected markets.
     ///
     /// Empty `market_names` means all markets.
-    pub fn subscribe_trades_for<I, S>(&self, want_mm: bool, market_names: I)
+    pub(crate) fn subscribe_trades_for<I, S>(&self, want_mm: bool, market_names: I)
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
@@ -150,7 +152,7 @@ impl Client {
     }
 
     /// Unsubscribe from the all-trades stream and remove the registry intent.
-    pub fn unsubscribe_all_trades(&self) {
+    pub(crate) fn unsubscribe_all_trades(&self) {
         self.sender_internal().unsubscribe_all_trades();
     }
 
@@ -166,7 +168,7 @@ impl Client {
     }
 
     pub(crate) fn apply_mm_orders_subscribe_intent(&mut self, subscribe: bool) {
-        let mut registry = self.subscriptions.subscription_registry.lock().unwrap();
+        let mut registry = self.subscriptions.subscription_registry.lock();
         registry.mm_orders_sub = Some(subscribe);
         self.refresh_subscription_summary(&registry);
     }
@@ -241,7 +243,7 @@ impl Client {
         delay_trades: bool,
     ) {
         let (trades_sub, mm_orders_sub, orderbook_subs) = {
-            let registry = self.subscriptions.subscription_registry.lock().unwrap();
+            let registry = self.subscriptions.subscription_registry.lock();
             (
                 registry.trades_sub,
                 registry.mm_orders_sub,
@@ -275,13 +277,13 @@ impl Client {
     }
 
     fn registry_trades_want_mm(&self) -> Option<bool> {
-        let registry = self.subscriptions.subscription_registry.lock().unwrap();
+        let registry = self.subscriptions.subscription_registry.lock();
         let sub = registry.trades_sub?;
         Some(sub.want_mm)
     }
 
     fn registry_trades_mm_orders_intent(&self) -> Option<bool> {
-        let registry = self.subscriptions.subscription_registry.lock().unwrap();
+        let registry = self.subscriptions.subscription_registry.lock();
         registry.mm_orders_sub
     }
 
@@ -396,7 +398,7 @@ impl Client {
             return false;
         }
         let orderbook_subs = {
-            let registry = self.subscriptions.subscription_registry.lock().unwrap();
+            let registry = self.subscriptions.subscription_registry.lock();
             registry.orderbook_subs.iter().cloned().collect::<Vec<_>>()
         };
         if orderbook_subs.is_empty() {
@@ -454,7 +456,7 @@ impl Client {
 
     pub(crate) fn restore_orderbook_subscriptions_from_registry(&mut self) {
         let orderbook_subs = {
-            let registry = self.subscriptions.subscription_registry.lock().unwrap();
+            let registry = self.subscriptions.subscription_registry.lock();
             registry.orderbook_subs.iter().cloned().collect::<Vec<_>>()
         };
         self.restore_orderbook_subscriptions_as_reconnect_batch(orderbook_subs, self.now_ms());
@@ -471,7 +473,7 @@ impl Client {
         }
 
         let (trades_sub, orderbook_subs) = {
-            let registry = self.subscriptions.subscription_registry.lock().unwrap();
+            let registry = self.subscriptions.subscription_registry.lock();
             (
                 registry.trades_sub,
                 registry.orderbook_subs.iter().cloned().collect::<Vec<_>>(),
@@ -483,7 +485,7 @@ impl Client {
             self.send_api_request(&crate::commands::engine_request::subscribe_all_trades(
                 want_mm,
             ));
-            let mut registry = self.subscriptions.subscription_registry.lock().unwrap();
+            let mut registry = self.subscriptions.subscription_registry.lock();
             registry.mm_orders_sub = Some(want_mm);
         }
 

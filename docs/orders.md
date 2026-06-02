@@ -92,20 +92,20 @@ them to build the correct wire header.
 
 `buy_order` and `sell_order` contain exchange-side order values such as
 `actual_price`, `quantity`, `quantity_remaining`, `mean_price`, `leverage`, and
-open/close/create times. The local `buy_price` and `sell_price` fields are the
-desired replace prices tracked by the active client, not exchange execution
-prices.
+open/close/create times. `order_type` and `sub_type` are typed values; use
+their `name()` helpers for labels. The local `buy_price` and `sell_price`
+fields are the desired replace prices tracked by the active client, not
+exchange execution prices.
 
-Order timestamps are Delphi `TDateTime` values on the wire. Use
-`open_time_delphi()`, `close_time_delphi()`, and `create_time_delphi()` on
-`OrderCompact` instead of interpreting raw `f64` fields directly.
+Order timestamps are Delphi `TDateTime` values on the wire, but raw time fields
+are not the normal terminal API. Use `open_time()`, `close_time()`, and
+`create_time()` on `OrderCompact`.
 For exchange-order flags, use `is_opened()`, `is_closed()`, `canceled()`, and
-`is_short()` on `OrderCompact`; the underlying packed boolean bytes are a wire
-detail.
+`is_short()` on `OrderCompact`; the underlying packed boolean bytes and
+packed-record byte IO are wire details kept inside Active Lib/tests.
 
 `sell_reason` is a typed `SellReason` value. Use
-`order.sell_reason.description()` for a Delphi-compatible UI label, and use
-`to_byte()` only in low-level protocol diagnostics.
+`order.sell_reason.description()` for a Delphi-compatible UI label.
 
 Field groups for terminal UI:
 
@@ -142,9 +142,8 @@ impl OrderWorkerStatus {
 ```
 
 `OrderWorkerStatus::is_terminal()` returns true for final states. Unknown future
-status bytes are preserved instead of being rejected. Raw
-`OrderWorkerStatus::from_byte(raw)` / `to_byte()` exist for protocol tools, not
-for normal terminal UI.
+status bytes are preserved instead of being rejected; normal terminal UI uses
+the typed constants, `name()`, and `is_terminal()`.
 
 ## Actions
 
@@ -156,8 +155,8 @@ use moonproto::{StopSettings, VStopParams};
 let Some(snapshot) = client.snapshot() else { return; };
 let Some(order) = snapshot.orders().get(ui_state.selected_order_uid()) else { return; };
 let stops = StopSettings::disabled()
-    .with_stop_loss(true, false, 2.5, 0.1)
-    .with_take_profit(true, 50_500.0);
+    .with_stop_loss_percent(2.5, 0.1)
+    .with_take_profit_price(50_500.0);
 
 client.orders().move_order(order, new_price)?;
 client.orders().cancel(order)?;
@@ -195,7 +194,6 @@ pub enum OrderEvent {
     VStopChanged(u64),
     StopsChanged(u64),
     Snapshot,
-    Ignored { uid: u64, reason: ApplyResult },
 }
 ```
 
@@ -203,18 +201,18 @@ pub enum OrderEvent {
 `removed_uid()` returns UIDs for removed rows. `Snapshot` means a full order
 snapshot was applied and the UI should reconcile the whole list.
 
-`Ignored` is mainly useful for direct low-level state tests. The active runtime
-does not emit user-visible ignored events for client-originated raw commands.
+Low-level ignored/not-applicable telemetry is available only in
+`test`/`diagnostics` builds. Normal terminal code should redraw from retained
+state instead of branching on internal apply-result reasons.
 
 ## Trace Lines
 
-Server trace points are retained in two forms:
+Server trace points are applied into `buy_trace_line` and `sell_trace_line`.
+These fields are the chart-ready read model; the public order state does not
+expose a raw inbound packet history. Long trace lines are shrunk with the same
+800-line policy as the Delphi chart object.
 
-`buy_trace_line` and `sell_trace_line` are the chart-ready read model. The raw
-inbound trace packet log is retained for diagnostics but is not the normal chart
-API.
-
-For chart timestamps, use `OrderTraceChartPoint::time_delphi()`.
+For chart timestamps, use `OrderTraceChartPoint::time()` or `unix_millis()`.
 
 ## Lifecycle Notes
 
@@ -229,6 +227,6 @@ can still attach to the order, matching the Delphi client behavior.
 
 ## Protocol Data
 
-The internal `commands::trade` wire model and `Orders::apply` exist for tests
-and packet replay. Regular applications should use `MoonClient`, snapshots,
-events, and the `client.orders()` / `client.trade()` handles.
+The crate-internal order wire model and `Orders::apply` path exist for tests and
+packet replay. Regular applications should use `MoonClient`, snapshots, events,
+and the `client.orders()` / `client.trade()` handles.

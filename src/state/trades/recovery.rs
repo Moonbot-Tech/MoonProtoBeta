@@ -9,7 +9,7 @@ impl TradesState {
     ///
     /// The standard `tick` stays compatibility-oriented and returns only resend
     /// payloads.
-    pub fn tick_with_events(
+    pub(crate) fn tick_with_events(
         &mut self,
         rtt_ms: i64,
         now_ms: i64,
@@ -30,7 +30,8 @@ impl TradesState {
     /// Returns `Some(payload)` when the caller should send `TradesResend`.
     /// `rtt_ms` is the current round-trip delay in milliseconds.
     /// Delphi `CheckMissingTradesPackets` MoonProtoEngine.pas:1483-1549.
-    pub fn tick(&mut self, rtt_ms: i64, now_ms: i64) -> Vec<Vec<u8>> {
+    #[cfg(test)]
+    pub(crate) fn tick(&mut self, rtt_ms: i64, now_ms: i64) -> Vec<Vec<u8>> {
         let mut events: Vec<TradesEvent> = Vec::new();
         self.tick_impl(rtt_ms, now_ms, &mut events)
     }
@@ -41,6 +42,9 @@ impl TradesState {
         now_ms: i64,
         events: &mut Vec<TradesEvent>,
     ) -> Vec<Vec<u8>> {
+        #[cfg(not(any(test, feature = "diagnostics")))]
+        let _ = events;
+
         // Delphi caller:
         // `If (NowTimeX - LastCheckMissingTime) > 100/MSecsPerDay then begin
         //    CheckMissingTradesPackets;
@@ -70,6 +74,7 @@ impl TradesState {
                 .min(1800.0);
 
             if all_recvd {
+                #[cfg(any(test, feature = "diagnostics"))]
                 events.push(TradesEvent::BucketClosed {
                     start: b.start_num,
                     end: b.end_num,
@@ -83,6 +88,7 @@ impl TradesState {
 
             if b.retry_count >= MAX_RETRY_COUNT {
                 if ((now_ms - b.last_retry_ms).abs() as f64) > path_delay_ms {
+                    #[cfg(any(test, feature = "diagnostics"))]
                     events.push(TradesEvent::BucketClosed {
                         start: b.start_num,
                         end: b.end_num,
@@ -126,6 +132,7 @@ impl TradesState {
         if packet_nums.is_empty() {
             return Vec::new();
         }
+        #[cfg(any(test, feature = "diagnostics"))]
         events.push(TradesEvent::ResendRequested {
             packet_nums: packet_nums.clone(),
         });

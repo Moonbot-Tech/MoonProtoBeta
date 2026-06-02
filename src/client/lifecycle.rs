@@ -1,4 +1,4 @@
-//! Lifecycle callbacks and Delphi `ServerUpdateSent` marker.
+﻿//! Lifecycle callbacks and Delphi `ServerUpdateSent` marker.
 
 use super::*;
 
@@ -45,17 +45,18 @@ impl Client {
     ///
     /// During `run*` calls the callback is queued outside the protocol writer
     /// tick, matching Delphi `TThread.Queue` for status notifications.
-    pub fn on_lifecycle(&mut self, cb: LifecycleFn) {
+    #[cfg(test)]
+    pub(crate) fn on_lifecycle(&mut self, cb: LifecycleFn) {
         self.lifecycle.lifecycle_cb = Some(cb);
     }
 
     pub(super) fn set_lifecycle_event_sender(&self, tx: Option<mpsc::Sender<LifecycleEvent>>) {
-        *self.lifecycle.lifecycle_app_tx.lock().unwrap() = tx;
+        *self.lifecycle.lifecycle_app_tx.lock() = tx;
     }
 
     #[cfg(test)]
     pub(super) fn lifecycle_event_sender_installed(&self) -> bool {
-        self.lifecycle.lifecycle_app_tx.lock().unwrap().is_some()
+        self.lifecycle.lifecycle_app_tx.lock().is_some()
     }
 
     /// Mark Delphi `ServerUpdateSent`.
@@ -65,14 +66,15 @@ impl Client {
     /// automatically. Use it only when sending the same raw UI commands through
     /// lower-level APIs: the next Init pass consumes the flag and runs
     /// the Delphi BaseCheck retry path.
-    pub fn mark_server_update_sent(&self) {
+    pub(crate) fn mark_server_update_sent(&self) {
         self.refresh_clocks
             .server_update_sent
             .store(true, Ordering::Relaxed);
     }
 
     /// Whether a Delphi-style server update marker is pending.
-    pub fn server_update_sent(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn server_update_sent(&self) -> bool {
         self.refresh_clocks
             .server_update_sent
             .load(Ordering::Relaxed)
@@ -87,7 +89,7 @@ impl Client {
     /// Internal hook: invokes the callback on a state transition.
     /// Must be called wherever `self.auth_status` or `self.need_connect` changes.
     pub(super) fn fire_lifecycle(&mut self, ev: LifecycleEvent) {
-        let tx = self.lifecycle.lifecycle_app_tx.lock().unwrap().clone();
+        let tx = self.lifecycle.lifecycle_app_tx.lock().clone();
         if let Some(tx) = tx {
             let _ = tx.send(ev);
             return;

@@ -28,6 +28,7 @@ zerocopy = { version = "0.8.48", features = ["derive"] }
 polling = "3.11.0"
 parking_lot = "0.12"
 crc32c = "0.6"
+zeroize = "1.8"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

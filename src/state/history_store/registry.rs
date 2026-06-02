@@ -6,7 +6,7 @@ use std::sync::Arc;
 use super::*;
 
 #[derive(Default)]
-pub struct MarketHistoryRegistry {
+pub(crate) struct MarketHistoryRegistry {
     default_config: MarketHistoryConfig,
     eps_profile: crate::state::eps::EpsProfile,
     stores: HashMap<SharedMarketName, MarketHistoryStore>,
@@ -14,7 +14,7 @@ pub struct MarketHistoryRegistry {
 }
 
 impl MarketHistoryRegistry {
-    pub fn new(default_config: MarketHistoryConfig) -> Self {
+    pub(crate) fn new(default_config: MarketHistoryConfig) -> Self {
         Self {
             default_config,
             eps_profile: crate::state::eps::EpsProfile::default(),
@@ -33,23 +33,27 @@ impl MarketHistoryRegistry {
         }
     }
 
-    pub fn len(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
         self.stores.len()
     }
 
-    pub fn is_empty(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
         self.stores.is_empty()
     }
 
-    pub fn contains_market(&self, market_name: &str) -> bool {
+    #[cfg(test)]
+    pub(crate) fn contains_market(&self, market_name: &str) -> bool {
         self.stores.contains_key(market_name)
     }
 
-    pub fn get(&self, market_name: &str) -> Option<&MarketHistoryStore> {
+    #[cfg(test)]
+    pub(crate) fn get(&self, market_name: &str) -> Option<&MarketHistoryStore> {
         self.stores.get(market_name)
     }
 
-    pub fn get_mut(&mut self, market_name: &str) -> Option<&mut MarketHistoryStore> {
+    pub(crate) fn get_mut(&mut self, market_name: &str) -> Option<&mut MarketHistoryStore> {
         self.stores.get_mut(market_name)
     }
 
@@ -73,7 +77,8 @@ impl MarketHistoryRegistry {
         })
     }
 
-    pub fn configure_markets(
+    #[cfg(test)]
+    pub(crate) fn configure_markets(
         &mut self,
         market_names: &[String],
         scope: Option<&TradeStorageScope>,
@@ -84,7 +89,7 @@ impl MarketHistoryRegistry {
         )
     }
 
-    pub fn configure_market_index_slots<S>(
+    pub(crate) fn configure_market_index_slots<S>(
         &mut self,
         market_slots: &[Option<S>],
         scope: Option<&TradeStorageScope>,
@@ -139,12 +144,14 @@ impl MarketHistoryRegistry {
         self.stores.len()
     }
 
-    pub fn readers(&self, market_name: &str) -> Option<MarketHistoryReaders> {
+    #[cfg(test)]
+    pub(crate) fn readers(&self, market_name: &str) -> Option<MarketHistoryReaders> {
         self.stores
             .get(market_name)
             .map(MarketHistoryStore::readers)
     }
 
+    #[cfg(test)]
     pub(crate) fn read_handle(&self, market_name: &str) -> Option<MarketHistoryReadHandle> {
         self.stores
             .get(market_name)
@@ -159,14 +166,14 @@ impl MarketHistoryRegistry {
     }
 
     // parity: MoonBot MarketsU.pas:TMarket.ResizeOrdersHistory
-    pub(crate) fn compact_evicted_futures(&mut self, now_time: f64) -> usize {
+    pub(crate) fn compact_evicted_futures(&mut self, now_time: MoonTime) -> usize {
         self.stores
             .values_mut()
             .map(|store| store.compact_evicted_futures(now_time))
             .sum()
     }
 
-    pub fn refresh_derived_analytics(&mut self, now_time: f64) {
+    pub(crate) fn refresh_derived_analytics(&mut self, now_time: MoonTime) {
         for store in self.stores.values_mut() {
             store.refresh_derived_analytics(now_time);
         }

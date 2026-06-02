@@ -47,7 +47,7 @@ fn main() {
             snapshot.markets().market_count(),
             snapshot.orders().len(),
             snapshot.balances().global().total_pnl,
-            snapshot.strategy_snapshot_vec().len()
+            snapshot.strategy_snapshots().count()
         );
     }
 
@@ -103,10 +103,10 @@ fn main() {
                     if let Some(snapshot) = client.snapshot() {
                         if let Some(settings) = &snapshot.settings().client_settings {
                             println!(
-                                "[settings] uid={} manual_strategy={} stop_market={}",
-                                settings.uid,
+                                "[settings] manual_strategy={} stop_market={} take_profit_percent={}",
                                 settings.use_manual_strategy,
-                                settings.use_stop_market
+                                settings.use_stop_market,
+                                settings.effective_take_profit_percent()
                             );
                         }
                     }

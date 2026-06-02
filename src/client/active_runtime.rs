@@ -4,7 +4,10 @@
 //! and stop/drop it explicitly.
 
 use super::*;
-use std::sync::RwLock;
+use parking_lot::{MutexGuard, RwLock, RwLockReadGuard};
+use std::any::Any;
+use std::collections::VecDeque;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
 mod commands;
 mod handles;
@@ -120,48 +123,43 @@ impl MoonClient {
         let (lifecycle_tx, lifecycle_rx) = mpsc::channel();
         let snapshot = Arc::new(RwLock::new(None));
         let runtime_snapshot = Arc::clone(&snapshot);
-        let (diagnostics_tx, diagnostics_rx) = mpsc::channel();
+        let shared_state = ClientSharedState::new();
         let lifecycle_sink = event_sink.clone();
         let lifecycle_join = thread::spawn(move || {
             while let Ok(event) = lifecycle_rx.recv() {
-                lifecycle_sink.emit_lifecycle(event);
+                if let Err(payload) =
+                    catch_unwind(AssertUnwindSafe(|| lifecycle_sink.emit_lifecycle(event)))
+                {
+                    log::error!(
+                        target: "moonproto::runtime",
+                        "moonproto-lifecycle-dispatcher panicked: {}",
+                        panic_payload_message(payload.as_ref())
+                    );
+                }
             }
         });
 
+        let thread_shared_state = shared_state.clone();
         let join = thread::spawn(move || {
-            let market_history_sizing = cfg.market_history;
-            let mut client = Client::new(cfg);
-            #[cfg(any(test, feature = "diagnostics"))]
-            let _ = diagnostics_tx.send((
-                client.err_emu_diagnostics_handle(),
-                Arc::clone(&client.metrics.protocol_metrics),
-                Arc::clone(&client.subscriptions.subscription_registry),
-            ));
-            #[cfg(not(any(test, feature = "diagnostics")))]
-            let _ = diagnostics_tx.send(Arc::clone(&client.subscriptions.subscription_registry));
-            client.set_runtime_shutdown_flag(runtime_shutdown);
-            client.set_lifecycle_event_sender(Some(lifecycle_tx));
-            let mut dispatcher = crate::events::EventDispatcher::new();
-            dispatcher.set_market_history_sizing(market_history_sizing);
-
-            runtime_loop(
-                client,
-                dispatcher,
-                rx,
+            supervise_runtime_loop(
+                cfg,
+                connect,
                 event_sink,
                 runtime_snapshot,
-                connect,
+                rx,
+                lifecycle_tx,
+                runtime_shutdown,
                 ready_tx,
+                thread_shared_state,
             );
         });
         #[cfg(any(test, feature = "diagnostics"))]
-        let (err_emu_diagnostics, protocol_metrics, subscription_registry) = diagnostics_rx
-            .recv()
-            .map_err(|_| MoonClientError::RuntimeStopped)?;
+        let err_emu_diagnostics = Arc::clone(&shared_state.err_emu_diagnostics);
         #[cfg(not(any(test, feature = "diagnostics")))]
-        let subscription_registry = diagnostics_rx
-            .recv()
-            .map_err(|_| MoonClientError::RuntimeStopped)?;
+        let _ = &shared_state;
+        #[cfg(any(test, feature = "diagnostics"))]
+        let protocol_metrics = Arc::clone(&shared_state.protocol_metrics);
+        let subscription_registry = Arc::clone(&shared_state.subscription_registry);
 
         Ok(Self {
             tx,
@@ -178,12 +176,15 @@ impl MoonClient {
         })
     }
 
+    fn runtime_restart_delay(panic_count: u32) -> Duration {
+        let capped = panic_count.min(5);
+        Duration::from_millis(100 * (1_u64 << capped))
+    }
+
     /// Latest immutable read-model snapshot, cheap to clone and safe to keep in
     /// UI state.
     pub fn snapshot(&self) -> Option<Arc<crate::events::MoonStateSnapshot>> {
-        self.snapshot
-            .read()
-            .unwrap()
+        read_snapshot_lock(&self.snapshot)
             .as_ref()
             .map(MoonClientSnapshot::state_arc)
     }
@@ -234,10 +235,7 @@ impl MoonClient {
     /// maintains and replays across reconnect — so it stays correct even after a
     /// link loss restored the session automatically.
     pub fn active_subscriptions(&self) -> crate::client::ActiveSubscriptions {
-        self.subscription_registry
-            .lock()
-            .unwrap()
-            .active_subscriptions()
+        self.subscription_registry.lock().active_subscriptions()
     }
 
     /// Latest immutable read-model snapshot with a monotonic runtime-local
@@ -247,14 +245,13 @@ impl MoonClient {
     /// revision in your view model and skip expensive redraw preparation when
     /// it has not changed.
     pub fn snapshot_versioned(&self) -> Option<MoonClientSnapshot> {
-        self.snapshot.read().unwrap().clone()
+        read_snapshot_lock(&self.snapshot).clone()
     }
 
     /// Revision of the latest published snapshot.
     pub fn snapshot_revision(&self) -> Option<u64> {
         self.snapshot
             .read()
-            .unwrap()
             .as_ref()
             .map(MoonClientSnapshot::revision)
     }
@@ -270,10 +267,7 @@ impl MoonClient {
     #[doc(hidden)]
     pub fn err_emu_diagnostics_snapshot(&self) -> crate::client::ErrEmuDiagnostics {
         let configured_rate = ERR_EMU_RATE.load(Ordering::Relaxed);
-        self.err_emu_diagnostics
-            .lock()
-            .unwrap()
-            .snapshot(configured_rate)
+        self.err_emu_diagnostics.lock().snapshot(configured_rate)
     }
 
     /// Snapshot protocol/runtime CPU counters for tests and diagnostics.
@@ -660,7 +654,8 @@ impl MoonClient {
         let ticket = EngineActionTicket {
             kind: kind.clone(),
             request_uid: engine_request_uid(&payload),
-            method: engine_request_method(&payload).unwrap_or(crate::commands::EngineMethod::None),
+            method: engine_request_method(&payload)
+                .unwrap_or(crate::commands::engine_api::EngineMethod::None),
         };
         self.send_no_reply(RuntimeCommand::EngineAction {
             kind,
@@ -847,10 +842,10 @@ impl MoonClient {
 
     /// Wait until the runtime thread exits.
     pub fn wait_finished(&self) -> Result<(), MoonClientError> {
-        if let Some(join) = self.join.lock().unwrap().take() {
+        if let Some(join) = lock_runtime_mutex(&self.join, "runtime join").take() {
             join.join().map_err(|_| MoonClientError::RuntimeStopped)?;
         }
-        if let Some(join) = self.lifecycle_join.lock().unwrap().take() {
+        if let Some(join) = lock_runtime_mutex(&self.lifecycle_join, "lifecycle join").take() {
             join.join().map_err(|_| MoonClientError::RuntimeStopped)?;
         }
         Ok(())
@@ -863,14 +858,89 @@ impl MoonClient {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn supervise_runtime_loop(
+    cfg: ClientConfig,
+    connect: ConnectConfig,
+    event_sink: MoonEventSink,
+    snapshot: Arc<RwLock<Option<MoonClientSnapshot>>>,
+    rx: mpsc::Receiver<RuntimeCommand>,
+    lifecycle_tx: mpsc::Sender<LifecycleEvent>,
+    runtime_shutdown: Arc<AtomicBool>,
+    ready_tx: Option<mpsc::Sender<Result<(), ConnectError>>>,
+    shared_state: ClientSharedState,
+) {
+    let market_history_sizing = cfg.market_history;
+    let mut panic_count = 0_u32;
+    let mut deferred_commands = VecDeque::new();
+
+    while !runtime_shutdown.load(Ordering::Relaxed) {
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let mut client = Client::new_with_shared(cfg.clone(), shared_state.clone());
+            client.set_runtime_shutdown_flag(Arc::clone(&runtime_shutdown));
+            client.set_lifecycle_event_sender(Some(lifecycle_tx.clone()));
+            let mut dispatcher = crate::events::EventDispatcher::new();
+            dispatcher.set_market_history_sizing(market_history_sizing);
+
+            runtime_loop(
+                client,
+                dispatcher,
+                &rx,
+                event_sink.clone(),
+                Arc::clone(&snapshot),
+                connect.clone(),
+                ready_tx.clone(),
+                &mut deferred_commands,
+            );
+        }));
+
+        match result {
+            Ok(()) => break,
+            Err(payload) => {
+                panic_count = panic_count.saturating_add(1);
+                let message = panic_payload_message(payload.as_ref());
+                log::error!(
+                    target: "moonproto::runtime",
+                    "moonproto-runtime panicked; rebuilding protocol owner and reconnecting: {message}"
+                );
+                if runtime_shutdown.load(Ordering::Relaxed) {
+                    break;
+                }
+                let _ = lifecycle_tx.send(LifecycleEvent::Reconnecting);
+                thread::sleep(MoonClient::runtime_restart_delay(panic_count));
+            }
+        }
+    }
+}
+
+fn panic_payload_message(payload: &(dyn Any + Send)) -> String {
+    if let Some(value) = payload.downcast_ref::<&'static str>() {
+        (*value).to_string()
+    } else if let Some(value) = payload.downcast_ref::<String>() {
+        value.clone()
+    } else {
+        "non-string panic payload".to_string()
+    }
+}
+
+fn lock_runtime_mutex<'a, T>(mutex: &'a Mutex<T>, _name: &'static str) -> MutexGuard<'a, T> {
+    mutex.lock()
+}
+
+fn read_snapshot_lock(
+    lock: &RwLock<Option<MoonClientSnapshot>>,
+) -> RwLockReadGuard<'_, Option<MoonClientSnapshot>> {
+    lock.read()
+}
+
 impl Drop for MoonClient {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
         let _ = self.tx.send(RuntimeCommand::Stop);
-        if let Some(join) = self.join.get_mut().unwrap().take() {
+        if let Some(join) = self.join.get_mut().take() {
             let _ = join.join();
         }
-        if let Some(join) = self.lifecycle_join.get_mut().unwrap().take() {
+        if let Some(join) = self.lifecycle_join.get_mut().take() {
             let _ = join.join();
         }
     }
@@ -928,7 +998,7 @@ mod tests {
         let tx = Arc::new(Mutex::new(tx));
         let sink = MoonEventSink::callback(move |event| {
             if let MoonClientEvent::Lifecycle(event) = event {
-                let _ = tx.lock().unwrap().send(event);
+                let _ = tx.lock().send(event);
             }
         });
 

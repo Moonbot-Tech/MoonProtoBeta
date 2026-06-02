@@ -313,7 +313,7 @@ fn ui_fixed_scalar_commands_use_zero_tail() {
     }
 
     match UICommand::parse(&header_bytes(CMD_RESET_PROFIT, 5)).unwrap() {
-        UICommand::ResetProfit(r) => assert_eq!(r.reset_kind, 0),
+        UICommand::ResetProfit(r) => assert_eq!(r.kind, ResetProfitKind::CurrentProfit),
         _ => panic!("wrong variant"),
     }
 
@@ -380,7 +380,7 @@ fn word_count_builders_write_only_declared_wrapped_count() {
 fn reset_profit_roundtrip() {
     let raw = build_reset_profit(8, 1);
     match UICommand::parse(&raw).unwrap() {
-        UICommand::ResetProfit(r) => assert_eq!(r.reset_kind, 1),
+        UICommand::ResetProfit(r) => assert_eq!(r.kind, ResetProfitKind::AllProfit),
         _ => panic!("wrong variant"),
     }
 }
@@ -595,6 +595,16 @@ fn client_settings_ui_helpers_match_delphi_meaning() {
     assert_eq!(entries[0].remaining_hours(), 12.0);
     assert_eq!(entries[1].symbol, "SHIB");
     assert_eq!(entries[1].remaining_hours(), 6.0);
+
+    settings.set_temp_blacklist_entries([("SOL", 1.0), ("PEPE", 0.125)]);
+    assert_eq!(
+        settings.temp_bl_symbols,
+        vec!["SOL".to_string(), "PEPE".to_string()]
+    );
+    assert_eq!(settings.temp_bl_times, [1.0, 0.125]);
+    let entries: Vec<_> = settings.temp_blacklist_entries().collect();
+    assert_eq!(entries[0].remaining_hours(), 24.0);
+    assert_eq!(entries[1].remaining_hours(), 3.0);
 }
 
 #[test]
@@ -667,9 +677,9 @@ fn client_settings_autostart2_helpers_preserve_reserved_tail() {
 
     settings.set_auto_start_config2(AutoStartConfig2 {
         restart_on_market: true,
-        btc_higher_then: 1.25,
-        btc_lower_then: -2.5,
-        market_higher_then: 3.75,
+        btc_higher_than: 1.25,
+        btc_lower_than: -2.5,
+        market_higher_than: 3.75,
         show_old_listing: true,
         reset_session: true,
         max_session_cap: 1000,
@@ -694,9 +704,9 @@ fn client_settings_autostart2_helpers_preserve_reserved_tail() {
 
     let decoded = settings.auto_start_config2();
     assert!(decoded.restart_on_market);
-    assert_eq!(decoded.btc_higher_then, 1.25);
-    assert_eq!(decoded.btc_lower_then, -2.5);
-    assert_eq!(decoded.market_higher_then, 3.75);
+    assert_eq!(decoded.btc_higher_than, 1.25);
+    assert_eq!(decoded.btc_lower_than, -2.5);
+    assert_eq!(decoded.market_higher_than, 3.75);
     assert!(decoded.show_old_listing);
     assert!(decoded.reset_session);
     assert_eq!(decoded.max_session_cap, 1000);
@@ -880,6 +890,16 @@ fn client_settings_rejects_negative_temp_bl_count_like_corrupt_stream() {
     let raw = client_settings_v1_prefix_with_temp_bl_count(-1);
 
     assert!(UICommand::parse(&raw).is_none());
+}
+
+#[test]
+fn client_settings_rejects_huge_temp_bl_count_without_declared_preallocation() {
+    let raw = client_settings_v1_prefix_with_temp_bl_count(i32::MAX);
+
+    assert!(
+        UICommand::parse(&raw).is_none(),
+        "TempBLCount is Delphi read count, but Rust allocation capacity must be bounded by packet bytes"
+    );
 }
 
 #[test]

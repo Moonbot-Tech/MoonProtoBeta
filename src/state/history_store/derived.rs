@@ -4,11 +4,12 @@ use crate::state::history::{
     Candle5mRow, CandleVolumeSnapshot, DerivedDeltaSnapshot, LastPricePoint,
     RollingTradeVolumeSnapshot, TradeHistoryRow,
 };
+use crate::MoonTime;
 
-use super::{MarketHistoryStore, FIVE_MINUTES_DAYS, SECONDS_PER_DAY};
+use super::{MarketHistoryStore, FIVE_MINUTES_MS};
 
 impl MarketHistoryStore {
-    pub fn refresh_derived_analytics(&mut self, now_time: f64) {
+    pub(crate) fn refresh_derived_analytics(&mut self, now_time: MoonTime) {
         self.seal_current_candle_if_due(now_time);
         let volumes = self.rolling_volumes.snapshot(now_time);
         let trade_deltas = trade_deltas_from_rolling_volumes(volumes);
@@ -35,7 +36,7 @@ impl MarketHistoryStore {
     }
 
     pub(super) fn update_current_candle_from_trade(&mut self, row: TradeHistoryRow) {
-        if row.time <= 0.0 || row.price <= 0.0 {
+        if row.time == MoonTime::ZERO || row.price <= 0.0 {
             return;
         }
         self.seal_current_candle_if_due(row.time);
@@ -65,11 +66,13 @@ impl MarketHistoryStore {
         // start-stamped) within a single ring.
     }
 
-    fn seal_current_candle_if_due(&mut self, now_time: f64) {
+    fn seal_current_candle_if_due(&mut self, now_time: MoonTime) {
         let Some(mut candle) = self.current_candle else {
             return;
         };
-        if now_time > 0.0 && now_time - candle.time >= FIVE_MINUTES_DAYS {
+        if now_time != MoonTime::ZERO
+            && now_time.unix_millis() - candle.time.unix_millis() >= FIVE_MINUTES_MS
+        {
             // Delphi `Recalc5mCandle` (MarketsU.pas:9988): the sealed candle is
             // stamped with the seal time (`NowTime` = end of period) and pushed
             // into Deep5m; the in-progress (FCandle) stays separate and starts over.
@@ -84,7 +87,7 @@ impl MarketHistoryStore {
 
     fn candle_derived_one_pass(
         &self,
-        now_time: f64,
+        now_time: MoonTime,
     ) -> (DerivedDeltaSnapshot, CandleVolumeSnapshot) {
         let mut acc = CandleDerivedAccumulator::new(now_time, self.eps_profile.eps);
         if let Some(reader) = self.readers.candles_5m.as_ref() {
@@ -99,7 +102,7 @@ impl MarketHistoryStore {
         acc.finish()
     }
 
-    fn last_price_deltas_one_pass(&self, now_time: f64) -> DerivedDeltaSnapshot {
+    fn last_price_deltas_one_pass(&self, now_time: MoonTime) -> DerivedDeltaSnapshot {
         let mut acc = LastPriceDeltaAccumulator::new(now_time, self.eps_profile.eps);
         if let Some(reader) = self.readers.last_prices.as_ref() {
             reader.with_last(reader.capacity(), |view| {
@@ -176,16 +179,16 @@ pub(super) fn combine_deltas(
     }
 }
 
-fn candle_delta_bucket(now_time: f64) -> i64 {
-    if now_time <= 0.0 {
+fn candle_delta_bucket(now_time: MoonTime) -> i64 {
+    if now_time == MoonTime::ZERO {
         return i64::MIN;
     }
-    (now_time * SECONDS_PER_DAY / (5.0 * 60.0)).floor() as i64
+    now_time.unix_millis().div_euclid(FIVE_MINUTES_MS)
 }
 
 #[derive(Clone, Copy)]
 struct CandleWindow {
-    window_days: f64,
+    window_ms: i64,
     min_price: f32,
     max_price: f32,
     volume: f64,
@@ -195,7 +198,7 @@ struct CandleWindow {
 impl CandleWindow {
     fn new(window_seconds: f64, eps: f64) -> Self {
         Self {
-            window_days: window_seconds / SECONDS_PER_DAY,
+            window_ms: (window_seconds * 1_000.0).round() as i64,
             min_price: 0.0,
             max_price: 0.0,
             volume: 0.0,
@@ -203,10 +206,12 @@ impl CandleWindow {
         }
     }
 
-    fn add(&mut self, now_time: f64, candle: Candle5mRow) {
+    fn add(&mut self, now_time: MoonTime, candle: Candle5mRow) {
         // Delphi checks are strict on the old boundary:
         // `abs(Now-Time) < 15/MinsInDay`, `h < 72`, `h <= 2` -> age < 3h.
-        if candle.time <= now_time - self.window_days || candle.time > now_time {
+        if candle.time.unix_millis() <= now_time.unix_millis() - self.window_ms
+            || candle.time > now_time
+        {
             return;
         }
         if candle.low > 0.0 && (self.min_price <= 0.0 || candle.low < self.min_price) {
@@ -230,7 +235,7 @@ impl CandleWindow {
 }
 
 struct CandleDerivedAccumulator {
-    now_time: f64,
+    now_time: MoonTime,
     five_minutes: CandleWindow,
     fifteen_minutes: CandleWindow,
     thirty_minutes: CandleWindow,
@@ -245,7 +250,7 @@ struct CandleDerivedAccumulator {
 }
 
 impl CandleDerivedAccumulator {
-    fn new(now_time: f64, eps: f64) -> Self {
+    fn new(now_time: MoonTime, eps: f64) -> Self {
         Self {
             now_time,
             five_minutes: CandleWindow::new(5.0 * 60.0, eps),
@@ -307,7 +312,7 @@ impl CandleDerivedAccumulator {
 
 #[derive(Clone, Copy)]
 struct LastPriceWindow {
-    window_days: f64,
+    window_ms: i64,
     min_price: f32,
     max_price: f32,
     eps: f64,
@@ -316,15 +321,16 @@ struct LastPriceWindow {
 impl LastPriceWindow {
     fn new(window_seconds: f64, eps: f64) -> Self {
         Self {
-            window_days: window_seconds / SECONDS_PER_DAY,
+            window_ms: (window_seconds * 1_000.0).round() as i64,
             min_price: 0.0,
             max_price: 0.0,
             eps,
         }
     }
 
-    fn add(&mut self, now_time: f64, row: LastPricePoint) {
-        if row.real_time <= now_time - self.window_days || row.real_time > now_time {
+    fn add(&mut self, now_time: MoonTime, row: LastPricePoint) {
+        if row.time.unix_millis() <= now_time.unix_millis() - self.window_ms || row.time > now_time
+        {
             return;
         }
         if row.current <= 0.0 {
@@ -348,7 +354,7 @@ impl LastPriceWindow {
 }
 
 struct LastPriceDeltaAccumulator {
-    now_time: f64,
+    now_time: MoonTime,
     one_minute: LastPriceWindow,
     five_minutes: LastPriceWindow,
     fifteen_minutes: LastPriceWindow,
@@ -357,7 +363,7 @@ struct LastPriceDeltaAccumulator {
 }
 
 impl LastPriceDeltaAccumulator {
-    fn new(now_time: f64, eps: f64) -> Self {
+    fn new(now_time: MoonTime, eps: f64) -> Self {
         Self {
             now_time,
             one_minute: LastPriceWindow::new(60.0, eps),

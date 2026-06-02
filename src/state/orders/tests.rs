@@ -883,37 +883,58 @@ fn visual_trace_after_terminal_status_is_accepted_before_deferred_removal() {
 
     assert_eq!(res, ApplyResult::Applied);
     assert!(matches!(ev, OrderEvent::TracePoint { uid: 42 }));
-    assert_eq!(orders.get(42).unwrap().trace_points.len(), 1);
+    assert!(orders.get(42).is_some());
     assert_eq!(orders.drain_pending_removals(), vec![42]);
     assert!(orders.get(42).is_none());
 }
 
 #[test]
-fn trace_points_are_not_capped_like_former_rust_ring_buffer() {
+fn trace_lines_shrink_like_delphi_order_line() {
     let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
+    let mut status = make_status(42, "BTCUSDT", OrderWorkerStatus::SellSet, 1);
+    status.sell_order.create_time = 44_000.0;
+    status.sell_order.int_id = 77;
+    orders.apply(order_status_cmd(status));
+
+    orders.apply(TradeCommand::OrderTracePoint(trace_point(
         42,
-        "BTCUSDT",
-        OrderWorkerStatus::SellSet,
-        1,
+        OrderType::Sell,
+        trace_flags::IS_INITIAL,
+        45_000.0,
+        101.0,
+        100.0,
+        0.0,
     )));
 
-    for n in 0..300 {
-        let trace = OrderTracePoint {
-            market: make_market(42, 3, "BTCUSDT"),
-            trace_time: 45_000.0 + n as f64,
-            trace_price: 100.0 + n as f32,
-            base_price: 100.0,
-            stop_price: 0.0,
-            ord_type: OrderType::Sell,
-            flags: 0,
-        };
-        let (res, ev) = orders.apply(TradeCommand::OrderTracePoint(trace));
+    for n in 0..1100 {
+        let (res, ev) = orders.apply(TradeCommand::OrderTracePoint(trace_point(
+            42,
+            OrderType::Sell,
+            0,
+            45_001.0 + n as f64,
+            102.0 + n as f32,
+            100.0,
+            0.0,
+        )));
         assert_eq!(res, ApplyResult::Applied);
         assert!(matches!(ev, OrderEvent::TracePoint { uid: 42 }));
     }
 
-    assert_eq!(orders.get(42).unwrap().trace_points.len(), 300);
+    let line = orders.get(42).unwrap().sell_trace_line.as_ref().unwrap();
+    assert!(line.line_count() > (ORDER_TRACE_LINE_SHRINK_TO as f64 * 1.2) as usize);
+
+    assert!(orders
+        .tick_order_trace_line_shrink(ORDER_TRACE_LINE_SHRINK_INTERVAL_MS - 1)
+        .is_empty());
+
+    let events = orders.tick_order_trace_line_shrink(ORDER_TRACE_LINE_SHRINK_INTERVAL_MS);
+    assert!(matches!(
+        events.as_slice(),
+        [OrderEvent::TracePoint { uid: 42 }]
+    ));
+    let line = orders.get(42).unwrap().sell_trace_line.as_ref().unwrap();
+    assert_eq!(line.line_count(), ORDER_TRACE_LINE_SHRINK_TO);
+    assert_eq!(line.points.len(), 1 + ORDER_TRACE_LINE_SHRINK_TO * 3);
 }
 
 #[test]
@@ -940,7 +961,6 @@ fn trace_line_ignores_non_initial_without_existing_line() {
     assert_eq!(res, ApplyResult::Applied);
     assert!(matches!(ev, OrderEvent::TracePoint { uid: 42 }));
     let order = orders.get(42).unwrap();
-    assert_eq!(order.trace_points.len(), 1);
     assert!(order.sell_trace_line.is_none());
 }
 
@@ -1736,7 +1756,7 @@ fn bulk_replace_timeout_clears_flag_after_5000ms() {
     };
     let (res, ev) = orders.apply_at(TradeCommand::BulkReplaceNotify(notify), 1000);
     assert_eq!(res, ApplyResult::Applied);
-    assert!(matches!(ev, OrderEvent::BulkReplaced { .. }));
+    assert!(matches!(ev, Some(OrderEvent::BulkReplaced { .. })));
     assert!(orders.get(1).unwrap().bulk_replace_buy);
 
     assert!(orders.tick_bulk_replace_timeouts(6000).is_empty());
@@ -1839,10 +1859,10 @@ fn bulk_replace_notify_reports_only_found_workers() {
     assert!(orders.get(1).unwrap().bulk_replace_buy);
     assert!(matches!(
         ev,
-        OrderEvent::BulkReplaced {
+        Some(OrderEvent::BulkReplaced {
             order_type: OrderType::Buy,
             uids
-        } if uids == vec![1]
+        }) if uids == vec![1]
     ));
 
     let missing_notify = BulkReplaceNotify {
@@ -1855,10 +1875,10 @@ fn bulk_replace_notify_reports_only_found_workers() {
     assert_eq!(res, ApplyResult::OrderNotFound);
     assert!(matches!(
         ev,
-        OrderEvent::Ignored {
+        Some(OrderEvent::Ignored {
             uid: 0,
             reason: ApplyResult::OrderNotFound
-        }
+        })
     ));
 }
 
@@ -1881,7 +1901,7 @@ fn bulk_replace_notify_buy_stop_uses_sell_side() {
     let (res, ev) = orders.apply_at(TradeCommand::BulkReplaceNotify(notify), 1000);
 
     assert_eq!(res, ApplyResult::Applied);
-    assert!(matches!(ev, OrderEvent::BulkReplaced { .. }));
+    assert!(matches!(ev, Some(OrderEvent::BulkReplaced { .. })));
     let order = orders.get(1).unwrap();
     assert!(!order.bulk_replace_buy);
     assert!(order.bulk_replace_sell);
@@ -1906,7 +1926,7 @@ fn bulk_replace_notify_unknown_order_type_uses_sell_side() {
     let (res, ev) = orders.apply_at(TradeCommand::BulkReplaceNotify(notify), 1000);
 
     assert_eq!(res, ApplyResult::Applied);
-    assert!(matches!(ev, OrderEvent::BulkReplaced { .. }));
+    assert!(matches!(ev, Some(OrderEvent::BulkReplaced { .. })));
     let order = orders.get(1).unwrap();
     assert!(!order.bulk_replace_buy);
     assert!(order.bulk_replace_sell);

@@ -28,8 +28,13 @@ mod text;
 mod types;
 
 use self::text::same_text_ascii;
-pub(crate) use self::types::{BaseCurrencyPrice, MarketLastPriceHistoryInput};
-pub use self::types::{MarketBalancePosition, MarketHandle, MarketsEvent, MarketsListApplyTiming};
+pub(crate) use self::types::MarketLastPriceHistoryInput;
+#[cfg(feature = "diagnostics")]
+#[doc(hidden)]
+pub use self::types::MarketsListApplyTiming;
+#[cfg(not(feature = "diagnostics"))]
+pub(crate) use self::types::MarketsListApplyTiming;
+pub use self::types::{BaseCurrencyPrice, MarketBalancePosition, MarketHandle, MarketsEvent};
 // The live trade tail and price now live on the `Market` object itself (Delphi
 // `TMarket` shape); re-export them here so the public `state::markets` path is stable.
 pub use crate::commands::market::{MarketPrice, MarketTradeState};
@@ -190,6 +195,8 @@ impl MarketsState {
         self.markets_version
     }
 
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub fn last_markets_list_apply_timing(&self) -> Option<MarketsListApplyTiming> {
         self.last_markets_list_timing
     }

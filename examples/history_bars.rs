@@ -34,7 +34,7 @@ fn parse_kind(value: Option<&String>) -> DeepHistoryKind {
 fn print_candle(label: &str, candle: &DeepPrice) {
     println!(
         "{label}: unix={} open={} high={} low={} close={} vol={}",
-        candle.time_delphi().unix_seconds().unwrap_or(0.0).round() as i64,
+        candle.time().unix_seconds().round() as i64,
         candle.open(),
         candle.high(),
         candle.low(),
@@ -60,7 +60,21 @@ fn main() {
         }
     };
 
-    let ticket = match client.candles().request_coin_card(market, kind) {
+    let selected_market = match client
+        .snapshot()
+        .and_then(|snapshot| snapshot.markets().get(market))
+    {
+        Some(market) => market,
+        None => {
+            eprintln!("[market] {market} is not in the published market list");
+            std::process::exit(3);
+        }
+    };
+
+    let ticket = match client
+        .candles()
+        .request_coin_card_for(&selected_market, kind)
+    {
         Ok(ticket) => ticket,
         Err(err) => {
             eprintln!("[request] failed: {err}");
@@ -99,8 +113,7 @@ fn main() {
 
         if let Some(rows) = client.snapshot().and_then(|snapshot| {
             snapshot
-                .coin_card_candles()
-                .get(&ticket.market, ticket.kind)
+                .coin_card_candles_for(&selected_market, ticket.kind)
                 .map(|rows| rows.to_vec())
         }) {
             break rows;

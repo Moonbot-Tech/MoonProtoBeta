@@ -9,23 +9,29 @@ pub enum TradesEvent {
     /// owned `TradesPacket`, so the hot path does not build a `Vec` only for
     /// the public callback.
     Applied {
+        #[cfg(any(test, feature = "diagnostics"))]
         #[doc(hidden)]
         packet_num: u16,
+        #[cfg(any(test, feature = "diagnostics"))]
         #[doc(hidden)]
         base_time: f64,
     },
     /// A packet-number gap was detected: `[start..=end]` is missing. The
     /// recovery bucket was created; retry is driven by `tick()`.
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     GapDetected { start: u16, end: u16 },
     /// Packet number was a duplicate (`packet_num == last`).
     /// Delphi does not advance gap-state for it, but still applies the payload.
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     Duplicate,
     /// Packet number was outside the accepted range, usually after a reset.
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     OutOfOrder { packet_num: u16 },
     /// An out-of-order packet filled one slot in an existing gap bucket.
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     GapFilled {
         packet_num: u16,
@@ -36,9 +42,11 @@ pub enum TradesEvent {
     /// This is diagnostic only. The active client sends the request
     /// automatically; applications must not send their own duplicate request
     /// because they saw this event.
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     ResendRequested { packet_nums: Vec<u16> },
     /// Recovery bucket was closed: all packets arrived or retry limit expired.
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     BucketClosed {
         start: u16,
@@ -102,6 +110,7 @@ impl TradesPacketEffects {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.len
     }
@@ -119,22 +128,37 @@ impl TradesPacketEffects {
 }
 
 impl TradesPacketEffect {
-    pub(crate) fn into_event(self, packet_num: u16, base_time: f64) -> TradesEvent {
+    #[cfg(test)]
+    pub(crate) fn push_event(self, packet_num: u16, base_time: f64, out: &mut Vec<TradesEvent>) {
         match self {
-            Self::Apply => TradesEvent::Applied {
+            Self::Apply => out.push(TradesEvent::Applied {
+                #[cfg(any(test, feature = "diagnostics"))]
                 packet_num,
+                #[cfg(any(test, feature = "diagnostics"))]
                 base_time,
-            },
-            Self::GapDetected { start, end } => TradesEvent::GapDetected { start, end },
-            Self::Duplicate => TradesEvent::Duplicate,
-            Self::OutOfOrder { packet_num } => TradesEvent::OutOfOrder { packet_num },
+            }),
+            #[cfg(any(test, feature = "diagnostics"))]
+            Self::GapDetected { start, end } => {
+                out.push(TradesEvent::GapDetected { start, end });
+            }
+            #[cfg(any(test, feature = "diagnostics"))]
+            Self::Duplicate => out.push(TradesEvent::Duplicate),
+            #[cfg(any(test, feature = "diagnostics"))]
+            Self::OutOfOrder { packet_num } => {
+                out.push(TradesEvent::OutOfOrder { packet_num });
+            }
+            #[cfg(any(test, feature = "diagnostics"))]
             Self::GapFilled {
                 packet_num,
                 bucket_seq_range,
-            } => TradesEvent::GapFilled {
-                packet_num,
-                bucket_seq_range,
-            },
+            } => {
+                out.push(TradesEvent::GapFilled {
+                    packet_num,
+                    bucket_seq_range,
+                });
+            }
+            #[cfg(not(any(test, feature = "diagnostics")))]
+            _ => {}
         }
     }
 }

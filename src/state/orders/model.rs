@@ -3,7 +3,6 @@
 use super::{OrderTraceLine, SellReason};
 use crate::commands::market::{BaseCurrency, ExchangeCode};
 use crate::commands::trade::*;
-use std::collections::VecDeque;
 
 /// One retained order with Delphi worker-equivalent state.
 ///
@@ -74,11 +73,6 @@ pub struct Order {
     pub buy_trace_line: Option<OrderTraceLine>,
     /// Delphi `coSell` order-line state built by `ApplyServerTrace`.
     pub sell_trace_line: Option<OrderTraceLine>,
-    /// Raw trace points for server-decision visualization.
-    ///
-    /// This is the raw inbound packet log. For Delphi-equivalent chart state,
-    /// use `buy_trace_line` / `sell_trace_line`.
-    pub(crate) trace_points: VecDeque<OrderTracePoint>,
     /// True when the order is terminal and awaits deferred removal.
     pub job_is_done: bool,
     /// Delphi `CancellRequest`: server requested worker cancellation.
@@ -116,15 +110,6 @@ impl Order {
         self.sell_reason
     }
 
-    /// Raw inbound trace packet log retained for diagnostics.
-    ///
-    /// Normal chart code should use [`Self::buy_trace_line`] /
-    /// [`Self::sell_trace_line`], which mirror Delphi order-line state.
-    #[doc(hidden)]
-    pub fn trace_points(&self) -> &VecDeque<OrderTracePoint> {
-        &self.trace_points
-    }
-
     /// Create a new `Order` from `TOrderStatus`.
     pub(super) fn from_status(status_cmd: &OrderStatus) -> Self {
         Self {
@@ -159,7 +144,6 @@ impl Order {
             bulk_replace_sell: false,
             buy_trace_line: None,
             sell_trace_line: None,
-            trace_points: VecDeque::new(),
             job_is_done: status_cmd.epoch_header.status.is_terminal(),
             cancel_request: false,
             server_forced_remove: false,

@@ -12,7 +12,7 @@ fn dummy_client() -> Client {
         server_port: 3000,
         master_key: [0; 16],
         mac_key: [0; 16],
-        mask_ver: TransportMode::V0,
+        transport_mode: TransportMode::V0,
         client_id: 0,
         ntp_host: None,
         refresh: RefreshConfig {
@@ -99,8 +99,13 @@ fn test_market(name: &str) -> Market {
 
 fn install_session_key(client: &mut Client) {
     client.server_token = 1;
-    let (encode_key, decode_key) =
-        crypto::generate_sub_keys(&client.cfg.master_key, client.server_token);
+    client.session_rnd = client.handshake_rnd;
+    let (encode_key, decode_key) = crypto::generate_session_sub_keys(
+        &client.cfg.master_key,
+        client.cfg.client_id,
+        client.server_token,
+        &client.session_rnd,
+    );
     client.encode_key = encode_key;
     client.decode_key = decode_key;
     client.encode_cipher = Some(crypto::cipher_from_key(&encode_key));
@@ -108,6 +113,7 @@ fn install_session_key(client: &mut Client) {
         .recv
         .data_read_state
         .set_decode_cipher(crypto::cipher_from_key(&decode_key));
+    client.refresh_ack_session32();
 }
 
 fn encrypted_hello(
@@ -121,7 +127,7 @@ fn encrypted_hello(
     hello.rnd = client.handshake_rnd;
     hello.server_token = server_token;
     hello.app_token = peer_app_token;
-    if cmd == Command::Fine {
+    if matches!(cmd, Command::Fine | Command::WantNewHello) {
         hello.peer_mix = 0;
     }
     hello.timestamp = delphi_now();
@@ -233,7 +239,7 @@ fn want_new_hello_outside_rebind_is_dropped_without_clearing_wait() {
     ProtocolCore {
         client: &mut client,
     }
-    .on_handshake_control(Command::WantNewHello, 0, 0);
+    .on_handshake_control(Command::WantNewHello, &[], 0, 0);
 
     assert_eq!(client.last_sent_hello, 123);
     assert!(client.waiting_hello);
@@ -251,11 +257,12 @@ fn want_new_hello_makes_late_fine_invalid_until_new_who_are_you() {
     client.lifecycle.was_ever_connected = true;
     client.set_hello_wait_state(HelloWaitState::RebindHelloAgain);
     let fine = encrypted_hello(&client, Command::Fine, client.server_token, 0x3333);
+    let want = encrypted_hello(&client, Command::WantNewHello, 0, 0);
 
     ProtocolCore {
         client: &mut client,
     }
-    .on_handshake_control(Command::WantNewHello, 0, 0);
+    .on_handshake_control(Command::WantNewHello, &want, 0, 0);
 
     ProtocolCore {
         client: &mut client,
@@ -283,7 +290,7 @@ fn late_want_new_hello_does_not_reset_fresh_authorized_session() {
     ProtocolCore {
         client: &mut client,
     }
-    .on_handshake_control(Command::WantNewHello, 0, 10);
+    .on_handshake_control(Command::WantNewHello, &[], 0, 10);
 
     assert!(client.authorized);
     assert_eq!(client.auth_status, AuthStatus::AuthDone);
@@ -299,12 +306,14 @@ fn want_new_hello_is_accepted_during_rebind_hello_again() {
     client.auth_status = AuthStatus::Offline;
     client.need_connect = false;
     client.server_token = 0x1111;
+    client.handshake_rnd = [0xA5; 16];
     client.set_hello_wait_state(HelloWaitState::RebindHelloAgain);
+    let want = encrypted_hello(&client, Command::WantNewHello, 0, 0);
 
     ProtocolCore {
         client: &mut client,
     }
-    .on_handshake_control(Command::WantNewHello, 0, 10);
+    .on_handshake_control(Command::WantNewHello, &want, 0, 10);
 
     assert!(!client.authorized);
     assert_eq!(client.auth_status, AuthStatus::Connected);

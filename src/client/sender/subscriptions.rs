@@ -100,7 +100,7 @@ impl ClientSender {
         }
         let market_name = market_name.to_string();
         let newly_added = {
-            let mut registry = self.shared.subscription_registry.lock().unwrap();
+            let mut registry = self.shared.subscription_registry.lock();
             let newly_added = registry.orderbook_subs.insert(market_name.clone());
             self.shared.refresh_subscription_summary(&registry);
             newly_added
@@ -123,7 +123,7 @@ impl ClientSender {
         }
         let market_name = market_name.to_string();
         let removed = {
-            let mut registry = self.shared.subscription_registry.lock().unwrap();
+            let mut registry = self.shared.subscription_registry.lock();
             let removed = registry.orderbook_subs.remove(&market_name);
             self.shared.refresh_subscription_summary(&registry);
             removed
@@ -157,7 +157,7 @@ impl ClientSender {
         }
         let mut new_names = Vec::new();
         {
-            let mut registry = self.shared.subscription_registry.lock().unwrap();
+            let mut registry = self.shared.subscription_registry.lock();
             for market_name in market_names {
                 if registry.orderbook_subs.insert(market_name.clone()) {
                     new_names.push(market_name);
@@ -195,7 +195,7 @@ impl ClientSender {
         }
         let mut removed_names = Vec::new();
         {
-            let mut registry = self.shared.subscription_registry.lock().unwrap();
+            let mut registry = self.shared.subscription_registry.lock();
             for market_name in market_names {
                 if registry.orderbook_subs.remove(&market_name) {
                     removed_names.push(market_name);
@@ -218,7 +218,7 @@ impl ClientSender {
             return Err(SubscribeError::Disconnected);
         }
         let removed_names = {
-            let mut registry = self.shared.subscription_registry.lock().unwrap();
+            let mut registry = self.shared.subscription_registry.lock();
             let removed_names = registry.orderbook_subs.drain().collect::<Vec<_>>();
             self.shared.refresh_subscription_summary(&registry);
             removed_names
@@ -262,7 +262,7 @@ impl ClientSender {
             return Err(SubscribeError::Disconnected);
         }
         let wire_changed = {
-            let mut registry = self.shared.subscription_registry.lock().unwrap();
+            let mut registry = self.shared.subscription_registry.lock();
             let new_sub = Some(TradesSubscription { want_mm });
             let wire_changed =
                 registry.trades_sub != new_sub || registry.mm_orders_sub != Some(want_mm);
@@ -286,7 +286,7 @@ impl ClientSender {
             return Err(SubscribeError::Disconnected);
         }
         let had_subscription = {
-            let mut registry = self.shared.subscription_registry.lock().unwrap();
+            let mut registry = self.shared.subscription_registry.lock();
             let had_subscription = registry.trades_sub.take().is_some();
             self.shared.refresh_subscription_summary(&registry);
             had_subscription

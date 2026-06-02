@@ -5,7 +5,7 @@
 //! The Rust active library stores the decoded schema so consumers do not carry
 //! hardcoded strategy field UI metadata.
 
-use super::inflate::read_inflate_to_vec;
+use super::inflate::{read_inflate_to_vec, MAX_INFLATE_OUTPUT_SIZE};
 use flate2::read::DeflateDecoder;
 
 use super::strategy_serializer::{
@@ -66,8 +66,25 @@ pub enum StrategySchemaEditorSectionKind<'a> {
 /// One `TStrategyKind` entry from the schema kind table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StrategySchemaKind {
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub ordinal: u8,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) ordinal: u8,
     pub name: String,
+}
+
+impl StrategySchemaKind {
+    /// Typed strategy kind for editor filtering and strategy comparisons.
+    pub fn kind(&self) -> StrategyKind {
+        StrategyKind::from_byte(self.ordinal)
+    }
+
+    /// Delphi `TStrategyKind` ordinal. Normally UI code should pass
+    /// [`Self::kind`] into typed schema helpers instead of carrying this value.
+    pub fn ordinal(&self) -> u8 {
+        self.ordinal
+    }
 }
 
 /// UI/wire metadata for one public `TStrategy` field.
@@ -81,12 +98,15 @@ pub struct StrategySchemaField {
     pub layout: StrategyFieldLayout,
     pub default_value: Option<FieldValue>,
     /// `TStrategyKind` ordinals for which this field is visible.
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub visible_kind_ordinals: Vec<u8>,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) visible_kind_ordinals: Vec<u8>,
     /// Same visibility as a hot-path bitset by raw `TStrategyKind` ordinal.
     ///
-    /// Internal serializer fast path. Public code should use
-    /// `visible_kind_ordinals`, `visible_for_kind`, or
-    /// `visible_for_strategy_kind`.
+    /// Internal serializer fast path. Public code should use typed
+    /// `visible_strategy_kinds` / `visible_for_strategy_kind`.
     pub(crate) visible_kind_mask: u32,
     /// Raw pipe string from Delphi `WriteStr16`, when `FLAG_HAS_STATIC` is set.
     pub(crate) static_picklist_raw: Option<String>,
@@ -112,7 +132,18 @@ pub enum StrategyFieldType {
 }
 
 impl StrategyFieldType {
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub fn from_type_id(type_id: u8) -> Self {
+        Self::from_type_id_inner(type_id)
+    }
+
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) fn from_type_id(type_id: u8) -> Self {
+        Self::from_type_id_inner(type_id)
+    }
+
+    fn from_type_id_inner(type_id: u8) -> Self {
         match type_id {
             TID_BOOL => Self::Bool,
             TID_INT32 => Self::Int32,
@@ -155,7 +186,18 @@ pub enum StrategyFieldUiKind {
 }
 
 impl StrategyFieldUiKind {
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub fn from_flags(flags: u8) -> Self {
+        Self::from_flags_inner(flags)
+    }
+
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) fn from_flags(flags: u8) -> Self {
+        Self::from_flags_inner(flags)
+    }
+
+    fn from_flags_inner(flags: u8) -> Self {
         match flags & 0x03 {
             UI_EDIT => Self::Edit,
             UI_CHECKBOX => Self::Checkbox,
@@ -217,15 +259,41 @@ impl StrategyDynamicPicklist {
 
 impl StrategySchema {
     /// Parse raw-deflate `TStratSchema.Data`.
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub fn parse_compressed(deflate_bytes: &[u8]) -> Option<Self> {
+        Self::parse_compressed_inner(deflate_bytes)
+    }
+
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) fn parse_compressed(deflate_bytes: &[u8]) -> Option<Self> {
+        Self::parse_compressed_inner(deflate_bytes)
+    }
+
+    fn parse_compressed_inner(deflate_bytes: &[u8]) -> Option<Self> {
         let mut decoder = DeflateDecoder::new(deflate_bytes);
-        let plain =
-            read_inflate_to_vec(&mut decoder, deflate_bytes.len().saturating_mul(16)).ok()?;
+        let plain = read_inflate_to_vec(
+            &mut decoder,
+            deflate_bytes.len().saturating_mul(16),
+            MAX_INFLATE_OUTPUT_SIZE,
+        )
+        .ok()?;
         Self::parse_plain(&plain)
     }
 
     /// Parse already decompressed schema body.
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub fn parse_plain(data: &[u8]) -> Option<Self> {
+        Self::parse_plain_inner(data)
+    }
+
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) fn parse_plain(data: &[u8]) -> Option<Self> {
+        Self::parse_plain_inner(data)
+    }
+
+    fn parse_plain_inner(data: &[u8]) -> Option<Self> {
         let mut pos = 0usize;
         let format_version = read_u8(data, &mut pos)?;
         if format_version != SCHEMA_FORMAT_VERSION {
@@ -313,11 +381,26 @@ impl StrategySchema {
         })
     }
 
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub fn kind_name(&self, ordinal: u8) -> Option<&str> {
+        self.kind_name_by_ordinal(ordinal)
+    }
+
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) fn kind_name(&self, ordinal: u8) -> Option<&str> {
+        self.kind_name_by_ordinal(ordinal)
+    }
+
+    fn kind_name_by_ordinal(&self, ordinal: u8) -> Option<&str> {
         self.kinds
             .iter()
             .find(|k| k.ordinal == ordinal)
             .map(|k| k.name.as_str())
+    }
+
+    pub fn kind_name_for_strategy_kind(&self, kind: StrategyKind) -> Option<&str> {
+        self.kind_name_by_ordinal(kind.to_byte())
     }
 
     pub fn field(&self, name: &str) -> Option<&StrategySchemaField> {
@@ -325,7 +408,18 @@ impl StrategySchema {
     }
 
     /// Visible fields for one raw `TStrategyKind` ordinal in Delphi field order.
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub fn fields_for_kind(&self, kind: u8) -> impl Iterator<Item = &StrategySchemaField> {
+        self.fields_for_kind_inner(kind)
+    }
+
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) fn fields_for_kind(&self, kind: u8) -> impl Iterator<Item = &StrategySchemaField> {
+        self.fields_for_kind_inner(kind)
+    }
+
+    fn fields_for_kind_inner(&self, kind: u8) -> impl Iterator<Item = &StrategySchemaField> {
         self.fields
             .iter()
             .filter(move |field| field.visible_for_kind(kind))
@@ -345,7 +439,21 @@ impl StrategySchema {
     /// a hidden marker still moves the current section for later visible fields.
     /// That matches `TStratForm` editor construction: section state is driven by
     /// RTTI field order, then visible rows are placed into the current section.
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub fn editor_sections_for_kind(&self, kind: u8) -> Vec<StrategySchemaEditorSection<'_>> {
+        self.editor_sections_for_kind_inner(kind)
+    }
+
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) fn editor_sections_for_kind(
+        &self,
+        kind: u8,
+    ) -> Vec<StrategySchemaEditorSection<'_>> {
+        self.editor_sections_for_kind_inner(kind)
+    }
+
+    fn editor_sections_for_kind_inner(&self, kind: u8) -> Vec<StrategySchemaEditorSection<'_>> {
         let mut sections = Vec::new();
         let mut seed = StrategySchemaEditorSectionSeed::main();
         let mut active_index: Option<usize> = None;
@@ -442,22 +550,36 @@ impl<'a> StrategySchemaEditorSectionSeed<'a> {
 }
 
 impl StrategySchemaField {
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub fn raw_type_id(&self) -> u8 {
         self.raw_type_id
     }
 
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub fn raw_flags(&self) -> u8 {
         self.raw_flags
     }
 
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub fn static_picklist_raw(&self) -> Option<&str> {
         self.static_picklist_raw.as_deref()
     }
 
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub fn visible_for_kind(&self, kind: u8) -> bool {
+        self.visible_for_kind_inner(kind)
+    }
+
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) fn visible_for_kind(&self, kind: u8) -> bool {
+        self.visible_for_kind_inner(kind)
+    }
+
+    fn visible_for_kind_inner(&self, kind: u8) -> bool {
         if kind < 32 {
             self.visible_kind_mask & (1u32 << kind) != 0
         } else {
@@ -467,6 +589,13 @@ impl StrategySchemaField {
 
     pub fn visible_for_strategy_kind(&self, kind: StrategyKind) -> bool {
         self.visible_for_kind(kind.to_byte())
+    }
+
+    pub fn visible_strategy_kinds(&self) -> impl Iterator<Item = StrategyKind> + '_ {
+        self.visible_kind_ordinals
+            .iter()
+            .copied()
+            .map(StrategyKind::from_byte)
     }
 }
 

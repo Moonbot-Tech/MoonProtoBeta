@@ -1,30 +1,31 @@
 # Time Values
 
-MoonProto uses Delphi `TDateTime` on the wire: `f64` days since `1899-12-30`.
-That value is not Unix time.
+MoonProto public API uses `MoonTime`: a compact Unix-milliseconds timestamp.
+It is cheap to copy, works naturally with Rust/UI code, and can be converted to
+`SystemTime` when a framework needs it.
 
-Public history rows keep the raw Delphi value where it matches the protocol and
-keeps storage dense. Application code should convert through `DelphiTime` or row
-helpers instead of treating the raw number as seconds or milliseconds.
+The protocol still uses Delphi `TDateTime` on the wire (`f64` days since
+`1899-12-30`). That is converted at packet boundaries. Application code should
+not store or compare Delphi-day floats.
 
 ```rust
-use moonproto::DelphiTime;
+use moonproto::MoonTime;
 
-let dt = DelphiTime::from_days(raw_days);
-let now = DelphiTime::now();
-let unix_ms = dt.unix_millis();
-let system_time = dt.system_time();
+let now = MoonTime::now();
+let unix_ms = now.unix_millis();
+let unix_seconds = now.unix_seconds();
+let system_time = now.system_time();
 ```
 
 Common retained rows expose helper methods:
 
 ```rust
-let trade_ms = trade.time_delphi().unix_millis();
-let candle_ms = candle.time_delphi().unix_millis();
-let last_price_time = point.time_delphi().system_time();
-let order_open_ms = order.buy_order.open_time_delphi().unix_millis();
-let trace_ms = chart_point.time_delphi().unix_millis();
+let trade_ms = trade.time().unix_millis();
+let candle_ms = candle.time().unix_millis();
+let last_price_time = point.time().system_time();
+let order_open_ms = order.buy_order.open_time().unix_millis();
+let trace_ms = chart_point.time().unix_millis();
 ```
 
-`DelphiTime::as_days()` returns the exact raw Delphi value when a diagnostic or
-protocol tool needs byte-level compatibility.
+Diagnostic builds keep hidden Delphi-time helpers for byte-level protocol tests.
+They are not the normal terminal API.

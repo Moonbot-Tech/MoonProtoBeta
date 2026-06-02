@@ -10,8 +10,8 @@ use moonproto::{StopSettings, VStopParams};
 let Some(snapshot) = client.snapshot() else { return; };
 let Some(order) = snapshot.orders().get(ui_state.selected_order_uid()) else { return; };
 let stops = StopSettings::disabled()
-    .with_stop_loss(true, false, 2.5, 0.1)
-    .with_take_profit(true, 50_500.0);
+    .with_stop_loss_percent(2.5, 0.1)
+    .with_take_profit_price(50_500.0);
 
 client.orders().move_order(order, new_price)?;
 client.orders().cancel(order)?;
@@ -108,8 +108,9 @@ before sending.
 connect/init sequence finishes in that runtime thread. UI code may enqueue order
 intents during startup; the runtime handles them only after the retained state is
 ready. If the live order no longer exists or its current state does not allow the
-requested action, the action is ignored and an `OrderEvent::Ignored` diagnostic
-event may be published for that UID.
+requested action, the action becomes a no-op. Normal UI code keeps rendering the
+retained order snapshot; low-level rejected-action telemetry is available only
+in `test`/`diagnostics` builds.
 
 After Init, actions append to the Delphi-style unbounded send queues and
 reconnect keeps the session state alive automatically.

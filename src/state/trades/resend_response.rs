@@ -1,6 +1,6 @@
 /// Zero-copy iterator over raw TradesStream packets inside `MPC_TradesResendResponse`.
 #[derive(Debug, Clone)]
-pub struct TradesResendResponsePackets<'a> {
+pub(crate) struct TradesResendResponsePackets<'a> {
     payload: &'a [u8],
     pos: usize,
     remaining: usize,
@@ -40,7 +40,7 @@ impl<'a> Iterator for TradesResendResponsePackets<'a> {
 /// Each `raw_packet_bytes` item is a full TradesStream payload, including the
 /// trailing compressed flag, suitable for
 /// `commands::trades_stream::parse_trades_packet`.
-pub fn iter_trades_resend_response(payload: &[u8]) -> TradesResendResponsePackets<'_> {
+pub(crate) fn iter_trades_resend_response(payload: &[u8]) -> TradesResendResponsePackets<'_> {
     if payload.is_empty() {
         TradesResendResponsePackets {
             payload,

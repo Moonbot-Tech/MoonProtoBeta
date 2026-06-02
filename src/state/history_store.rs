@@ -14,21 +14,22 @@ use crate::state::history::{
     RollingTradeVolumeSnapshot, RollingTradeVolumes, TradeHistoryRow, TradesPacketTimeShift,
 };
 use crate::state::seq_ring::{SeqRingReader, SeqRingWriter};
+use crate::MoonTime;
 use parking_lot::RwLock;
 
-const SECONDS_PER_DAY: f64 = 86_400.0;
-const FIVE_MINUTES_DAYS: f64 = 5.0 / (24.0 * 60.0);
+const FIVE_MINUTES_MS: i64 = 5 * 60 * 1_000;
 
 mod config;
 mod derived;
 mod registry;
 
+pub(crate) use self::config::TradeStorageScope;
 #[cfg(test)]
 use self::config::GIB;
-pub use self::config::{MarketHistoryConfig, MarketHistorySizing, TradeStorageScope};
+pub use self::config::{MarketHistoryConfig, MarketHistorySizing};
 #[cfg(test)]
 use self::derived::combine_deltas;
-pub use self::registry::MarketHistoryRegistry;
+pub(crate) use self::registry::MarketHistoryRegistry;
 
 type SharedMarketName = Arc<str>;
 
@@ -71,7 +72,7 @@ impl MarketHistoryReadHandle {
         self.inner.read().readers.clone()
     }
 
-    pub(crate) fn rolling_volumes(&self, now_time: f64) -> RollingTradeVolumeSnapshot {
+    pub(crate) fn rolling_volumes(&self, now_time: MoonTime) -> RollingTradeVolumeSnapshot {
         self.inner.read().rolling_volumes.snapshot(now_time)
     }
 
@@ -86,7 +87,7 @@ impl MarketHistoryReadHandle {
     }
 }
 
-pub struct MarketHistoryStore {
+pub(crate) struct MarketHistoryStore {
     futures_trades: Option<SeqRingWriter<TradeHistoryRow>>,
     spot_trades: Option<SeqRingWriter<TradeHistoryRow>>,
     liquidations: Option<SeqRingWriter<TradeHistoryRow>>,
@@ -112,7 +113,8 @@ pub struct MarketHistoryStore {
 }
 
 impl MarketHistoryStore {
-    pub fn new(config: MarketHistoryConfig) -> Self {
+    #[cfg(test)]
+    pub(crate) fn new(config: MarketHistoryConfig) -> Self {
         Self::new_with_eps_profile(config, EpsProfile::default())
     }
 
@@ -178,7 +180,8 @@ impl MarketHistoryStore {
         self.eps_profile = eps_profile;
     }
 
-    pub fn readers(&self) -> MarketHistoryReaders {
+    #[cfg(test)]
+    pub(crate) fn readers(&self) -> MarketHistoryReaders {
         self.readers.clone()
     }
 
@@ -186,15 +189,20 @@ impl MarketHistoryStore {
         self.read_handle.clone()
     }
 
-    pub fn rolling_volumes_snapshot(&self, now_time: f64) -> RollingTradeVolumeSnapshot {
+    #[cfg(test)]
+    pub(crate) fn rolling_volumes_snapshot(
+        &self,
+        now_time: MoonTime,
+    ) -> RollingTradeVolumeSnapshot {
         self.rolling_volumes.snapshot(now_time)
     }
 
-    pub fn derived_snapshot(&self) -> MarketDerivedSnapshot {
+    #[cfg(test)]
+    pub(crate) fn derived_snapshot(&self) -> MarketDerivedSnapshot {
         self.derived
     }
 
-    pub fn replace_candles_5m_from_snapshot(&mut self, candles: &[Candle5mRow]) {
+    pub(crate) fn replace_candles_5m_from_snapshot(&mut self, candles: &[Candle5mRow]) {
         // Snapshot = sealed candles only (Delphi `Deep5m`; `StoreCandlesToZip`
         // serializes Deep5m, and Recalc5mCandle writes there only on seal — the
         // server does not send the in-progress `FCandle`). Push them all into
@@ -221,7 +229,7 @@ impl MarketHistoryStore {
     pub(crate) fn append_last_price(
         &mut self,
         current: f64,
-        real_time: f64,
+        real_time: MoonTime,
         bid: f64,
         ask: f64,
         is_btc_market: bool,
@@ -240,7 +248,7 @@ impl MarketHistoryStore {
         self.last_prices.as_mut().map(|writer| {
             writer.push(LastPricePoint {
                 current: current as f32,
-                real_time,
+                time: real_time,
             })
         })
     }
@@ -248,7 +256,7 @@ impl MarketHistoryStore {
     pub(crate) fn append_mark_price(
         &mut self,
         current: f64,
-        real_time: f64,
+        real_time: MoonTime,
         mark_price_found: bool,
     ) -> Option<u64> {
         // F2 (sverka #14): mark price is a market price -> Delphi `_epsM`.
@@ -258,7 +266,7 @@ impl MarketHistoryStore {
         self.mark_prices.as_mut().map(|writer| {
             writer.push(MarkPricePoint {
                 current: current as f32,
-                real_time,
+                time: real_time,
             })
         })
     }
@@ -280,7 +288,7 @@ impl MarketHistoryStore {
         price: f32,
         qty: f32,
         time_shift: &mut TradesPacketTimeShift,
-    ) -> f64 {
+    ) -> MoonTime {
         let time = time_shift.shifted_time(base_time, time_delta_ms, now_time);
         self.append_futures_trade(TradeHistoryRow { time, price, qty });
         time
@@ -300,7 +308,7 @@ impl MarketHistoryStore {
         price: f32,
         qty: f32,
         time_shift: &mut TradesPacketTimeShift,
-    ) -> (f64, Option<u64>) {
+    ) -> (MoonTime, Option<u64>) {
         let time = time_shift.shifted_time(base_time, time_delta_ms, now_time);
         let seq = self.append_spot_trade(TradeHistoryRow { time, price, qty });
         (time, seq)
@@ -320,7 +328,7 @@ impl MarketHistoryStore {
         price: f32,
         qty: f32,
         time_shift: &mut TradesPacketTimeShift,
-    ) -> (f64, Option<u64>) {
+    ) -> (MoonTime, Option<u64>) {
         let time = time_shift.shifted_time(base_time, time_delta_ms, now_time);
         let seq = self.append_liquidation(TradeHistoryRow { time, price, qty });
         (time, seq)
@@ -349,7 +357,7 @@ impl MarketHistoryStore {
         q: f32,
         taker: Option<[u8; 20]>,
         time_shift: &mut TradesPacketTimeShift,
-    ) -> (f64, Option<u64>) {
+    ) -> (MoonTime, Option<u64>) {
         let time = time_shift.shifted_time(base_time, time_delta_ms, now_time);
         let companion = taker.map(|taker| MMOrderCompanionData {
             taker,
@@ -370,11 +378,12 @@ impl MarketHistoryStore {
     /// `TMiniCandle` rows. StoreWorker should call this from its periodic
     /// derived-state tick.
     // parity: MoonBot MarketsU.pas:TMarket.ResizeOrdersHistory
-    pub(crate) fn compact_evicted_futures(&mut self, now_time: f64) -> usize {
+    pub(crate) fn compact_evicted_futures(&mut self, now_time: MoonTime) -> usize {
         if self.evicted_futures_for_compaction.is_empty() {
             return 0;
         }
-        let last_mini_time = last_mini_time(self.readers.mini_candles.as_ref()).unwrap_or(0.0);
+        let last_mini_time =
+            last_mini_time(self.readers.mini_candles.as_ref()).unwrap_or(MoonTime::MIN);
         compact_trades_to_mini_candles(
             &self.evicted_futures_for_compaction,
             last_mini_time,
@@ -393,7 +402,8 @@ impl MarketHistoryStore {
         appended
     }
 
-    pub fn pending_evicted_futures_for_compaction(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) fn pending_evicted_futures_for_compaction(&self) -> usize {
         self.evicted_futures_for_compaction.len()
     }
 
@@ -422,7 +432,7 @@ where
     (Some(writer), Some(reader))
 }
 
-fn last_mini_time(reader: Option<&SeqRingReader<MiniCandle>>) -> Option<f64> {
+fn last_mini_time(reader: Option<&SeqRingReader<MiniCandle>>) -> Option<MoonTime> {
     let reader = reader?;
     let mut out = Vec::new();
     reader.copy_last(1, &mut out);

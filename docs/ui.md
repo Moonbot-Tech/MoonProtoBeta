@@ -23,9 +23,16 @@ for event in client.drain_events() {
                     redraw_settings(settings);
                 }
             }
-            SettingsEvent::DexSwitched(cmd) => select_dex(&cmd.dex_name),
-            SettingsEvent::SpotSwitched(cmd) => select_spot(cmd.spot_index),
-            SettingsEvent::ArbActivated(cmd) => show_arb_valid_until(cmd.arb_valid),
+            SettingsEvent::ArbActivated { arb_valid, .. } => show_arb_valid_until(arb_valid),
+            SettingsEvent::VersionUpdate { version_name, is_release, .. } => {
+                handle_remote_update(version_name, is_release);
+            }
+            SettingsEvent::LevManageUpdated => {
+                let Some(state) = client.snapshot() else { continue; };
+                if let Some(lev_manage) = &state.settings().lev_manage {
+                    redraw_leverage_management(lev_manage);
+                }
+            }
             _ => {}
         }
     }
@@ -33,8 +40,10 @@ for event in client.drain_events() {
 ```
 
 `SettingsState` stores the latest settings snapshot and small derived fields:
-current DEX, current spot selector, MM subscription status, leverage management,
-and arb validity time.
+leverage management and arb validity time. Client-originated UI commands such as
+MM-orders subscription, emulator ticks, trigger management, reset-profit, and
+DEX/spot switching are sent through high-level handles; they are not inbound
+settings state in the Delphi client receive path.
 
 ## Requesting Current Settings
 
@@ -52,11 +61,10 @@ for event in client.drain_events() {
         event,
         moonproto::Event::Settings(moonproto::state::SettingsEvent::ClientSettingsUpdated)
     ) {
-        if let Some(settings) = client
-            .snapshot()
-            .and_then(|state| state.settings().client_settings.clone())
-        {
-            println!("xSell={}", settings.x_sell);
+        if let Some(snapshot) = client.snapshot() {
+            if let Some(settings) = &snapshot.settings().client_settings {
+                println!("xSell={}", settings.x_sell);
+            }
         }
     }
 }
@@ -155,11 +163,29 @@ The wire UID and command-version fields are not user input. The runtime writes a
 fresh UID and Delphi's current leverage command version when it queues the
 command.
 
+Leverage-management fields are UI controls, not protocol switches:
+
+| Field | UI meaning |
+|---|---|
+| `auto_max_order` | Auto-calculate leverage from the configured maximum order size / market leverage brackets. |
+| `auto_lev_up` | Allow automatic leverage increases; when off, automatic management only lowers leverage. |
+| `auto_isolated` | Force isolated margin where supported. |
+| `auto_cross` | Force cross margin where supported. |
+| `auto_fix_lev` / `fix_lev` | Force a fixed target leverage value. |
+| `tlg_report` | Send leverage-change reports to Telegram. |
+| `lev_control` | Text configuration used by MoonBot's leverage-control table/commands. |
+
 ### Arbitrage Activation
 
 `notify_arb_activation(...)` is the MoonBot arb-valid-until notification path.
 Incoming notifications update `snapshot().settings().arb_valid_until_time()` and
-emit `SettingsEvent::ArbActivated`.
+emit `SettingsEvent::ArbActivated { arb_valid }`, where `arb_valid` is a
+`MoonTime`.
+
+For UI gating, use `snapshot().settings().arb_is_active_now()` or
+`arb_is_active_at(now)`. This matches MoonBot's `cfg.ArbActive :=
+cfg.ArbValid > Now` meaning without exposing the raw Delphi-day double as the
+terminal model.
 
 ### Chart Trade Emulator
 
@@ -170,17 +196,17 @@ market name or a retained `MarketHandle`; Active Lib resolves the current server
 market index internally.
 
 ```rust
-use moonproto::{DelphiTime, EmuPencilPoint};
+use moonproto::{EmuPencilPoint, MoonTime};
 
 let Some(state) = client.snapshot() else { return Ok(()); };
 let Some(sol) = state.markets().get("SOLUSDT") else { return Ok(()); };
 
-let base_time = DelphiTime::now();
-let at = |seconds: f64| DelphiTime::from_days(base_time.as_days() + seconds / 86_400.0);
+let base_time = MoonTime::now();
+let at = |seconds: i64| MoonTime::from_unix_millis(base_time.unix_millis() + seconds * 1000);
 let points = [
     EmuPencilPoint::new(base_time, 142.10),
-    EmuPencilPoint::new(at(0.75), 142.05),
-    EmuPencilPoint::new(at(1.50), 142.22),
+    EmuPencilPoint::new(at(1), 142.05),
+    EmuPencilPoint::new(at(2), 142.22),
 ];
 
 client
@@ -232,7 +258,7 @@ application code does not parse `UICommand` directly; it reads the applied
 
 `ClientSettingsCommand` is the full settings snapshot. It contains sell settings,
 stop/trailing/take-profit settings, iceberg flags, order-signing flag, coin
-blacklist fields, manual strategy id, stop-market settings, AutoStart blobs,
+blacklist fields, manual strategy id, stop-market settings, AutoStart settings,
 hotkey sell prices, multi-order join mode, and `ArbConfigCompact`.
 
 Normal UI code clones the retained snapshot, changes the fields behind one UI
@@ -253,17 +279,37 @@ Useful helpers:
 |---|---|
 | Main sell / scalp / fixed-sell display value | `effective_take_profit_percent()` |
 | Six fixed sell buttons | `fixed_sell_presets()`, `fixed_sell_preset_percent(slot)`, `selected_fixed_sell_slot()`, `selected_fixed_sell_percent()` |
-| Temporary blacklist rows | `temp_blacklist_entries()` |
+| Temporary blacklist rows | `temp_blacklist_entries()`, `set_temp_blacklist_entries(...)` |
 | Multi-order sell join combo | `JoinSellKind`, `join_sell_mode()`, `set_join_sell_mode(...)` |
 | AutoStart settings page | `auto_start_config()`, `set_auto_start_config(...)`, `update_auto_start_config(...)` |
 | AutoStart recovery/session page | `auto_start_config2()`, `set_auto_start_config2(...)`, `update_auto_start_config2(...)` |
+
+Common settings controls:
+
+| UI meaning | Suggested control | Fields/helpers |
+|---|---|---|
+| Main take-profit target | numeric percent input/slider | `x_sell`, `x_tmode`, `x_sell_scalp`, `effective_take_profit_percent()` |
+| Fixed-sell mode | segmented control or toggle | `fixed_sell_mode`, `fixed_sell_presets()`, `selected_fixed_sell_slot()`, `selected_fixed_sell_percent()` |
+| Stop-loss / trailing / global take-profit | numeric percent inputs + enable checkbox | `price_drop_level`, `trailing_drop`, `use_g_take_profit`, `g_take_profit` |
+| Panic-on-price-drop protection | checkbox | `panic_if_price_drop` |
+| Emulator mode | checkbox/toggle | `emu_mode` |
+| Buy/sell iceberg flags | two checkboxes | `buy_iceberg`, `sell_iceberg` |
+| Signed order ids | checkbox | `sign_orders` |
+| Global coin blacklist | multiline/token text editor + enable checkbox | `coins_black_list_text`, `use_coins_black_list` |
+| Temporary coin blacklist | editable table | `temp_blacklist_entries()`, `set_temp_blacklist_entries(...)` |
+| Manual strategy override | checkbox + strategy selector | `use_manual_strategy`, `manual_strategy_id` |
+| Position/stop-market options | checkboxes + small numeric input | `free_position_check`, `use_stop_market`, `vol_drop_level` |
+| Multi-order join-sell mode | combo/segmented control | `JoinSellKind`, `join_sell_mode()`, `set_join_sell_mode(...)` |
+| Arbitrage display options | platform checklist + display toggles | `arb_config` |
+| AutoStart pages | settings sub-panels | `auto_start_config()`, `auto_start_config2()` typed views |
 
 `fixed_sell_price` is not the best source for drawing the selected fixed-sell
 button: MoonBot derives the active fixed price from `s_price[sb_num]` after
 applying settings. Use the fixed-sell helpers for UI display.
 
-AutoStart is stored on the wire as two fixed Delphi blobs, but normal UI code
-edits typed views:
+AutoStart is stored on the wire as two fixed Delphi blobs, but Active Lib keeps
+that detail inside the retained settings snapshot. Normal UI code edits typed
+views:
 
 ```rust
 if let Some(current) = &snapshot.settings().client_settings {
@@ -281,11 +327,8 @@ if let Some(current) = &snapshot.settings().client_settings {
 }
 ```
 
-The raw blobs remain available for exact roundtrip and version compatibility:
-
-```rust
-use moonproto::{AS_CFG2_SIZE, AS_CFG_SIZE};
-```
+The hidden wire blobs are preserved for exact roundtrip and version
+compatibility when the typed views are written back.
 
 ## Pending Deduplication
 
@@ -311,9 +354,9 @@ Inside the owned `MoonClient` runtime, UI payloads are parsed and applied to
 normally read the resulting snapshot/events and do not instantiate protocol
 state machinery themselves.
 
-`UICommand::Skipped { .. }` and `UICommand::Unknown { .. }` are diagnostic
-variants for forward compatibility. The active runtime ignores them: they do
-not mutate `SettingsState` and do not emit `Event::Settings`.
+Unknown/future UI subcommands are diagnostic forward-compatibility cases. The
+active runtime ignores them: they do not mutate `SettingsState` and do not emit
+`Event::Settings`.
 
 `ClientSettingsCommand` is tolerant to old append-only settings snapshots:
 missing optional tail fields keep the current settings fallback when possible.

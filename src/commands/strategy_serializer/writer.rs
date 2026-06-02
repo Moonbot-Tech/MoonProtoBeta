@@ -111,13 +111,13 @@ impl<'a> StrategyBatchBuilder<'a> {
 }
 
 fn strategy_schema_field_should_write(field: &StrategySchemaField, value: &FieldValue) -> bool {
-    if !value.matches_type_id(field.raw_type_id) {
+    if !value.matches_type_id_inner(field.raw_type_id) {
         return false;
     }
     if let Some(default_value) = &field.default_value {
-        return !value.equals_delphi_value_for_type_id(default_value, field.raw_type_id);
+        return !value.equals_delphi_value_for_type_id_inner(default_value, field.raw_type_id);
     }
-    !value.is_zero_for_type_id(field.raw_type_id)
+    !value.is_zero_for_type_id_inner(field.raw_type_id)
 }
 
 fn finalize_strategy_batch(
@@ -152,7 +152,7 @@ fn finalize_strategy_batch(
 }
 
 pub(crate) fn write_field(out: &mut Vec<u8>, v: &FieldValue) {
-    let type_id = v.type_id();
+    let type_id = v.type_id_inner();
     if v.is_zero() {
         // Write only the TypeID with the ZERO flag; value bytes are absent.
         out.push(type_id | TID_ZERO_FLAG);

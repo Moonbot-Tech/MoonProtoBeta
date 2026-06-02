@@ -76,7 +76,7 @@ impl MoonOrders {
     /// Set the stop-loss / trailing / take-profit values you want; the runtime
     /// only sends a command when they differ from the order's current stops
     /// (Delphi `SendStopsIfChanged`). Build settings with
-    /// `StopSettings::disabled().with_stop_loss(...).with_take_profit(...)`;
+    /// `StopSettings::disabled().with_stop_loss_percent(...).with_take_profit_price(...)`;
     /// the internal take-profit latch is computed by the runtime on send, so
     /// application code does not maintain it.
     pub fn update_stops(
@@ -620,6 +620,7 @@ impl MoonSettings<'_> {
 
     /// Low-level diagnostic helper for callers that already have server market
     /// indexes. Regular terminal code should use the market-name helpers above.
+    #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub fn manage_triggers(
         &self,
@@ -649,9 +650,10 @@ impl MoonSettings<'_> {
     /// server arbitrage is valid until `valid_until`.
     pub fn notify_arb_activation(
         &self,
-        valid_until: crate::DelphiTime,
+        valid_until: crate::MoonTime,
     ) -> Result<(), MoonClientError> {
-        self.client.notify_arb_activation(valid_until.as_days())
+        self.client
+            .notify_arb_activation(valid_until.to_delphi_days())
     }
 }
 
@@ -675,7 +677,7 @@ impl MoonEmulator<'_> {
     pub fn send_pencil_prices_for_market<I>(
         &self,
         market: &crate::state::MarketHandle,
-        base_time: crate::DelphiTime,
+        base_time: crate::MoonTime,
         points: I,
     ) -> Result<(), MoonClientError>
     where
@@ -693,7 +695,7 @@ impl MoonEmulator<'_> {
     pub fn send_pencil_prices<I>(
         &self,
         market_name: impl AsRef<str>,
-        base_time: crate::DelphiTime,
+        base_time: crate::MoonTime,
         points: I,
     ) -> Result<(), MoonClientError>
     where
@@ -717,7 +719,7 @@ impl MoonEmulator<'_> {
     pub fn send_trades_for_market(
         &self,
         market: &crate::state::MarketHandle,
-        base_time: crate::DelphiTime,
+        base_time: crate::MoonTime,
         points: &[crate::EmuTradePoint],
     ) -> Result<(), MoonClientError> {
         self.send_trades(market.name(), base_time, points)
@@ -731,7 +733,7 @@ impl MoonEmulator<'_> {
     pub fn send_trades(
         &self,
         market_name: impl AsRef<str>,
-        base_time: crate::DelphiTime,
+        base_time: crate::MoonTime,
         points: &[crate::EmuTradePoint],
     ) -> Result<(), MoonClientError> {
         if points.is_empty() {
@@ -742,12 +744,12 @@ impl MoonEmulator<'_> {
         }
         let market_index = resolve_market_index(self.client, market_name.as_ref())?;
         self.client
-            .send_emulated_trades(market_index, base_time.as_days(), points.to_vec())
+            .send_emulated_trades(market_index, base_time.to_delphi_days(), points.to_vec())
     }
 }
 
 fn emu_trade_points_from_pencil<I>(
-    base_time: crate::DelphiTime,
+    base_time: crate::MoonTime,
     initial_price: f32,
     points: I,
 ) -> Result<Vec<crate::EmuTradePoint>, MoonClientError>
@@ -756,11 +758,10 @@ where
 {
     let mut out = Vec::new();
     let mut prev_price = initial_price;
+    let base_time_ms = base_time.unix_millis();
     for point in points {
-        let delta_ms = ((point.time.as_days() - base_time.as_days())
-            * crate::time::MILLISECONDS_PER_DAY)
-            .round();
-        if !(0.0..=f64::from(u16::MAX)).contains(&delta_ms) {
+        let delta_ms = point.time.unix_millis().saturating_sub(base_time_ms);
+        if !(0..=i64::from(u16::MAX)).contains(&delta_ms) {
             continue;
         }
         if out.len() >= usize::from(u16::MAX) {
@@ -831,7 +832,24 @@ pub struct MoonCandles<'a> {
 }
 
 impl MoonCandles<'_> {
+    /// Request CoinCard deep-history candles for a retained market handle.
+    ///
+    /// Prefer this in terminal UI code that already keeps a selected
+    /// `MarketHandle`, matching Delphi chart code acting on its current
+    /// `TMarket` reference.
+    pub fn request_coin_card_for(
+        &self,
+        market: &crate::state::MarketHandle,
+        ticks: crate::commands::candles::DeepHistoryKind,
+    ) -> Result<CoinCardCandlesTicket, MoonClientError> {
+        self.request_coin_card(market.name(), ticks)
+    }
+
     /// Request CoinCard deep-history candles and return immediately.
+    ///
+    /// This string-keyed path is convenient for scripts and one-shot tools.
+    /// Terminal UI code that already keeps a selected `MarketHandle` should use
+    /// [`Self::request_coin_card_for`].
     pub fn request_coin_card(
         &self,
         market: impl Into<String>,
@@ -898,19 +916,19 @@ impl MoonStrategies<'_> {
 mod tests {
     use super::*;
 
-    fn at_ms(base: crate::DelphiTime, delta_ms: f64) -> crate::DelphiTime {
-        crate::DelphiTime::from_days(base.as_days() + delta_ms / crate::time::MILLISECONDS_PER_DAY)
+    fn at_ms(base: crate::MoonTime, delta_ms: i64) -> crate::MoonTime {
+        crate::MoonTime::from_unix_millis(base.unix_millis() + delta_ms)
     }
 
     #[test]
     fn pencil_points_follow_delphi_prev_price_signing_and_delta_filter() {
-        let base = crate::DelphiTime::from_days(45_000.0);
+        let base = crate::MoonTime::from_unix_millis(1_678_780_800_000);
         let points = [
-            crate::EmuPencilPoint::new(at_ms(base, -1.0), 111.0),
-            crate::EmuPencilPoint::new(at_ms(base, 0.0), 101.0),
-            crate::EmuPencilPoint::new(at_ms(base, 500.0), 99.0),
-            crate::EmuPencilPoint::new(at_ms(base, 1_000.0), 100.0),
-            crate::EmuPencilPoint::new(at_ms(base, 70_000.0), 120.0),
+            crate::EmuPencilPoint::new(at_ms(base, -1), 111.0),
+            crate::EmuPencilPoint::new(at_ms(base, 0), 101.0),
+            crate::EmuPencilPoint::new(at_ms(base, 500), 99.0),
+            crate::EmuPencilPoint::new(at_ms(base, 1_000), 100.0),
+            crate::EmuPencilPoint::new(at_ms(base, 70_000), 120.0),
         ];
 
         let out = emu_trade_points_from_pencil(base, 100.0, points).unwrap();

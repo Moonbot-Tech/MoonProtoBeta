@@ -8,8 +8,8 @@ struct TimedRow {
 }
 
 impl SeqRingTimedRow for TimedRow {
-    fn seq_ring_time(&self) -> f64 {
-        self.time_ms as f64
+    fn seq_ring_time_ms(&self) -> i64 {
+        self.time_ms as i64
     }
 }
 
@@ -159,7 +159,9 @@ fn copy_from_time_hides_sequence_coordinates() {
     }
 
     let mut out = Vec::new();
-    let meta = reader.copy_from_time(1_700.0, 3, &mut out).unwrap();
+    let meta = reader
+        .copy_from_time(MoonTime::from_unix_millis(1_700), 3, &mut out)
+        .unwrap();
 
     assert_eq!(meta.actual_start_seq, 3);
     assert_eq!(
@@ -193,7 +195,12 @@ fn copy_time_range_stops_at_exclusive_end() {
 
     let mut out = Vec::new();
     reader
-        .copy_time_range(1_250.0, 2_000.0, 10, &mut out)
+        .copy_time_range(
+            MoonTime::from_unix_millis(1_250),
+            MoonTime::from_unix_millis(2_000),
+            10,
+            &mut out,
+        )
         .unwrap();
 
     assert_eq!(
@@ -235,10 +242,15 @@ fn timed_reads_scan_append_order_when_times_are_not_monotonic() {
         value: 3,
     });
 
-    assert_eq!(reader.first_seq_at_or_after_time(1_750.0), Some(1));
+    assert_eq!(
+        reader.first_seq_at_or_after_time(MoonTime::from_unix_millis(1_750)),
+        Some(1)
+    );
 
     let mut out = Vec::new();
-    let meta = reader.copy_from_time(1_750.0, 10, &mut out).unwrap();
+    let meta = reader
+        .copy_from_time(MoonTime::from_unix_millis(1_750), 10, &mut out)
+        .unwrap();
     assert_eq!(meta.actual_start_seq, 1);
     assert_eq!(
         out,
@@ -259,7 +271,12 @@ fn timed_reads_scan_append_order_when_times_are_not_monotonic() {
     );
 
     reader
-        .copy_time_range(1_750.0, 2_500.0, 10, &mut out)
+        .copy_time_range(
+            MoonTime::from_unix_millis(1_750),
+            MoonTime::from_unix_millis(2_500),
+            10,
+            &mut out,
+        )
         .unwrap();
     assert_eq!(
         out,
@@ -287,7 +304,9 @@ fn copy_from_time_reports_retention_clip() {
     }
 
     let mut out = Vec::new();
-    let meta = reader.copy_from_time(1_000.0, 10, &mut out).unwrap();
+    let meta = reader
+        .copy_from_time(MoonTime::from_unix_millis(1_000), 10, &mut out)
+        .unwrap();
 
     assert!(meta.clipped);
     assert_eq!(
