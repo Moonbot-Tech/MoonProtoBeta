@@ -48,23 +48,29 @@ fn send_server_packet_to_client_socket(client: &Client, cmd: Command, payload: &
     server.send_to(&packet, addr).expect("send test datagram");
 }
 
+fn install_send_session(client: &mut Client) {
+    client.server_token = 1;
+    let (encode_key, decode_key) = crate::crypto::generate_sub_keys(&client.cfg.master_key, 1);
+    client.encode_key = encode_key;
+    client.decode_key = decode_key;
+    client.encode_cipher = Some(crate::crypto::cipher_from_key(&encode_key));
+}
+
 #[test]
 fn send_phase_runs_with_ready_send_queue() {
     let mut client = Client::new(dummy_cfg());
     client.testing_set_domain_ready(true);
+    client.authorized = true;
+    client.auth_status = AuthStatus::AuthDone;
+    client.prev_auth_status = AuthStatus::AuthDone;
+    client.need_connect = false;
+    install_send_session(&mut client);
+    client.transport.socket = Some(UdpSocket::bind("127.0.0.1:0").unwrap());
     let mut dispatcher = EventDispatcher::new();
 
-    client.send_cmd(
-        vec![1, 2, 3, 4],
-        Command::UI,
-        SendPriority::Sliced,
-        false,
-        6,
-    );
+    client.send_cmd(vec![1, 2, 3, 4], Command::UI, SendPriority::Sliced, true, 6);
 
-    let total_sent_before = client.total_sent();
     client.run_dispatcher_steps_for_test(1, &mut dispatcher);
-
     assert!(
         client.send_lock.lock().unwrap().is_empty(),
         "writer must copy direct Delphi-style send queues without app-event bridge"
@@ -73,9 +79,10 @@ fn send_phase_runs_with_ready_send_queue() {
         !client.sending.is_empty(),
         "Sliced item with retry budget must remain in Sending until ACK or retry exhaustion"
     );
-    assert!(
-        client.total_sent() > total_sent_before,
-        "writer tick must send from copied queue"
+    assert_eq!(
+        client.total_sent(),
+        0,
+        "first tick only creates the Sliced object; actual slice transmit is paced by retry_sliced"
     );
 }
 
@@ -129,6 +136,8 @@ fn raw_run_delivers_callback_on_app_thread() {
     client.authorized = true;
     client.auth_status = AuthStatus::AuthDone;
     client.prev_auth_status = AuthStatus::AuthDone;
+    client.need_connect = false;
+    install_send_session(&mut client);
     client.transport.socket = Some(UdpSocket::bind("127.0.0.1:0").unwrap());
     send_server_packet_to_client_socket(&client, Command::OrderBook, &[0xAA]);
 
@@ -229,17 +238,16 @@ fn lifecycle_callback_block_does_not_extend_protocol_writer_tick() {
 fn app_send_queue_is_not_blocked_by_data_read_delivery() {
     let mut client = Client::new(dummy_cfg());
     client.testing_set_domain_ready(true);
+    client.authorized = true;
+    client.auth_status = AuthStatus::AuthDone;
+    client.prev_auth_status = AuthStatus::AuthDone;
+    client.need_connect = false;
+    install_send_session(&mut client);
     client.transport.socket = Some(UdpSocket::bind("127.0.0.1:0").unwrap());
     let mut dispatcher = EventDispatcher::new();
 
     send_server_packet_to_client_socket(&client, Command::OrderBook, &[0xAA]);
-    client.send_cmd(
-        vec![1, 2, 3, 4],
-        Command::UI,
-        SendPriority::Sliced,
-        false,
-        0,
-    );
+    client.send_cmd(vec![1, 2, 3, 4], Command::UI, SendPriority::Sliced, true, 6);
 
     client.run_dispatcher_steps_for_test(1, &mut dispatcher);
 

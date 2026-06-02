@@ -158,16 +158,62 @@ fn encrypted_server_hello(
     master_key: &MoonKey,
     cmd: Command,
     client_id: u64,
+    rnd: [u8; 16],
     mix_ts: u64,
     server_token: u64,
     peer_app_token: u64,
 ) -> Vec<u8> {
     let mut hello = handshake::Hello::new(mix_ts, peer_app_token);
+    hello.rnd = rnd;
     hello.server_token = server_token;
     hello.app_token = peer_app_token;
     hello.timestamp = delphi_now();
     let aad = handshake::handshake_aad(client_id, cmd.to_byte());
     crypto::encrypt(master_key, &hello.to_bytes_packed(), &aad)
+}
+
+fn encrypted_session_server_hello(
+    client: &Client,
+    cmd: Command,
+    mix_ts: u64,
+    server_token: u64,
+    peer_app_token: u64,
+    peer_mix: u64,
+) -> Vec<u8> {
+    encrypted_session_server_hello_with_rnd(
+        client,
+        cmd,
+        client.handshake_rnd,
+        mix_ts,
+        server_token,
+        peer_app_token,
+        peer_mix,
+    )
+}
+
+fn encrypted_session_server_hello_with_rnd(
+    client: &Client,
+    cmd: Command,
+    rnd: [u8; 16],
+    mix_ts: u64,
+    server_token: u64,
+    peer_app_token: u64,
+    peer_mix: u64,
+) -> Vec<u8> {
+    let mut hello = handshake::Hello::new(mix_ts, peer_app_token);
+    hello.rnd = rnd;
+    hello.server_token = server_token;
+    hello.app_token = peer_app_token;
+    hello.peer_mix = peer_mix;
+    hello.timestamp = delphi_now();
+    let aad = handshake::handshake_aad(client.cfg.client_id, cmd.to_byte());
+    let cipher = client
+        .recv
+        .data_read_state
+        .decode_cipher
+        .as_ref()
+        .expect("test session decode cipher");
+    crypto::encrypt_with_cipher(cipher, &hello.to_bytes_packed(), &aad)
 }
 
 fn install_active_session(client: &mut Client, server_token: u64) -> (MoonKey, MoonKey) {
@@ -185,6 +231,28 @@ fn install_active_session(client: &mut Client, server_token: u64) -> (MoonKey, M
     client.need_connect = false;
     client.lifecycle.was_ever_connected = true;
     (encode_key, decode_key)
+}
+
+fn encrypted_server_control(
+    client: &Client,
+    msg_num: u64,
+    cmd: Command,
+    payload: &[u8],
+) -> Vec<u8> {
+    let mut plaintext =
+        Vec::with_capacity(crate::protocol::crypted::CRYPTO_HEADER_SIZE + payload.len());
+    plaintext.extend_from_slice(&0xCAFEu16.to_le_bytes());
+    plaintext.extend_from_slice(&msg_num.to_le_bytes());
+    plaintext.push(cmd.to_byte());
+    plaintext.push(0);
+    plaintext.extend_from_slice(payload);
+    let cipher = client
+        .recv
+        .data_read_state
+        .decode_cipher
+        .as_ref()
+        .expect("test server decode cipher");
+    crypto::encrypt_with_cipher(cipher, &plaintext, &[])
 }
 
 #[test]
@@ -644,12 +712,14 @@ fn reader_handles_who_are_you_imfriend_without_main_loop_tick() {
     client.transport.socket = Some(client_sock);
     client.start_inline_reader_session();
     client.start_hello_wait(HelloWaitState::PrimaryHelloCold, 0);
+    client.handshake_rnd = [0x31; 16];
 
     let who = encrypted_server_hello(
         &client.cfg.master_key,
         Command::WhoAreYou,
         client.cfg.client_id,
-        client.client_token.wrapping_add(3),
+        client.handshake_rnd,
+        client.client_token.wrapping_add(1),
         server_token,
         peer_app_token,
     );
@@ -677,15 +747,16 @@ fn reader_handles_who_are_you_imfriend_without_main_loop_tick() {
     let decrypted = crypto::decrypt(&encode_key, &imfriend1, &aad)
         .expect("ImFriend decrypts with client encode key");
     let im = handshake::Hello::from_bytes(&decrypted).expect("valid ImFriend Hello");
-    assert_eq!(im.mix_ts, token_before.wrapping_add(1));
+    assert_eq!(im.rnd, [0x31; 16]);
+    assert_eq!(im.mix_ts, token_before.wrapping_add(2));
     assert_eq!(im.app_token, app_token);
 
     assert_eq!(client.server_token, server_token);
     assert_eq!(client.peer_app_token, peer_app_token);
-    assert_eq!(client.client_token, token_before.wrapping_add(1));
+    assert_eq!(client.client_token, token_before.wrapping_add(2));
     assert_eq!(client.encode_key, encode_key);
     assert_eq!(client.decode_key, decode_key);
-    assert_eq!(client.client_token, token_before.wrapping_add(1));
+    assert_eq!(client.client_token, token_before.wrapping_add(2));
     assert_eq!(client.encode_key, encode_key);
     assert_eq!(client.decode_key, decode_key);
 }
@@ -729,7 +800,8 @@ fn reader_who_are_you_uses_writer_updated_hello_token() {
         &client.cfg.master_key,
         Command::WhoAreYou,
         client.cfg.client_id,
-        client.client_token.wrapping_add(3),
+        hello.rnd,
+        client.client_token.wrapping_add(1),
         server_token,
         peer_app_token,
     );
@@ -749,14 +821,14 @@ fn reader_who_are_you_uses_writer_updated_hello_token() {
         .expect("ImFriend decrypts with client encode key");
     assert_eq!(
         im.mix_ts,
-        token_before.wrapping_add(2),
-        "Delphi server requires ImFriend.MixTS > original Hello.MixTS",
+        token_before.wrapping_add(3),
+        "Delphi accepts server MixTS, then increments ClientToken for ImFriend",
     );
-    assert_eq!(client.client_token, token_before.wrapping_add(2));
+    assert_eq!(client.client_token, token_before.wrapping_add(3));
 }
 
 #[test]
-fn reader_drops_who_are_you_when_mix_ts_is_not_latest_hello_plus_three() {
+fn reader_drops_who_are_you_when_rnd_is_not_current_handshake() {
     let _err_emu_guard = err_emu_test_guard();
     let (server_sock, client_addr, mut client) = inline_reader_test_client();
     server_sock
@@ -764,12 +836,14 @@ fn reader_drops_who_are_you_when_mix_ts_is_not_latest_hello_plus_three() {
         .unwrap();
     let token_before = client.client_token;
     client.start_hello_wait(HelloWaitState::PrimaryHelloCold, 0);
+    client.handshake_rnd = [0x52; 16];
 
     let who = encrypted_server_hello(
         &client.cfg.master_key,
         Command::WhoAreYou,
         client.cfg.client_id,
-        client.client_token.wrapping_add(2),
+        [0x53; 16],
+        client.client_token.wrapping_add(1),
         0x2222_3333_4444_5555,
         0xAAAA_BBBB_CCCC_DDDD,
     );
@@ -813,16 +887,22 @@ fn reader_handles_fine_auth_done_without_recv_event_backlog() {
     let mut client = Client::new(dummy_cfg_for_server(server_addr));
     client.need_connect = true;
     client.start_hello_wait(HelloWaitState::PrimaryImFriendSent, 0);
+    client.handshake_rnd = [0x64; 16];
+    let server_token = 0x2222;
+    let (_encode_key, _decode_key) = install_active_session(&mut client, server_token);
+    client.authorized = false;
+    client.auth_status = AuthStatus::Connected;
+    client.need_connect = true;
     client.transport.socket = Some(client_sock);
     client.start_inline_reader_session();
 
-    let fine = encrypted_server_hello(
-        &client.cfg.master_key,
+    let fine = encrypted_session_server_hello(
+        &client,
         Command::Fine,
-        client.cfg.client_id,
-        client.client_token,
-        0x2222,
+        client.client_token.wrapping_add(1),
+        server_token,
         0x3333,
+        0,
     );
     let packet = pack_server_packet(&client.cfg.mac_key, Command::Fine, &fine);
     server_sock.send_to(&packet, client_addr).unwrap();
@@ -836,7 +916,73 @@ fn reader_handles_fine_auth_done_without_recv_event_backlog() {
 }
 
 #[test]
-fn reader_clears_primary_wait_after_invalid_who_are_you() {
+fn reader_drops_fine_when_rnd_is_not_current_handshake() {
+    let _err_emu_guard = err_emu_test_guard();
+    let (server_sock, client_addr, mut client) = inline_reader_test_client();
+    client.need_connect = true;
+    client.start_hello_wait(HelloWaitState::PrimaryImFriendSent, 0);
+    client.handshake_rnd = [0x71; 16];
+    let server_token = 0x2222;
+    install_active_session(&mut client, server_token);
+    client.authorized = false;
+    client.auth_status = AuthStatus::Connected;
+    client.need_connect = true;
+
+    let stale_fine = encrypted_session_server_hello_with_rnd(
+        &client,
+        Command::Fine,
+        [0x72; 16],
+        client.client_token.wrapping_add(1),
+        server_token,
+        0x3333,
+        0,
+    );
+    let packet = pack_server_packet(&client.cfg.mac_key, Command::Fine, &stale_fine);
+    server_sock.send_to(&packet, client_addr).unwrap();
+
+    pump_inline_reader(&mut client);
+
+    assert!(!client.authorized);
+    assert!(client.need_connect);
+    assert!(
+        client.waiting_hello,
+        "stale Fine must not clear the current Fine wait window",
+    );
+}
+
+#[test]
+fn reader_accepts_rebind_fine_from_current_retry_window() {
+    let _err_emu_guard = err_emu_test_guard();
+    let (server_sock, client_addr, mut client) = inline_reader_test_client();
+    client.need_connect = true;
+    client.set_hello_wait_state(HelloWaitState::RebindHelloAgain);
+    client.handshake_rnd = [0x81; 16];
+    let server_token = 0xAAAA;
+    install_active_session(&mut client, server_token);
+    client.authorized = false;
+    client.auth_status = AuthStatus::Connected;
+
+    let fine = encrypted_session_server_hello(
+        &client,
+        Command::Fine,
+        client.client_token.wrapping_add(1),
+        server_token,
+        0xBBBB,
+        0,
+    );
+    let packet = pack_server_packet(&client.cfg.mac_key, Command::Fine, &fine);
+    server_sock.send_to(&packet, client_addr).unwrap();
+
+    pump_inline_reader(&mut client);
+
+    assert!(client.authorized);
+    assert_eq!(client.auth_status, AuthStatus::AuthDone);
+    assert!(!client.need_connect);
+    assert!(!client.waiting_hello);
+}
+
+#[test]
+fn reader_keeps_primary_wait_after_invalid_who_are_you() {
     let _err_emu_guard = err_emu_test_guard();
     let (server_sock, client_addr, mut client) = inline_reader_test_client();
     client.start_hello_wait(HelloWaitState::PrimaryHelloCold, 0);
@@ -847,7 +993,7 @@ fn reader_clears_primary_wait_after_invalid_who_are_you() {
 
     pump_inline_reader(&mut client);
 
-    assert!(!client.waiting_hello);
+    assert!(client.waiting_hello);
     assert_eq!(
         client.server_token, 0x1234,
         "invalid handshake payload must not apply WhoAreYou fields",
@@ -862,12 +1008,14 @@ fn reader_drops_late_who_are_you_after_server_token_is_set() {
     client.start_hello_wait(HelloWaitState::PrimaryImFriendSent, 0);
     client.server_token = 0x1111;
     client.peer_app_token = 0x2222;
+    client.handshake_rnd = [0x91; 16];
 
     let who = encrypted_server_hello(
         &client.cfg.master_key,
         Command::WhoAreYou,
         client.cfg.client_id,
-        client.client_token.wrapping_add(3),
+        client.handshake_rnd,
+        client.client_token.wrapping_add(1),
         0xAAAA,
         0xBBBB,
     );
@@ -876,7 +1024,7 @@ fn reader_drops_late_who_are_you_after_server_token_is_set() {
 
     pump_inline_reader(&mut client);
 
-    assert!(!client.waiting_hello);
+    assert!(client.waiting_hello);
     assert_eq!(client.server_token, 0x1111);
     assert_eq!(client.peer_app_token, 0x2222);
     assert_eq!(
@@ -891,20 +1039,24 @@ fn reader_clears_fine_wait_after_invalid_fine() {
     let (server_sock, client_addr, mut client) = inline_reader_test_client();
     client.start_hello_wait(HelloWaitState::PrimaryImFriendSent, 0);
     client.need_connect = true;
+    client.server_token = 0x2222;
 
     let packet = pack_server_packet(&client.cfg.mac_key, Command::Fine, b"bad");
     server_sock.send_to(&packet, client_addr).unwrap();
 
     pump_inline_reader(&mut client);
 
-    assert!(!client.waiting_hello);
+    assert!(
+        client.waiting_hello,
+        "invalid Fine must not clear a still-valid Fine wait window",
+    );
     assert!(client.need_connect);
     assert!(!client.authorized);
     assert_ne!(client.auth_status, AuthStatus::AuthDone);
 }
 
 #[test]
-fn reader_handles_wrong_hello_without_recv_event_backlog() {
+fn reader_drops_wrong_hello_outside_primary_wait() {
     let _err_emu_guard = err_emu_test_guard();
     let (server_sock, client_addr, mut client) = inline_reader_test_client();
     client.auth_status = AuthStatus::Offline;
@@ -914,7 +1066,7 @@ fn reader_handles_wrong_hello_without_recv_event_backlog() {
 
     pump_inline_reader(&mut client);
 
-    assert_eq!(client.auth_status, AuthStatus::Connected);
+    assert_eq!(client.auth_status, AuthStatus::Offline);
     assert!(!client.waiting_hello);
 }
 
@@ -942,7 +1094,7 @@ fn reader_handles_want_new_hello_without_recv_event_backlog() {
     assert!(!client.authorized);
     assert!(client.need_connect);
     assert!(!client.soft_reconnect);
-    assert_eq!(client.crypt_msg_counter.load(Ordering::Relaxed), 0);
+    assert_eq!(client.crypt_msg_counter.load(Ordering::Relaxed), 2047);
     assert_eq!(client.total_sent(), 0);
     assert!(!client.recv.recvd_slider.has_new_data);
     assert_eq!(client.last_sent_hello, NEVER_SENT_MS);
@@ -957,16 +1109,20 @@ fn reader_handles_need_hello_again_without_recv_event_backlog() {
     let _err_emu_guard = err_emu_test_guard();
     let (server_sock, client_addr, mut client) = inline_reader_test_client();
     install_active_session(&mut client, 1);
+    client.authorized = true;
+    client.auth_status = AuthStatus::AuthDone;
     client.last_sent_hello = 12345;
+    client.last_need_hello_again = -10_000;
 
-    let packet = pack_server_packet(&client.cfg.mac_key, Command::NeedHelloAgain, &[]);
+    let need = encrypted_server_control(&client, 1, Command::NeedHelloAgain, &[]);
+    let packet = pack_server_packet(&client.cfg.mac_key, Command::Crypted, &need);
     server_sock.send_to(&packet, client_addr).unwrap();
 
     pump_inline_reader(&mut client);
 
-    assert!(client.waiting_hello);
-    assert!(client.waiting_hello_start >= 0);
-    assert_eq!(client.last_need_hello_again, client.waiting_hello_start);
+    assert!(!client.waiting_hello);
+    assert!(client.need_connect);
+    assert!(client.soft_reconnect);
     assert_eq!(client.last_sent_hello, NEVER_SENT_MS);
 }
 
@@ -997,18 +1153,26 @@ fn nat_binding_change_rebinds_with_hello_again_from_new_socket() {
     client.transport.socket = Some(new_socket);
     client.start_inline_reader_session();
 
-    let need = pack_server_packet(&client.cfg.mac_key, Command::NeedHelloAgain, &[]);
+    client.authorized = true;
+    client.auth_status = AuthStatus::AuthDone;
+    client.last_need_hello_again = -10_000;
+    let need_payload = encrypted_server_control(&client, 1, Command::NeedHelloAgain, &[]);
+    let need = pack_server_packet(&client.cfg.mac_key, Command::Crypted, &need_payload);
     server_sock.send_to(&need, new_addr).unwrap();
     pump_inline_reader(&mut client);
 
-    assert!(client.waiting_hello);
-    assert!(client.hello_wait_state.allows_hello_again_retry());
+    assert!(!client.waiting_hello);
+    assert!(client.need_connect);
+    assert!(client.soft_reconnect);
     assert_eq!(client.last_sent_hello, NEVER_SENT_MS);
 
     ProtocolCore {
         client: &mut client,
     }
-    .check_offline_reconnect(100);
+    .check_hello_send(100);
+
+    assert!(client.waiting_hello);
+    assert!(client.hello_wait_state.allows_hello_again_retry());
 
     let mut raw = [0u8; 2048];
     let (n, from) = server_sock.recv_from(&mut raw).unwrap();
@@ -1024,13 +1188,13 @@ fn nat_binding_change_rebinds_with_hello_again_from_new_socket() {
         crypto::mix_values(&hello_again.rnd, hello_again.mix_ts, server_token),
     );
 
-    let fine = encrypted_server_hello(
-        &client.cfg.master_key,
+    let fine = encrypted_session_server_hello(
+        &client,
         Command::Fine,
-        client.cfg.client_id,
-        client.client_token,
+        client.client_token.wrapping_add(1),
         server_token,
         0xAAAA_BBBB_CCCC_DDDD,
+        0,
     );
     let fine_packet = pack_server_packet(&client.cfg.mac_key, Command::Fine, &fine);
     server_sock.send_to(&fine_packet, new_addr).unwrap();
@@ -1043,7 +1207,7 @@ fn nat_binding_change_rebinds_with_hello_again_from_new_socket() {
 }
 
 #[test]
-fn reader_need_hello_again_without_session_falls_back_to_hard_hello() {
+fn reader_need_hello_again_plaintext_without_session_is_dropped() {
     let _err_emu_guard = err_emu_test_guard();
     let (server_sock, client_addr, mut client) = inline_reader_test_client();
     client.last_sent_hello = 12345;
@@ -1056,8 +1220,11 @@ fn reader_need_hello_again_without_session_falls_back_to_hard_hello() {
     assert!(!client.waiting_hello);
     assert!(client.need_connect);
     assert!(!client.soft_reconnect);
-    assert_eq!(client.last_sent_hello, NEVER_SENT_MS);
-    assert!(client.next_primary_hello_new_session);
+    assert_eq!(
+        client.last_sent_hello, 12345,
+        "plaintext NeedHelloAgain is sensitive session-control and must be ignored"
+    );
+    assert!(!client.next_primary_hello_new_session);
 }
 
 #[test]

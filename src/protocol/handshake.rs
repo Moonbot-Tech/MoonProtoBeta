@@ -1,6 +1,3 @@
-use crate::crypto;
-use crate::protocol::Command;
-use crate::MoonKey;
 use rand::Rng;
 
 /// Handshake AEAD associated data: `{client_id: u64 LE, cmd: u8}` packed = 9
@@ -102,24 +99,6 @@ impl Hello {
             WireHello::read_from_bytes(&data[..HELLO_SIZE]).ok()?,
         ))
     }
-}
-
-/// Build the Hello packet ready to send (encrypted with MasterKey).
-/// AAD = `{client_id, MPC_Hello}` (9 bytes, see [`handshake_aad`]).
-/// `timestamp_dt` — TDateTime from the caller (client.rs::delphi_now includes the NTP offset).
-pub(crate) fn build_hello_packet(
-    master_key: &MoonKey,
-    client_id: u64,
-    client_token: &mut u64,
-    app_token: u64,
-    timestamp_dt: f64,
-) -> Vec<u8> {
-    *client_token += 1;
-    let mut hello = Hello::new(*client_token, app_token);
-    hello.timestamp = timestamp_dt;
-    let packed = hello.to_bytes_packed();
-    let aad = handshake_aad(client_id, Command::Hello.to_byte());
-    crypto::encrypt(master_key, &packed, &aad)
 }
 
 #[cfg(test)]

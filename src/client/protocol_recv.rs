@@ -282,7 +282,7 @@ impl ProtocolCore<'_> {
                 }
                 self.on_new_ping(payload, recv_bytes, total_recv_after, timestamp_ms, mode);
             }
-            Command::WrongHello | Command::WantNewHello | Command::NeedHelloAgain => {
+            Command::WrongHello | Command::WantNewHello => {
                 self.on_handshake_control(Command::from_byte(raw_cmd), recv_bytes, timestamp_ms);
             }
             Command::WhoAreYou => {
@@ -463,6 +463,17 @@ impl ProtocolCore<'_> {
         sliced_stats: Option<ReaderSlicedStats>,
         mode: &mut RunMode<'_>,
     ) {
+        match Command::from_byte(cmd) {
+            Command::NeedHelloAgain => {
+                self.apply_need_hello_again(timestamp_ms);
+                return;
+            }
+            Command::SessionClose => {
+                return;
+            }
+            _ => {}
+        }
+
         let api_pending_consumed = Client::dispatch_api_pending(
             self.client.pending_api.api_pending.as_ref(),
             cmd,

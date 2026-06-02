@@ -73,31 +73,23 @@ impl ProtocolCore<'_> {
         timestamp_ms: i64,
     ) {
         let accept_want_new_hello = self.client.should_accept_want_new_hello();
-        if matches!(cmd, Command::WrongHello | Command::WantNewHello) {
-            self.client.clear_hello_wait_state();
-        }
         if cmd == Command::WantNewHello && !accept_want_new_hello {
             let _ = (recv_bytes, timestamp_ms);
             return;
         }
-        if cmd == Command::WantNewHello {
-            self.client.recv.data_read_state.reset();
-            self.client.send_lock.lock().unwrap().reset_tmp_slider();
-            self.client.used_sliced_limit = false;
-            self.client.crypt_msg_counter.store(0, Ordering::Relaxed);
-            self.client.metrics.total_sent.store(0, Ordering::Relaxed);
-            self.client.recv.recvd_slider = Slider::new();
-            self.client.transport.recv_slicer = slicing::SlicingReceiver::new();
-            self.client
-                .metrics
-                .total_recv_shared
-                .store(0, Ordering::Relaxed);
-        }
         let _ = recv_bytes;
         match cmd {
-            Command::WrongHello => self.apply_wrong_hello(),
+            Command::WrongHello => {
+                if matches!(
+                    self.client.hello_wait_state,
+                    HelloWaitState::PrimaryHelloCold
+                        | HelloWaitState::PrimaryHelloNewSession
+                        | HelloWaitState::PrimaryImFriendSent
+                ) {
+                    self.apply_wrong_hello();
+                }
+            }
             Command::WantNewHello => self.apply_want_new_hello(),
-            Command::NeedHelloAgain => self.apply_need_hello_again(timestamp_ms),
             _ => {}
         }
     }
@@ -109,7 +101,6 @@ impl ProtocolCore<'_> {
         timestamp_ms: i64,
     ) -> Duration {
         let wait_state = self.client.hello_wait_state;
-        self.client.clear_hello_wait_state();
         if !wait_state.allows_who_are_you() || self.client.server_token != 0 {
             let _ = (payload, recv_bytes, timestamp_ms);
             return Duration::ZERO;
@@ -120,12 +111,7 @@ impl ProtocolCore<'_> {
             Command::WhoAreYou.to_byte(),
             payload,
         ) {
-            // Freshness check: WhoAreYou must answer our latest primary Hello.
-            // The server echoes Hello.MixTS after `Inc(MixTS, 3)`, while
-            // `client_token` remains the MixTS of the last sent Hello until
-            // ImFriend is built. A replayed/foreign WhoAreYou can decrypt, but
-            // must not move the session to the server token it carries.
-            if hello.mix_ts != self.client.client_token.wrapping_add(3) {
+            if !self.client.same_handshake_rnd(&hello.rnd) {
                 let _ = (recv_bytes, timestamp_ms);
                 return Duration::ZERO;
             }
@@ -158,19 +144,25 @@ impl ProtocolCore<'_> {
 
     pub(crate) fn on_fine(&mut self, payload: &[u8], recv_bytes: u64, timestamp_ms: i64) {
         let wait_state = self.client.hello_wait_state;
-        self.client.clear_hello_wait_state();
         if !wait_state.allows_fine() {
             let _ = (payload, recv_bytes, timestamp_ms);
             return;
         }
-        if Client::decode_handshake_hello(
-            &self.client.cfg.master_key,
-            self.client.cfg.client_id,
-            Command::Fine.to_byte(),
-            payload,
-        )
-        .is_some()
-        {
+        let aad = handshake::handshake_aad(self.client.cfg.client_id, Command::Fine.to_byte());
+        let Some(cipher) = self.client.recv.data_read_state.decode_cipher.as_ref() else {
+            let _ = (payload, recv_bytes, timestamp_ms);
+            return;
+        };
+        if let Some(decrypted) = crypto::decrypt_with_cipher(cipher, payload, &aad) {
+            let Some(hello) = handshake::Hello::from_bytes(&decrypted) else {
+                let _ = (recv_bytes, timestamp_ms);
+                return;
+            };
+            if !self.client.same_handshake_rnd(&hello.rnd) || hello.peer_mix != 0 {
+                let _ = (recv_bytes, timestamp_ms);
+                return;
+            }
+            self.client.accepted_server_mix_ts(hello.mix_ts);
             let _ = recv_bytes;
             self.apply_fine_auth_done();
         } else {

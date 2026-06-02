@@ -2,38 +2,69 @@ use super::protocol_core::ProtocolCore;
 use super::*;
 
 impl ProtocolCore<'_> {
+    fn new_handshake_rnd(&mut self) {
+        self.client.handshake_rnd = rand::random::<[u8; 16]>();
+        self.client.handshake_peer_mix = 0;
+    }
+
     pub(crate) fn send_hello(&mut self) {
-        let payload = handshake::build_hello_packet(
-            &self.client.cfg.master_key,
-            self.client.cfg.client_id,
-            &mut self.client.client_token,
-            self.client.app_token,
-            delphi_now(),
-        );
+        self.client.client_token = self.client.client_token.wrapping_add(1);
+        let mut hello = handshake::Hello::new(self.client.client_token, self.client.app_token);
+        hello.rnd = self.client.handshake_rnd;
+        hello.timestamp = delphi_now();
+        hello.server_token = 0;
+        hello.peer_mix = 0;
+        let packed = hello.to_bytes_packed();
+        let aad = handshake::handshake_aad(self.client.cfg.client_id, Command::Hello.to_byte());
+        let payload = crypto::encrypt(&self.client.cfg.master_key, &packed, &aad);
         self.send_command(Command::Hello, &payload);
     }
 
-    pub(crate) fn build_hello_again_packet(&mut self) -> Vec<u8> {
-        self.client.client_token += 1;
+    pub(crate) fn build_hello_again_packet(&mut self) -> Option<Vec<u8>> {
+        if self.client.encode_cipher.is_none() {
+            return None;
+        }
+        self.client.client_token = self.client.client_token.wrapping_add(1);
         let mut hello = handshake::Hello::new(self.client.client_token, self.client.app_token);
+        hello.rnd = self.client.handshake_rnd;
         hello.timestamp = delphi_now();
+        hello.server_token = self.client.server_token;
         hello.peer_mix = crypto::mix_values(&hello.rnd, hello.mix_ts, self.client.server_token);
         let packed = hello.to_bytes_packed();
         let aad =
             handshake::handshake_aad(self.client.cfg.client_id, Command::HelloAgain.to_byte());
-        if let Some(cipher) = self.client.encode_cipher.as_ref() {
-            crypto::encrypt_with_cipher(cipher, &packed, &aad)
-        } else {
-            // Kept for explicit low-level packet construction/tests. Production
-            // handshake state does not send HelloAgain before a real session
-            // exists.
-            crypto::encrypt(&self.client.cfg.master_key, &packed, &aad)
-        }
+        let cipher = self.client.encode_cipher.as_ref()?;
+        Some(crypto::encrypt_with_cipher(cipher, &packed, &aad))
     }
 
     pub(crate) fn send_hello_again(&mut self) {
-        let encrypted = self.build_hello_again_packet();
+        let Some(encrypted) = self.build_hello_again_packet() else {
+            return;
+        };
         self.send_command(Command::HelloAgain, &encrypted);
+    }
+
+    pub(crate) fn build_imfriend_packet(&mut self) -> Option<Vec<u8>> {
+        if self.client.server_token == 0 {
+            return None;
+        }
+        self.client.client_token = self.client.client_token.wrapping_add(1);
+        let mut hello = handshake::Hello::new(self.client.client_token, self.client.app_token);
+        hello.rnd = self.client.handshake_rnd;
+        hello.server_token = self.client.server_token;
+        hello.peer_mix = self.client.handshake_peer_mix;
+        hello.timestamp = delphi_now();
+        let packed = hello.to_bytes_packed();
+        let aad = handshake::handshake_aad(self.client.cfg.client_id, Command::ImFriend.to_byte());
+        let cipher = self.client.encode_cipher.as_ref()?;
+        Some(crypto::encrypt_with_cipher(cipher, &packed, &aad))
+    }
+
+    pub(crate) fn send_imfriend(&mut self) {
+        let Some(encrypted) = self.build_imfriend_packet() else {
+            return;
+        };
+        self.send_command(Command::ImFriend, &encrypted);
     }
 
     pub(crate) fn check_hello_send(&mut self, cur_tm: i64) {
@@ -44,29 +75,46 @@ impl ProtocolCore<'_> {
         if (cur_tm - self.client.last_sent_hello).abs() <= interval {
             return;
         }
-        let wait_state = if self.client.soft_reconnect && self.client.server_token != 0 {
-            self.send_hello_again();
-            HelloWaitState::RebindHelloAgain
-        } else {
-            let state = if self.client.next_primary_hello_new_session
-                || self.client.lifecycle.was_ever_connected
-                || self.client.server_token != 0
-            {
-                HelloWaitState::PrimaryHelloNewSession
-            } else {
-                HelloWaitState::PrimaryHelloCold
-            };
-            self.client.soft_reconnect = false;
-            self.client.full_reset();
-            self.client.server_token = 0;
-            self.client.peer_app_token = 0;
-            self.client.authorized = false;
-            self.send_hello();
-            self.client.next_primary_hello_new_session = false;
-            state
-        };
+
+        match self.client.hello_wait_state {
+            HelloWaitState::Idle => {
+                if self.client.soft_reconnect && self.client.server_token != 0 {
+                    self.new_handshake_rnd();
+                    self.client
+                        .start_hello_wait(HelloWaitState::RebindHelloAgain, cur_tm);
+                    self.send_hello_again();
+                } else {
+                    let state = if self.client.next_primary_hello_new_session
+                        || self.client.lifecycle.was_ever_connected
+                        || self.client.server_token != 0
+                    {
+                        HelloWaitState::PrimaryHelloNewSession
+                    } else {
+                        HelloWaitState::PrimaryHelloCold
+                    };
+                    self.client.soft_reconnect = false;
+                    self.client.full_reset();
+                    self.client.clear_outbound_session_data();
+                    self.client.server_token = 0;
+                    self.client.peer_app_token = 0;
+                    self.client.authorized = false;
+                    self.new_handshake_rnd();
+                    self.client.start_hello_wait(state, cur_tm);
+                    self.send_hello();
+                    self.client.next_primary_hello_new_session = false;
+                }
+            }
+            HelloWaitState::PrimaryHelloCold | HelloWaitState::PrimaryHelloNewSession => {
+                self.send_hello();
+            }
+            HelloWaitState::PrimaryImFriendSent => {
+                self.send_imfriend();
+            }
+            HelloWaitState::RebindHelloAgain => {
+                self.send_hello_again();
+            }
+        }
         self.client.last_sent_hello = cur_tm;
-        self.client.start_hello_wait(wait_state, cur_tm);
     }
 
     pub(crate) fn check_offline_reconnect(&mut self, cur_tm: i64) {
@@ -97,6 +145,7 @@ impl ProtocolCore<'_> {
         self.client.auth_status = AuthStatus::Offline;
         if !waiting_rebind {
             self.client.waiting_hello_start = cur_tm;
+            self.new_handshake_rnd();
         }
         self.client
             .set_hello_wait_state(HelloWaitState::RebindHelloAgain);
@@ -121,6 +170,10 @@ impl ProtocolCore<'_> {
                 self.client.next_primary_hello_new_session = true;
             }
             self.client.clear_hello_wait_state();
+            self.client.waiting_hello_start = 0;
+            if !self.client.soft_reconnect {
+                self.client.last_sent_hello = NEVER_SENT_MS;
+            }
         }
     }
 
@@ -135,17 +188,37 @@ impl ProtocolCore<'_> {
     }
 
     pub(crate) fn do_force_disconnect(&mut self) {
-        if self.client.connected && !self.client.soft_reconnect {
-            self.send_command(Command::LogOff, &[]);
+        if self.client.connected
+            && !self.client.soft_reconnect
+            && self.client.authorized
+            && self.client.server_token != 0
+        {
+            self.send_session_close(self.client.now_ms());
         }
         self.client.clear_recv_poller();
         self.client.transport.socket = None;
         if !self.client.soft_reconnect {
             self.client.full_reset();
+            self.client.clear_outbound_session_data();
         }
         self.client.connected = false;
         self.client.authorized = false;
         self.client.force_disconnect = false;
         self.client.clear_hello_wait_state();
+    }
+
+    pub(crate) fn send_session_close(&mut self, cur_tm: i64) {
+        let mut item = SendItem {
+            data: Vec::new(),
+            cmd: Command::SessionClose.to_byte(),
+            encrypted: true,
+            priority: SendPriority::High,
+            retry_left: initial_retry_left(true, 1),
+            max_retries: 1,
+            msg_num: 0,
+            last_sent_at: 0,
+            u_key: UniqueKey::none(),
+        };
+        self.send_h_item(&mut item, cur_tm);
     }
 }

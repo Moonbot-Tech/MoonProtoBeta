@@ -1,11 +1,12 @@
 use super::*;
 
 impl Client {
-    /// Matches TMoonProtoClient.Reset (IntStruct.pas:972-1000)
+    /// Matches TMoonProtoClient.Reset.
     /// Does NOT reset: server_token, actual_pmtu, send_datagram_num, pending_h,
     /// sending, api_pending, pending_candles, trip_delay_k, can_send_rate.
     pub(crate) fn full_reset(&mut self) {
-        self.crypt_msg_counter.store(0, Ordering::Relaxed);
+        self.crypt_msg_counter
+            .store(INITIAL_CRYPTED_MSG_COUNTER, Ordering::Relaxed);
         self.metrics.total_sent.store(0, Ordering::Relaxed);
         self.metrics.total_recv = 0;
         self.metrics.total_recv_shared.store(0, Ordering::Relaxed);
@@ -18,6 +19,18 @@ impl Client {
         self.last_online = 0;
         self.last_sent_hello = NEVER_SENT_MS;
         self.clear_hello_wait_state();
+        self.handshake_peer_mix = 0;
+    }
+
+    /// Matches TMoonProtoClient.ClearOutboundSessionData.
+    /// Hard reconnect starts a new encrypted session, so old reliable H-packets
+    /// and sliced datagrams must not be retried under the new keys/window.
+    pub(crate) fn clear_outbound_session_data(&mut self) {
+        self.pending_h.clear();
+        self.sending.clear();
+        self.crypt_msg_counter
+            .store(INITIAL_CRYPTED_MSG_COUNTER, Ordering::Relaxed);
+        self.last_checked_slices = 0;
     }
 
     pub(crate) fn bind_socket(&mut self, cur_tm: i64) {

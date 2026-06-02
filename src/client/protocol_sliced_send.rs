@@ -45,6 +45,7 @@ impl ProtocolCore<'_> {
         let encrypted_fixed_overhead = crypted::CRYPTO_HEADER_SIZE
             + crypto::IV_SIZE
             + crypto::GCM_TAG_SIZE
+            + crypto::MAX_PKCS7_PADDING
             + std::mem::size_of::<u8>(); // inner cmd byte in the first slice
         let max_sliced_data_size = pmtu_for_check * 256 - encrypted_fixed_overhead;
         if send_data.len() >= max_sliced_data_size {

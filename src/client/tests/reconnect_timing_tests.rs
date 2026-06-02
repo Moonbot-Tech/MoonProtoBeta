@@ -99,7 +99,15 @@ fn test_market(name: &str) -> Market {
 
 fn install_session_key(client: &mut Client) {
     client.server_token = 1;
-    client.encode_cipher = Some(crypto::cipher_from_key(&[0; 16]));
+    let (encode_key, decode_key) =
+        crypto::generate_sub_keys(&client.cfg.master_key, client.server_token);
+    client.encode_key = encode_key;
+    client.decode_key = decode_key;
+    client.encode_cipher = Some(crypto::cipher_from_key(&encode_key));
+    client
+        .recv
+        .data_read_state
+        .set_decode_cipher(crypto::cipher_from_key(&decode_key));
 }
 
 fn encrypted_hello(
@@ -108,37 +116,60 @@ fn encrypted_hello(
     server_token: u64,
     peer_app_token: u64,
 ) -> Vec<u8> {
-    let mix_ts = if cmd == Command::WhoAreYou {
-        client.client_token.wrapping_add(3)
-    } else {
-        client.client_token
-    };
+    let mix_ts = client.client_token.wrapping_add(1);
     let mut hello = handshake::Hello::new(mix_ts, client.app_token);
+    hello.rnd = client.handshake_rnd;
     hello.server_token = server_token;
     hello.app_token = peer_app_token;
+    if cmd == Command::Fine {
+        hello.peer_mix = 0;
+    }
     hello.timestamp = delphi_now();
     let aad = handshake::handshake_aad(client.cfg.client_id, cmd.to_byte());
-    crypto::encrypt(&client.cfg.master_key, &hello.to_bytes_packed(), &aad)
+    if cmd == Command::Fine {
+        let cipher = client
+            .recv
+            .data_read_state
+            .decode_cipher
+            .as_ref()
+            .expect("test session decode cipher");
+        crypto::encrypt_with_cipher(cipher, &hello.to_bytes_packed(), &aad)
+    } else {
+        crypto::encrypt(&client.cfg.master_key, &hello.to_bytes_packed(), &aad)
+    }
 }
 
 fn apply_reader_handshake_payload(client: &mut Client, cmd: Command, payload: &[u8]) -> bool {
-    let master_key = client.cfg.master_key;
-    let client_id = client.cfg.client_id;
-    let Some(hello) =
-        Client::decode_handshake_hello(&master_key, client_id, cmd.to_byte(), payload)
-    else {
-        return false;
-    };
-
     match cmd {
         Command::WhoAreYou => {
-            if hello.mix_ts != client.client_token.wrapping_add(3) {
+            let master_key = client.cfg.master_key;
+            let client_id = client.cfg.client_id;
+            let Some(hello) =
+                Client::decode_handshake_hello(&master_key, client_id, cmd.to_byte(), payload)
+            else {
+                return false;
+            };
+            if !client.same_handshake_rnd(&hello.rnd) {
                 return false;
             }
             let _encrypted_imfriend = ProtocolCore { client }.apply_hello_and_build_imfriend(hello);
             true
         }
         Command::Fine => {
+            let aad = handshake::handshake_aad(client.cfg.client_id, Command::Fine.to_byte());
+            let Some(cipher) = client.recv.data_read_state.decode_cipher.as_ref() else {
+                return false;
+            };
+            let Some(decrypted) = crypto::decrypt_with_cipher(cipher, payload, &aad) else {
+                return false;
+            };
+            let Some(hello) = handshake::Hello::from_bytes(&decrypted) else {
+                return false;
+            };
+            if !client.same_handshake_rnd(&hello.rnd) || hello.peer_mix != 0 {
+                return false;
+            }
+            client.accepted_server_mix_ts(hello.mix_ts);
             ProtocolCore { client }.apply_fine_auth_done();
             true
         }
@@ -193,7 +224,7 @@ fn build_engine_response_payload(request_uid: u64, method: EngineMethod, data: &
 }
 
 #[test]
-fn want_new_hello_outside_rebind_is_dropped_but_clears_wait() {
+fn want_new_hello_outside_rebind_is_dropped_without_clearing_wait() {
     let mut client = dummy_client();
     client.start_hello_wait(HelloWaitState::PrimaryHelloCold, 0);
     client.last_sent_hello = 123;
@@ -205,7 +236,7 @@ fn want_new_hello_outside_rebind_is_dropped_but_clears_wait() {
     .on_handshake_control(Command::WantNewHello, 0, 0);
 
     assert_eq!(client.last_sent_hello, 123);
-    assert!(!client.waiting_hello);
+    assert!(client.waiting_hello);
     assert!(!client.next_primary_hello_new_session);
     assert_eq!(client.need_connect, need_connect_before);
 }
@@ -213,18 +244,19 @@ fn want_new_hello_outside_rebind_is_dropped_but_clears_wait() {
 #[test]
 fn want_new_hello_makes_late_fine_invalid_until_new_who_are_you() {
     let mut client = dummy_client();
+    client.handshake_rnd = [0xC1; 16];
+    install_session_key(&mut client);
     client.authorized = true;
     client.auth_status = AuthStatus::AuthDone;
     client.lifecycle.was_ever_connected = true;
-    client.server_token = 0x1111;
     client.set_hello_wait_state(HelloWaitState::RebindHelloAgain);
+    let fine = encrypted_hello(&client, Command::Fine, client.server_token, 0x3333);
 
     ProtocolCore {
         client: &mut client,
     }
     .on_handshake_control(Command::WantNewHello, 0, 0);
 
-    let fine = encrypted_hello(&client, Command::Fine, 0x2222, 0x3333);
     ProtocolCore {
         client: &mut client,
     }
@@ -281,31 +313,23 @@ fn want_new_hello_is_accepted_during_rebind_hello_again() {
 }
 
 #[test]
-fn early_hello_again_uses_master_key_before_whoareyou() {
+fn hello_again_without_session_is_not_built() {
     let mut client = dummy_client();
     let token_before = client.client_token;
     let payload = ProtocolCore {
         client: &mut client,
     }
     .build_hello_again_packet();
-    let aad = handshake::handshake_aad(client.cfg.client_id, Command::HelloAgain.to_byte());
-    let decrypted = crypto::decrypt(&client.cfg.master_key, &payload, &aad)
-        .expect("early HelloAgain must be encrypted with MasterKey");
-    let hello = handshake::Hello::from_bytes(&decrypted).expect("valid HelloAgain payload");
 
-    assert_eq!(client.client_token, token_before + 1);
-    assert_eq!(hello.mix_ts, client.client_token);
-    assert_eq!(
-        hello.peer_mix,
-        crypto::mix_values(&hello.rnd, hello.mix_ts, 0),
-        "before WhoAreYou Delphi computes PeerMix with ServerToken=0",
-    );
+    assert!(payload.is_none());
+    assert_eq!(client.client_token, token_before);
 }
 
 #[test]
-// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ClientNewData
-fn fine_requires_master_key_hello_payload() {
+fn fine_requires_session_key_hello_payload() {
     let mut client = dummy_client();
+    client.start_hello_wait(HelloWaitState::PrimaryImFriendSent, 0);
+    client.handshake_rnd = [0xA5; 16];
 
     assert!(!apply_reader_handshake_payload(
         &mut client,
@@ -317,9 +341,22 @@ fn fine_requires_master_key_hello_payload() {
     assert_ne!(client.auth_status, AuthStatus::AuthDone);
 
     let mut hello = handshake::Hello::new(client.client_token, client.app_token);
+    hello.rnd = client.handshake_rnd;
     hello.timestamp = delphi_now();
     let aad = handshake::handshake_aad(client.cfg.client_id, Command::Fine.to_byte());
-    let payload = crypto::encrypt(&client.cfg.master_key, &hello.to_bytes_packed(), &aad);
+    let master_payload = crypto::encrypt(&client.cfg.master_key, &hello.to_bytes_packed(), &aad);
+
+    assert!(apply_reader_handshake_payload(&mut client, Command::Fine, &master_payload,) == false);
+
+    install_session_key(&mut client);
+    client.authorized = false;
+    client.auth_status = AuthStatus::Connected;
+    let payload = encrypted_hello(
+        &client,
+        Command::Fine,
+        client.server_token,
+        client.app_token,
+    );
 
     assert!(apply_reader_handshake_payload(
         &mut client,
@@ -337,6 +374,11 @@ fn first_fine_before_init_does_not_send_engine_api_or_restore_subscriptions() {
     let mut client = dummy_client();
     client.set_domain_ready(false);
     client.peer_app_token = 0xABCD;
+    client.start_hello_wait(HelloWaitState::PrimaryImFriendSent, 0);
+    client.handshake_rnd = [0xB1; 16];
+    install_session_key(&mut client);
+    client.authorized = false;
+    client.auth_status = AuthStatus::Connected;
     client.reconnect.tracked_indexes_peer_app_token = 0;
     client.with_subscription_registry_mut(|registry| {
         registry.trades_sub = Some(TradesSubscription { want_mm: true });
@@ -344,10 +386,12 @@ fn first_fine_before_init_does_not_send_engine_api_or_restore_subscriptions() {
         registry.orderbook_subs.insert("BTCUSDT".to_string());
     });
 
-    let mut hello = handshake::Hello::new(client.client_token, client.app_token);
-    hello.timestamp = delphi_now();
-    let aad = handshake::handshake_aad(client.cfg.client_id, Command::Fine.to_byte());
-    let payload = crypto::encrypt(&client.cfg.master_key, &hello.to_bytes_packed(), &aad);
+    let payload = encrypted_hello(
+        &client,
+        Command::Fine,
+        client.server_token,
+        client.app_token,
+    );
 
     assert!(apply_reader_handshake_payload(
         &mut client,
@@ -1390,13 +1434,13 @@ fn need_hello_again_allows_immediate_retry_on_young_client_clock() {
     ProtocolCore {
         client: &mut client,
     }
-    .on_handshake_control(Command::NeedHelloAgain, 0, 1000);
+    .apply_need_hello_again(1000);
 
     assert_eq!(client.last_sent_hello, NEVER_SENT_MS);
     ProtocolCore {
         client: &mut client,
     }
-    .check_offline_reconnect(100);
+    .check_hello_send(100);
 
     assert_eq!(
         client.last_sent_hello, 100,

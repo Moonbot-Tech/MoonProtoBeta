@@ -1215,12 +1215,13 @@ fn dispatcher_skips_inapplicable_incoming_strat_commands() {
 #[test]
 fn dispatcher_unknown_channel_returns_raw() {
     let mut d = EventDispatcher::new();
-    // Reserved1 — no dispatch → fallback to Raw
-    let events = d.dispatch(Command::Reserved1, b"hello", 1000);
+    let unknown = Command::from_byte(99);
+    // Unknown ordinal — no dispatch → fallback to Raw
+    let events = d.dispatch(unknown, b"hello", 1000);
     assert_eq!(events.len(), 1);
     match &events[0] {
         Event::Raw { cmd, payload } => {
-            assert_eq!(*cmd, Command::Reserved1);
+            assert_eq!(*cmd, unknown);
             assert_eq!(payload, b"hello");
         }
         other => panic!("expected Raw event, got {:?}", other),
@@ -3457,7 +3458,7 @@ fn dispatch_into_active_records_initial_server_token() {
     let mut actions = Vec::new();
     dispatch_active_packet_for_test(
         &mut d,
-        Command::Reserved1,
+        Command::from_byte(99),
         b"x",
         0,
         &mut out,
@@ -3485,7 +3486,7 @@ fn dispatch_into_active_does_not_reset_on_first_non_zero_token() {
     let mut actions = Vec::new();
     dispatch_active_packet_for_test(
         &mut d,
-        Command::Reserved1,
+        Command::from_byte(99),
         b"x",
         0,
         &mut out,
@@ -3514,7 +3515,7 @@ fn dispatch_into_active_triggers_reset_on_token_change() {
     let mut actions = Vec::new();
     dispatch_active_packet_for_test(
         &mut d,
-        Command::Reserved1,
+        Command::from_byte(99),
         b"x",
         0,
         &mut out,
@@ -3541,7 +3542,7 @@ fn dispatch_into_active_auto_links_server_time_delta_source() {
     let mut actions = Vec::new();
     dispatch_active_packet_for_test(
         &mut d,
-        Command::Reserved1,
+        Command::from_byte(99),
         b"x",
         0,
         &mut out,
@@ -3558,7 +3559,7 @@ fn dispatch_into_active_auto_links_server_time_delta_source() {
     actions.clear();
     dispatch_active_packet_for_test(
         &mut d,
-        Command::Reserved1,
+        Command::from_byte(99),
         b"y",
         0,
         &mut out,

@@ -117,7 +117,7 @@ fn full_reset_preserves_sending_and_api_slots() {
         1,
         "API waiters are not part of Delphi TMoonProtoClient.Reset"
     );
-    assert_eq!(client.crypt_msg_counter.load(Ordering::Relaxed), 0);
+    assert_eq!(client.crypt_msg_counter.load(Ordering::Relaxed), 2047);
     assert_eq!(client.total_sent(), 0);
     assert_eq!(client.metrics.total_recv, 0);
     assert_eq!(client.rs, 1.0);
@@ -572,7 +572,7 @@ fn encrypted_low_batch_size_uses_wire_size_after_crypt() {
 
     let wire_len = u16::from_le_bytes([client.tmp_send_buf[1], client.tmp_send_buf[2]]) as usize;
     assert_eq!(client.tmp_send_buf[0], Command::Crypted.to_byte());
-    assert_eq!(wire_len, 50);
+    assert_eq!(wire_len, 60);
     assert_eq!(client.tmp_send_buf.len(), 3 + wire_len);
     assert_eq!(client.tmp_send_size, 15 + 3 + wire_len);
 }
@@ -589,6 +589,7 @@ fn encrypted_sliced_max_size_counts_full_gcm_overhead() {
         - crate::protocol::crypted::CRYPTO_HEADER_SIZE
         - crate::crypto::IV_SIZE
         - crate::crypto::GCM_TAG_SIZE
+        - crate::crypto::MAX_PKCS7_PADDING
         - 1;
 
     let mut accepted = SendItem {

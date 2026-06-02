@@ -126,10 +126,9 @@ pub(crate) struct SlicedData {
     #[allow(dead_code)]
     pub datagram_num: u16,
     pub(crate) blocks_count: usize, // MaxBlockNum + 1
-    // Delphi keeps received slices in a sorted list and does not reject
-    // BlockNum > MaxBlockNum. Keep the same machine effect: ACK the actual
-    // BlockNum, insert by BlockNum if not a duplicate, and use Count ==
-    // BlocksCount as the completion test.
+    // Delphi drops malformed slices whose BlockNum is outside MaxBlockNum+1.
+    // ACK flags stay in the same 256-bit shape, but invalid blocks do not
+    // mutate the datagram payload or completion count.
     block_spans: [BlockSpan; 256],
     block_payloads: Vec<u8>,
     max_present_block_num: u8,
@@ -158,6 +157,10 @@ impl SlicedData {
     /// Receive a piece. Returns true if this completes the datagram.
     pub(crate) fn receive_piece(&mut self, block_num: u8, payload: &[u8]) -> bool {
         let idx = block_num as usize;
+
+        if idx >= self.blocks_count {
+            return false;
+        }
 
         // Set ACK flag (set of byte semantics: byte index = block_num / 8, bit = block_num % 8)
         self.ack_flags[idx / 8] |= 1 << (idx % 8);
@@ -192,9 +195,9 @@ impl SlicedData {
             return None;
         }
         // Receive pieces live in one dense buffer plus BlockNum->span metadata.
-        // Iterating only to the highest received BlockNum preserves the same
-        // sorted-by-BlockNum effect as Delphi's sorted slice list, including
-        // malformed BlockNum > MaxBlockNum cases, without scanning unused slots.
+        // Iterating only to the highest received valid BlockNum preserves the
+        // same sorted-by-BlockNum effect as Delphi's sorted slice list without
+        // scanning unused slots.
         let total = self.block_payloads.len();
         let mut cmd = 0u8;
         let mut saw_block_zero = false;

@@ -28,29 +28,19 @@ impl ProtocolCore<'_> {
     pub(crate) fn apply_need_hello_again(&mut self, timestamp_ms: i64) {
         if (timestamp_ms - self.client.last_need_hello_again).abs() > NEED_HELLO_AGAIN_THROTTLE_MS {
             self.client.last_need_hello_again = timestamp_ms;
-            if self.client.server_token == 0
-                || (!self.client.authorized && !self.client.lifecycle.was_ever_connected)
-            {
-                self.client.auth_status = AuthStatus::Connected;
-                self.client.authorized = false;
-                self.client.need_connect = true;
-                self.client.soft_reconnect = false;
-                self.client.mark_next_primary_hello_new_session();
-            } else {
-                if !self.client.hello_wait_state.allows_hello_again_retry() {
-                    self.client.waiting_hello_start = timestamp_ms;
-                }
-                self.client
-                    .set_hello_wait_state(HelloWaitState::RebindHelloAgain);
+            self.client.need_connect = true;
+            self.client.soft_reconnect = true;
+            if self.client.hello_wait_state.allows_hello_again_retry() {
+                self.client.last_sent_hello = NEVER_SENT_MS;
+                return;
             }
+            self.client.clear_hello_wait_state();
+            self.client.waiting_hello_start = 0;
             self.client.last_sent_hello = NEVER_SENT_MS;
         }
     }
 
-    pub(crate) fn apply_hello_and_build_imfriend(
-        &mut self,
-        mut hello: handshake::Hello,
-    ) -> Vec<u8> {
+    pub(crate) fn apply_hello_and_build_imfriend(&mut self, hello: handshake::Hello) -> Vec<u8> {
         self.client.server_token = hello.server_token;
         let prev_app_token = self.client.peer_app_token;
         self.client.peer_app_token = hello.app_token;
@@ -59,12 +49,6 @@ impl ProtocolCore<'_> {
             self.client.reconnect.tracked_indexes_peer_app_token = 0;
             self.client.fire_lifecycle(LifecycleEvent::ServerRestart);
         }
-
-        self.client.client_token = self.client.client_token.wrapping_add(1);
-        hello.mix_ts = self.client.client_token;
-        hello.app_token = self.client.app_token;
-        hello.timestamp = delphi_now();
-        let packed = hello.to_bytes_packed();
 
         let (encode_key, decode_key) =
             crypto::generate_sub_keys(&self.client.cfg.master_key, self.client.server_token);
@@ -77,11 +61,9 @@ impl ProtocolCore<'_> {
             .data_read_state
             .set_decode_cipher(crate::crypto::cipher_from_key(&self.client.decode_key));
 
-        let aad = crate::protocol::handshake::handshake_aad(
-            self.client.cfg.client_id,
-            crate::protocol::Command::ImFriend.to_byte(),
-        );
-        crypto::encrypt_with_cipher(&encode_cipher, &packed, &aad)
+        self.client.accepted_server_mix_ts(hello.mix_ts);
+        self.client.handshake_peer_mix = hello.peer_mix;
+        self.build_imfriend_packet().unwrap_or_default()
     }
 
     pub(crate) fn apply_fine_auth_done(&mut self) {
@@ -91,6 +73,7 @@ impl ProtocolCore<'_> {
         self.client.auth_status = AuthStatus::AuthDone;
         self.client.authorized = true;
         self.client.clear_hello_wait_state();
+        self.client.handshake_peer_mix = 0;
         if restore_after_reconnect {
             self.client.restore_domain_after_reconnect();
         }

@@ -54,7 +54,7 @@ impl Command {
     pub const TradesResend: Self = Self(34);
     pub const TradesResendResponse: Self = Self(35);
     pub const OrderBook: Self = Self(36);
-    pub const Reserved1: Self = Self(37);
+    pub const SessionClose: Self = Self(37);
 
     /// Convert a wire command byte into the raw Delphi ordinal wrapper.
     /// The compressed flag is stripped exactly like Delphi `GetRealCommand`.
@@ -67,7 +67,7 @@ impl Command {
     }
 
     pub const fn is_known(self) -> bool {
-        self.0 <= Self::Reserved1.0
+        self.0 <= Self::SessionClose.0
     }
 
     pub const fn name(self) -> &'static str {
@@ -109,7 +109,7 @@ impl Command {
             Self::TradesResend => "TradesResend",
             Self::TradesResendResponse => "TradesResendResponse",
             Self::OrderBook => "OrderBook",
-            Self::Reserved1 => "Reserved1",
+            Self::SessionClose => "SessionClose",
             _ => "Unknown",
         }
     }

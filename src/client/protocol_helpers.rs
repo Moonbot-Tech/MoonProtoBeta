@@ -237,7 +237,13 @@ impl Client {
     fn drop_plaintext_sensitive(real_cmd: u8) -> bool {
         matches!(
             Command::from_byte(real_cmd),
-            Command::Order | Command::Strat | Command::UI | Command::Balance | Command::LogMsg
+            Command::Order
+                | Command::Strat
+                | Command::UI
+                | Command::Balance
+                | Command::LogMsg
+                | Command::NeedHelloAgain
+                | Command::SessionClose
         )
     }
 

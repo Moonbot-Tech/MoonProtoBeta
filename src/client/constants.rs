@@ -22,6 +22,7 @@ pub(super) const DEAD_ZONE_MS: i64 = 5000; // MoonProtoUDPClient.pas:799
 pub(super) const NEED_HELLO_AGAIN_THROTTLE_MS: i64 = 700; // MoonProtoUDPClient.pas:568
 pub(super) const COMPRESSED_FLAG: u8 = 0x80; // MoonProtoDataStruct.pas:27
 pub(super) const MIN_SIZE_TO_COMPRESS: usize = 64; // MoonProtoDataStruct.pas:31
+pub(super) const INITIAL_CRYPTED_MSG_COUNTER: u64 = 64 * 64 / 2 - 1; // MPSliderLenBits div 2 - 1
 pub(super) const NEVER_SENT_MS: i64 = i64::MIN / 2; // Delphi LastSentHello=0 analogue.
 pub(super) const NEVER_TIME_MS: i64 = i64::MIN / 2;
 pub(super) const NO_PENDING_ENGINE_REQUEST_UID: u64 = u64::MAX;

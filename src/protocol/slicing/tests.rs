@@ -1,5 +1,4 @@
 use super::*;
-use crate::protocol::Command;
 
 #[test]
 fn slice_header_and_ack_use_private_wire_structs() {
@@ -158,11 +157,11 @@ fn non_duplicate_block_after_completed_datagram_does_not_mutate_receiver() {
     let mut recv = SlicingReceiver::new();
     recv.set_last_online(10000);
 
-    let malformed_complete = vec![
+    let complete_block0 = vec![
         0x37, 0x00, // datagram_num = 55
-        0x07, // block_num = 7
+        0x00, // block_num = 0
         0x00, // max_block_num = 0, so one received block completes the datagram
-        0xAA,
+        0xAA, 0xBB,
     ];
     let later_block_same_datagram = vec![
         0x37, 0x00, // datagram_num = 55
@@ -170,7 +169,7 @@ fn non_duplicate_block_after_completed_datagram_does_not_mutate_receiver() {
         0x00, 0xBB,
     ];
 
-    assert!(recv.on_new_sliced(&malformed_complete).0.is_some());
+    assert!(recv.on_new_sliced(&complete_block0).0.is_some());
     let before_blocks = recv
         .receiving
         .get(&55)
@@ -190,31 +189,28 @@ fn non_duplicate_block_after_completed_datagram_does_not_mutate_receiver() {
 
 #[test]
 // parity: MoonBot MoonProtoIntStruct.pas:TMoonProtoClient.OnNewSliced
-fn completed_datagram_without_block_zero_is_delivered_as_none_cmd() {
+fn block_num_above_max_is_dropped_without_ack_bit() {
     let mut recv = SlicingReceiver::new();
     recv.set_last_online(10000);
 
     let payload = vec![
         0x21, 0x00, // datagram_num = 33
-        0x07, // block_num = 7 (malformed: no block 0)
+        0x07, // block_num = 7 (malformed: greater than MaxBlockNum)
         0x00, // max_block_num = 0 (one block total)
-        0xAA, 0xBB, // payload copied as data, not command byte
+        0xAA, 0xBB,
     ];
 
     let (assembled, ack) = recv.on_new_sliced(&payload);
-    let (datagram_num, cmd, data, _, _) = assembled.unwrap();
-
-    assert_eq!(datagram_num, 33);
-    assert_eq!(
-        cmd,
-        Command::None.to_byte(),
-        "Delphi leaves TMoonProtoSlicedData.Fcmd at MPC_None when no BlockNum=0 was seen"
-    );
-    assert_eq!(data, vec![0xAA, 0xBB]);
-    assert_eq!(ack[0] & (1 << 7), 1 << 7);
+    assert!(assembled.is_none());
+    assert_eq!(ack[0] & (1 << 7), 0);
     assert!(
         recv.receiving.contains_key(&33),
-        "BaseNet.OnNewSliced removes Receiving only after DataReadInt"
+        "OnNewSliced creates the datagram entry before Delphi ReceivedPiece drops the invalid block"
+    );
+    assert_eq!(
+        recv.receiving.get(&33).unwrap().received_count,
+        0,
+        "invalid BlockNum must not mutate piece state"
     );
 }
 
@@ -264,7 +260,7 @@ fn accepts_full_256_block_datagram() {
 
 #[test]
 // parity: MoonBot MoonProtoIntStruct.pas:TMoonProtoClient.OnNewSliced
-fn block_num_above_max_is_received() {
+fn first_block_num_above_max_is_not_received() {
     let mut recv = SlicingReceiver::new();
     recv.set_last_online(10000);
 
@@ -276,17 +272,15 @@ fn block_num_above_max_is_received() {
     ];
 
     let (assembled, ack) = recv.on_new_sliced(&payload);
-    let (datagram_num, cmd, data, _dup_count, blocks_count) =
-        assembled.expect("Delphi ReceivedPiece inserts the slice even when BlockNum > MaxBlockNum");
-
-    assert_eq!(datagram_num, 55);
-    assert_eq!(cmd, 0, "without block 0 Delphi leaves Fcmd at MPC_None");
-    assert_eq!(data, vec![0xAA, 0xBB]);
-    assert_eq!(blocks_count, 1);
-    assert_eq!(ack[0] & 0b0000_0010, 0b0000_0010);
+    assert!(
+        assembled.is_none(),
+        "Delphi ReceivedPiece exits before adding BlockNum >= BlocksCount"
+    );
+    assert_eq!(ack[0] & 0b0000_0010, 0);
     assert_eq!(&ack[32..34], &55u16.to_le_bytes());
-    assert!(recv.receiving.contains_key(&datagram_num));
-    recv.receiving.remove(&datagram_num);
+    assert!(recv.receiving.contains_key(&55));
+    assert_eq!(recv.receiving.get(&55).unwrap().received_count, 0);
+    recv.receiving.remove(&55);
 }
 
 #[test]

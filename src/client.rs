@@ -264,6 +264,8 @@ pub struct Client {
     hello_wait_state: HelloWaitState,
     next_primary_hello_new_session: bool,
     waiting_hello: bool,
+    handshake_rnd: [u8; 16],
+    handshake_peer_mix: u64,
 
     client_token: u64,
     server_token: u64,
@@ -413,6 +415,18 @@ impl Client {
     }
 
     #[inline]
+    pub(crate) fn same_handshake_rnd(&self, rnd: &[u8; 16]) -> bool {
+        self.handshake_rnd == *rnd
+    }
+
+    #[inline]
+    pub(crate) fn accepted_server_mix_ts(&mut self, mix_ts: u64) {
+        if (mix_ts.wrapping_sub(self.client_token) as i64) > 0 {
+            self.client_token = mix_ts;
+        }
+    }
+
+    #[inline]
     pub(crate) fn mark_next_primary_hello_new_session(&mut self) {
         self.next_primary_hello_new_session = true;
         self.clear_hello_wait_state();
@@ -496,6 +510,8 @@ impl Client {
             hello_wait_state: HelloWaitState::Idle,
             next_primary_hello_new_session: false,
             waiting_hello: false,
+            handshake_rnd: [0; 16],
+            handshake_peer_mix: 0,
             client_token: rand::random::<u64>(),
             server_token: 0,
             app_token: rand::random(),
@@ -513,7 +529,7 @@ impl Client {
             last_socket_recreate: i64::MIN / 2,
             last_need_hello_again: i64::MIN / 2,
             prev_cycle_tm: 0,
-            crypt_msg_counter: AtomicU64::new(0),
+            crypt_msg_counter: AtomicU64::new(constants::INITIAL_CRYPTED_MSG_COUNTER),
             send_datagram_num: 0,
             round_trip_delay: 0,
             actual_pmtu: 508,

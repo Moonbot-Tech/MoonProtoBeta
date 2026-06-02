@@ -35,6 +35,6 @@ mod keys;
 pub(crate) use aes_gcm::Aes128Gcm;
 pub(crate) use aes_gcm_codec::{
     cipher_from_key, decrypt, decrypt_with_cipher, encrypt, encrypt_with_cipher, GCM_TAG_SIZE,
-    IV_SIZE,
+    IV_SIZE, MAX_PKCS7_PADDING,
 };
 pub(crate) use keys::{derive_obfuscation_key, generate_sub_keys, mix_values};
