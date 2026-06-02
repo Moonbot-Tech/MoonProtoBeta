@@ -34,7 +34,7 @@
 
 use super::registry::{decode_utf8_delphi, read_string, write_string, CURRENT_PROTO_CMD_VER};
 use super::strat::StratCheckedItem;
-use zerocopy::byteorder::little_endian::{F32 as LeF32, U16 as LeU16};
+use zerocopy::byteorder::little_endian::{F32 as LeF32, F64 as LeF64, I32 as LeI32, U16 as LeU16};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 mod builders;
@@ -75,13 +75,59 @@ pub const AS_CFG2_SIZE: usize = 168;
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
 struct WireAutoStartConfig {
-    bytes: [u8; AS_CFG_SIZE],
+    auto_start: u8,
+    auto_detect_on: u8,
+    strategies_on: u8,
+    work_time: u8,
+    auto_stop_if_loss: u8,
+    remember_state: u8,
+    sell_if_loss: u8,
+    dont_wait_sells: u8,
+    auto_stop_loss: LeF64,
+    panic_btc: u8,
+    panic_market: u8,
+    auto_stop_if_loss_hours: u8,
+    auto_update: u8,
+    restart_after_err: u8,
+    restart_after_ping: u8,
+    ignore_emulator: u8,
+    _pad0: u8,
+    stop_trades: LeI32,
+    restart_err_time: LeI32,
+    panic_btc_delta: LeF64,
+    panic_market_delta: LeF64,
+    auto_stop_on_errors: u8,
+    auto_stop_on_ping: u8,
+    sell_all_on_errors: u8,
+    sell_all_on_ping: u8,
+    errors_level: LeI32,
+    ping_level: LeI32,
+    restart_ping_time: LeI32,
+    auto_stop_hours_val: LeF64,
+    stop_hours: LeI32,
+    stop_hours_trades: LeI32,
+    panic_btc_delta_up: LeF64,
+    work_time_from: LeF64,
+    work_time_to: LeF64,
 }
 
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
 struct WireAutoStartConfig2 {
-    bytes: [u8; AS_CFG2_SIZE],
+    restart_on_market: u8,
+    _pad0: [u8; 7],
+    btc_higher_then: LeF64,
+    btc_lower_then: LeF64,
+    market_higher_then: LeF64,
+    show_old_listing: u8,
+    _u1: [u8; 8],
+    reset_session: u8,
+    _pad1: [u8; 2],
+    _u2: [LeI32; 8],
+    max_session_cap: LeI32,
+    rs_hours: LeI32,
+    _pad2: [u8; 4],
+    _u3: [LeF64; 10],
 }
 
 const _: () = assert!(core::mem::size_of::<WireAutoStartConfig>() == AS_CFG_SIZE);
@@ -91,7 +137,85 @@ impl WireAutoStartConfig {
     fn from_blob(blob: &[u8]) -> Self {
         let mut bytes = [0u8; AS_CFG_SIZE];
         copy_blob_prefix(&mut bytes, blob);
-        Self { bytes }
+        Self::read_from_bytes(&bytes).expect("fixed in-memory TAutoStartConfig")
+    }
+
+    fn as_blob(self) -> Vec<u8> {
+        self.as_bytes().to_vec()
+    }
+
+    fn to_public(self) -> AutoStartConfig {
+        AutoStartConfig {
+            auto_start: self.auto_start != 0,
+            auto_detect_on: self.auto_detect_on != 0,
+            strategies_on: self.strategies_on != 0,
+            work_time: self.work_time != 0,
+            auto_stop_if_loss: self.auto_stop_if_loss != 0,
+            remember_state: self.remember_state != 0,
+            sell_if_loss: self.sell_if_loss != 0,
+            dont_wait_sells: self.dont_wait_sells != 0,
+            auto_stop_loss: self.auto_stop_loss.get(),
+            panic_btc: self.panic_btc != 0,
+            panic_market: self.panic_market != 0,
+            auto_stop_if_loss_hours: self.auto_stop_if_loss_hours != 0,
+            auto_update: self.auto_update != 0,
+            restart_after_err: self.restart_after_err != 0,
+            restart_after_ping: self.restart_after_ping != 0,
+            ignore_emulator: self.ignore_emulator != 0,
+            stop_trades: self.stop_trades.get(),
+            restart_err_time: self.restart_err_time.get(),
+            panic_btc_delta: self.panic_btc_delta.get(),
+            panic_market_delta: self.panic_market_delta.get(),
+            auto_stop_on_errors: self.auto_stop_on_errors != 0,
+            auto_stop_on_ping: self.auto_stop_on_ping != 0,
+            sell_all_on_errors: self.sell_all_on_errors != 0,
+            sell_all_on_ping: self.sell_all_on_ping != 0,
+            errors_level: self.errors_level.get(),
+            ping_level: self.ping_level.get(),
+            restart_ping_time: self.restart_ping_time.get(),
+            auto_stop_hours_val: self.auto_stop_hours_val.get(),
+            stop_hours: self.stop_hours.get(),
+            stop_hours_trades: self.stop_hours_trades.get(),
+            panic_btc_delta_up: self.panic_btc_delta_up.get(),
+            work_time_from: self.work_time_from.get(),
+            work_time_to: self.work_time_to.get(),
+        }
+    }
+
+    fn write_public(&mut self, cfg: &AutoStartConfig) {
+        self.auto_start = cfg.auto_start as u8;
+        self.auto_detect_on = cfg.auto_detect_on as u8;
+        self.strategies_on = cfg.strategies_on as u8;
+        self.work_time = cfg.work_time as u8;
+        self.auto_stop_if_loss = cfg.auto_stop_if_loss as u8;
+        self.remember_state = cfg.remember_state as u8;
+        self.sell_if_loss = cfg.sell_if_loss as u8;
+        self.dont_wait_sells = cfg.dont_wait_sells as u8;
+        self.auto_stop_loss = LeF64::new(cfg.auto_stop_loss);
+        self.panic_btc = cfg.panic_btc as u8;
+        self.panic_market = cfg.panic_market as u8;
+        self.auto_stop_if_loss_hours = cfg.auto_stop_if_loss_hours as u8;
+        self.auto_update = cfg.auto_update as u8;
+        self.restart_after_err = cfg.restart_after_err as u8;
+        self.restart_after_ping = cfg.restart_after_ping as u8;
+        self.ignore_emulator = cfg.ignore_emulator as u8;
+        self.stop_trades = LeI32::new(cfg.stop_trades);
+        self.restart_err_time = LeI32::new(cfg.restart_err_time);
+        self.panic_btc_delta = LeF64::new(cfg.panic_btc_delta);
+        self.panic_market_delta = LeF64::new(cfg.panic_market_delta);
+        self.auto_stop_on_errors = cfg.auto_stop_on_errors as u8;
+        self.auto_stop_on_ping = cfg.auto_stop_on_ping as u8;
+        self.sell_all_on_errors = cfg.sell_all_on_errors as u8;
+        self.sell_all_on_ping = cfg.sell_all_on_ping as u8;
+        self.errors_level = LeI32::new(cfg.errors_level);
+        self.ping_level = LeI32::new(cfg.ping_level);
+        self.restart_ping_time = LeI32::new(cfg.restart_ping_time);
+        self.auto_stop_hours_val = LeF64::new(cfg.auto_stop_hours_val);
+        self.stop_hours = LeI32::new(cfg.stop_hours);
+        self.stop_hours_trades = LeI32::new(cfg.stop_hours_trades);
+        self.panic_btc_delta_up = LeF64::new(cfg.panic_btc_delta_up);
+        self.work_time_from = LeF64::new(cfg.work_time_from);
+        self.work_time_to = LeF64::new(cfg.work_time_to);
     }
 }
 
@@ -99,12 +223,103 @@ impl WireAutoStartConfig2 {
     fn from_blob(blob: &[u8]) -> Self {
         let mut bytes = [0u8; AS_CFG2_SIZE];
         copy_blob_prefix(&mut bytes, blob);
-        Self { bytes }
+        Self::read_from_bytes(&bytes).expect("fixed in-memory TAutoStartConfig2")
+    }
+
+    fn as_blob(self) -> Vec<u8> {
+        self.as_bytes().to_vec()
+    }
+
+    fn to_public(self) -> AutoStartConfig2 {
+        AutoStartConfig2 {
+            restart_on_market: self.restart_on_market != 0,
+            btc_higher_then: self.btc_higher_then.get(),
+            btc_lower_then: self.btc_lower_then.get(),
+            market_higher_then: self.market_higher_then.get(),
+            show_old_listing: self.show_old_listing != 0,
+            reset_session: self.reset_session != 0,
+            max_session_cap: self.max_session_cap.get(),
+            rs_hours: self.rs_hours.get(),
+        }
+    }
+
+    fn write_public(&mut self, cfg: &AutoStartConfig2) {
+        self.restart_on_market = cfg.restart_on_market as u8;
+        self.btc_higher_then = LeF64::new(cfg.btc_higher_then);
+        self.btc_lower_then = LeF64::new(cfg.btc_lower_then);
+        self.market_higher_then = LeF64::new(cfg.market_higher_then);
+        self.show_old_listing = cfg.show_old_listing as u8;
+        self.reset_session = cfg.reset_session as u8;
+        self.max_session_cap = LeI32::new(cfg.max_session_cap);
+        self.rs_hours = LeI32::new(cfg.rs_hours);
     }
 }
 
 /// ArbConfig wire version byte (ArbTypes.pas:25 `ARB_CONFIG_VER = 1`).
 pub(crate) const ARB_CONFIG_VER: u8 = 1;
+
+// =============================================================================
+//  AutoStart typed views (TAutoStartConfig / TAutoStartConfig2)
+// =============================================================================
+
+/// Terminal-facing view of Delphi `TAutoStartConfig`.
+///
+/// This is the settings-page meaning of the fixed 104-byte `as_cfg` blob. The
+/// wire blob is still kept on [`ClientSettingsCommand`] for exact roundtrip and
+/// append-only compatibility, but UI code should edit this typed view instead
+/// of hand-parsing bytes.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AutoStartConfig {
+    pub auto_start: bool,
+    pub auto_detect_on: bool,
+    pub strategies_on: bool,
+    pub work_time: bool,
+    pub auto_stop_if_loss: bool,
+    pub remember_state: bool,
+    pub sell_if_loss: bool,
+    pub dont_wait_sells: bool,
+    pub auto_stop_loss: f64,
+    pub panic_btc: bool,
+    pub panic_market: bool,
+    pub auto_stop_if_loss_hours: bool,
+    pub auto_update: bool,
+    pub restart_after_err: bool,
+    pub restart_after_ping: bool,
+    pub ignore_emulator: bool,
+    pub stop_trades: i32,
+    pub restart_err_time: i32,
+    pub panic_btc_delta: f64,
+    pub panic_market_delta: f64,
+    pub auto_stop_on_errors: bool,
+    pub auto_stop_on_ping: bool,
+    pub sell_all_on_errors: bool,
+    pub sell_all_on_ping: bool,
+    pub errors_level: i32,
+    pub ping_level: i32,
+    pub restart_ping_time: i32,
+    pub auto_stop_hours_val: f64,
+    pub stop_hours: i32,
+    pub stop_hours_trades: i32,
+    pub panic_btc_delta_up: f64,
+    pub work_time_from: f64,
+    pub work_time_to: f64,
+}
+
+/// Terminal-facing view of Delphi `TAutoStartConfig2`.
+///
+/// Reserved Delphi fields are intentionally not exposed, but `set_*` /
+/// `update_*` helpers preserve the current reserved bytes in `as_cfg2`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AutoStartConfig2 {
+    pub restart_on_market: bool,
+    pub btc_higher_then: f64,
+    pub btc_lower_then: f64,
+    pub market_higher_then: f64,
+    pub show_old_listing: bool,
+    pub reset_session: bool,
+    pub max_session_cap: i32,
+    pub rs_hours: i32,
+}
 
 // =============================================================================
 //  ArbConfig — compact wire form (NOT raw record)
@@ -443,6 +658,47 @@ impl ClientSettingsCommand {
                 symbol,
                 remaining_days: *remaining_days,
             })
+    }
+
+    /// Decode the AutoStart settings page from the retained 104-byte blob.
+    pub fn auto_start_config(&self) -> AutoStartConfig {
+        WireAutoStartConfig::from_blob(&self.as_cfg).to_public()
+    }
+
+    /// Replace the AutoStart settings page while keeping exact Delphi wire
+    /// layout for `TAutoStartConfig`.
+    pub fn set_auto_start_config(&mut self, cfg: AutoStartConfig) {
+        let mut wire = WireAutoStartConfig::from_blob(&self.as_cfg);
+        wire.write_public(&cfg);
+        self.as_cfg = wire.as_blob();
+    }
+
+    /// Edit AutoStart settings in-place.
+    pub fn update_auto_start_config(&mut self, f: impl FnOnce(&mut AutoStartConfig)) {
+        let mut cfg = self.auto_start_config();
+        f(&mut cfg);
+        self.set_auto_start_config(cfg);
+    }
+
+    /// Decode the second AutoStart settings page from the retained 168-byte blob.
+    pub fn auto_start_config2(&self) -> AutoStartConfig2 {
+        WireAutoStartConfig2::from_blob(&self.as_cfg2).to_public()
+    }
+
+    /// Replace the second AutoStart settings page. Reserved Delphi bytes from
+    /// the current blob are preserved.
+    pub fn set_auto_start_config2(&mut self, cfg: AutoStartConfig2) {
+        let mut wire = WireAutoStartConfig2::from_blob(&self.as_cfg2);
+        wire.write_public(&cfg);
+        self.as_cfg2 = wire.as_blob();
+    }
+
+    /// Edit the second AutoStart settings page in-place while preserving
+    /// reserved Delphi bytes.
+    pub fn update_auto_start_config2(&mut self, f: impl FnOnce(&mut AutoStartConfig2)) {
+        let mut cfg = self.auto_start_config2();
+        f(&mut cfg);
+        self.set_auto_start_config2(cfg);
     }
 }
 

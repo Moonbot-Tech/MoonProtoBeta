@@ -243,7 +243,7 @@ if let Some(current) = &snapshot.settings().client_settings {
     let mut settings = current.clone();
     settings.use_g_take_profit = true;
     settings.g_take_profit = 2.5;
-    client.settings().send(settings);
+    client.settings().send(settings)?;
 }
 ```
 
@@ -255,12 +255,33 @@ Useful helpers:
 | Six fixed sell buttons | `fixed_sell_presets()`, `fixed_sell_preset_percent(slot)`, `selected_fixed_sell_slot()`, `selected_fixed_sell_percent()` |
 | Temporary blacklist rows | `temp_blacklist_entries()` |
 | Multi-order sell join combo | `JoinSellKind`, `join_sell_mode()`, `set_join_sell_mode(...)` |
+| AutoStart settings page | `auto_start_config()`, `set_auto_start_config(...)`, `update_auto_start_config(...)` |
+| AutoStart recovery/session page | `auto_start_config2()`, `set_auto_start_config2(...)`, `update_auto_start_config2(...)` |
 
 `fixed_sell_price` is not the best source for drawing the selected fixed-sell
 button: MoonBot derives the active fixed price from `s_price[sb_num]` after
 applying settings. Use the fixed-sell helpers for UI display.
 
-AutoStart blobs are opaque byte arrays with fixed public sizes:
+AutoStart is stored on the wire as two fixed Delphi blobs, but normal UI code
+edits typed views:
+
+```rust
+if let Some(current) = &snapshot.settings().client_settings {
+    let mut settings = current.clone();
+    settings.update_auto_start_config(|auto| {
+        auto.auto_start = true;
+        auto.strategies_on = true;
+        auto.auto_update = true;
+    });
+    settings.update_auto_start_config2(|auto| {
+        auto.restart_on_market = true;
+        auto.rs_hours = 6;
+    });
+    client.settings().send(settings)?;
+}
+```
+
+The raw blobs remain available for exact roundtrip and version compatibility:
 
 ```rust
 use moonproto::{AS_CFG2_SIZE, AS_CFG_SIZE};

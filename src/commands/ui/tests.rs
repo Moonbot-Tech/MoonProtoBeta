@@ -598,6 +598,112 @@ fn client_settings_ui_helpers_match_delphi_meaning() {
 }
 
 #[test]
+fn client_settings_autostart_helpers_match_delphi_layout() {
+    let mut settings = ClientSettingsCommand::default();
+    let cfg = AutoStartConfig {
+        auto_start: true,
+        auto_detect_on: true,
+        strategies_on: false,
+        work_time: true,
+        auto_stop_if_loss: true,
+        remember_state: false,
+        sell_if_loss: true,
+        dont_wait_sells: true,
+        auto_stop_loss: 12.5,
+        panic_btc: true,
+        panic_market: false,
+        auto_stop_if_loss_hours: true,
+        auto_update: true,
+        restart_after_err: true,
+        restart_after_ping: false,
+        ignore_emulator: true,
+        stop_trades: 17,
+        restart_err_time: 25,
+        panic_btc_delta: -1.25,
+        panic_market_delta: 2.5,
+        auto_stop_on_errors: true,
+        auto_stop_on_ping: true,
+        sell_all_on_errors: false,
+        sell_all_on_ping: true,
+        errors_level: 9,
+        ping_level: 11,
+        restart_ping_time: 60,
+        auto_stop_hours_val: -3.5,
+        stop_hours: 4,
+        stop_hours_trades: 5,
+        panic_btc_delta_up: 6.75,
+        work_time_from: 0.25,
+        work_time_to: 0.75,
+    };
+
+    settings.set_auto_start_config(cfg.clone());
+    assert_eq!(settings.as_cfg.len(), AS_CFG_SIZE);
+    assert_eq!(settings.auto_start_config(), cfg);
+
+    assert_eq!(&settings.as_cfg[0..8], &[1, 1, 0, 1, 1, 0, 1, 1]);
+    assert_eq!(&settings.as_cfg[8..16], &12.5f64.to_le_bytes());
+    assert_eq!(settings.as_cfg[16], 1); // PanicBTC
+    assert_eq!(settings.as_cfg[23], 0); // Delphi alignment pad before integers
+    assert_eq!(&settings.as_cfg[24..28], &17i32.to_le_bytes());
+    assert_eq!(&settings.as_cfg[32..40], &(-1.25f64).to_le_bytes());
+    assert_eq!(&settings.as_cfg[96..104], &0.75f64.to_le_bytes());
+
+    settings.update_auto_start_config(|c| {
+        c.auto_start = false;
+        c.stop_hours = 8;
+    });
+    let edited = settings.auto_start_config();
+    assert!(!edited.auto_start);
+    assert_eq!(edited.stop_hours, 8);
+    assert_eq!(edited.auto_stop_loss, 12.5);
+}
+
+#[test]
+fn client_settings_autostart2_helpers_preserve_reserved_tail() {
+    let mut settings = ClientSettingsCommand {
+        as_cfg2: vec![0xCC; AS_CFG2_SIZE],
+        ..ClientSettingsCommand::default()
+    };
+
+    settings.set_auto_start_config2(AutoStartConfig2 {
+        restart_on_market: true,
+        btc_higher_then: 1.25,
+        btc_lower_then: -2.5,
+        market_higher_then: 3.75,
+        show_old_listing: true,
+        reset_session: true,
+        max_session_cap: 1000,
+        rs_hours: 12,
+    });
+
+    assert_eq!(settings.as_cfg2.len(), AS_CFG2_SIZE);
+    assert_eq!(settings.as_cfg2[0], 1);
+    assert_eq!(&settings.as_cfg2[8..16], &1.25f64.to_le_bytes());
+    assert_eq!(&settings.as_cfg2[16..24], &(-2.5f64).to_le_bytes());
+    assert_eq!(&settings.as_cfg2[24..32], &3.75f64.to_le_bytes());
+    assert_eq!(settings.as_cfg2[32], 1);
+    assert_eq!(settings.as_cfg2[41], 1);
+    assert_eq!(&settings.as_cfg2[76..80], &1000i32.to_le_bytes());
+    assert_eq!(&settings.as_cfg2[80..84], &12i32.to_le_bytes());
+
+    assert_eq!(&settings.as_cfg2[33..41], &[0xCC; 8]);
+    assert_eq!(&settings.as_cfg2[42..44], &[0xCC; 2]);
+    assert_eq!(&settings.as_cfg2[44..76], &[0xCC; 32]);
+    assert_eq!(&settings.as_cfg2[84..88], &[0xCC; 4]);
+    assert_eq!(&settings.as_cfg2[88..168], &[0xCC; 80]);
+
+    let decoded = settings.auto_start_config2();
+    assert!(decoded.restart_on_market);
+    assert_eq!(decoded.btc_higher_then, 1.25);
+    assert_eq!(decoded.btc_lower_then, -2.5);
+    assert_eq!(decoded.market_higher_then, 3.75);
+    assert!(decoded.show_old_listing);
+    assert!(decoded.reset_session);
+    assert_eq!(decoded.max_session_cap, 1000);
+    assert_eq!(decoded.rs_hours, 12);
+}
+
+#[test]
 fn client_settings_soft_tail_uses_delphi_cfg_fallback() {
     let mut raw = Vec::new();
     raw.push(CMD_CLIENT_SETTINGS);

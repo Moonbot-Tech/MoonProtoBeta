@@ -1,8 +1,6 @@
 //! Inbound `MPC_UI` command parser.
 
 use super::*;
-use zerocopy::IntoBytes;
-
 impl UICommand {
     /// Parse a TBaseUICommand payload (after MPC_UI dispatch in data_read_int).
     /// Wire-format: `cmd_id:u8 + ver:u16 + UID:u64 + class-specific`.
@@ -436,7 +434,7 @@ fn read_sized_autostart_config_with_fallback(
     fallback: Option<&[u8]>,
 ) -> Vec<u8> {
     let bytes = read_sized_fixed_blob_with_fallback::<AS_CFG_SIZE>(data, pos, fallback);
-    WireAutoStartConfig { bytes }.as_bytes().to_vec()
+    WireAutoStartConfig::from_blob(&bytes).as_blob()
 }
 
 fn read_sized_autostart_config2_with_fallback(
@@ -445,7 +443,7 @@ fn read_sized_autostart_config2_with_fallback(
     fallback: Option<&[u8]>,
 ) -> Vec<u8> {
     let bytes = read_sized_fixed_blob_with_fallback::<AS_CFG2_SIZE>(data, pos, fallback);
-    WireAutoStartConfig2 { bytes }.as_bytes().to_vec()
+    WireAutoStartConfig2::from_blob(&bytes).as_blob()
 }
 
 fn read_sized_fixed_blob_with_fallback<const N: usize>(
