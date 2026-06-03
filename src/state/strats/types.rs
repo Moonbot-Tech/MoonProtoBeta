@@ -49,6 +49,8 @@ pub enum StratEvent {
         server_epoch: u64,
         /// Compressed snapshot payload length. The raw bytes are kept only in
         /// diagnostics builds for FireTest/custom decoder dumps.
+        #[cfg(any(test, feature = "diagnostics"))]
+        #[doc(hidden)]
         raw_len: usize,
         #[cfg(feature = "diagnostics")]
         #[doc(hidden)]
@@ -59,6 +61,8 @@ pub enum StratEvent {
         server_epoch: u64,
         /// Compressed snapshot payload length. The raw bytes are kept only in
         /// diagnostics builds for FireTest/custom decoder dumps.
+        #[cfg(any(test, feature = "diagnostics"))]
+        #[doc(hidden)]
         raw_len: usize,
         #[cfg(feature = "diagnostics")]
         #[doc(hidden)]
@@ -80,13 +84,19 @@ pub enum StratEvent {
     CheckedEcho { count: usize },
     /// Strategy schema (`TStratSchema`, CmdId=8) was received and parsed.
     SchemaApplied {
+        #[cfg(any(test, feature = "diagnostics"))]
+        #[doc(hidden)]
         raw_len: usize,
         format_version: u8,
         kind_count: usize,
         field_count: usize,
     },
     /// Server sent `TStratSchema`, but the raw-deflate/body parse failed.
-    SchemaParseFailed { raw_len: usize },
+    SchemaParseFailed {
+        #[cfg(any(test, feature = "diagnostics"))]
+        #[doc(hidden)]
+        raw_len: usize,
+    },
 }
 
 impl StratEvent {
@@ -100,6 +110,8 @@ impl StratEvent {
     }
 
     /// Raw snapshot payload length for diagnostics without touching the bytes.
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub fn snapshot_raw_len(&self) -> Option<usize> {
         match self {
             StratEvent::SnapshotFull { raw_len, .. }

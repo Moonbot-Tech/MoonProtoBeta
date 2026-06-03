@@ -25,6 +25,7 @@ impl StratsState {
                 self.schema_revision = self.schema_revision.saturating_add(1);
                 self.schema_last_error = None;
                 StratEvent::SchemaApplied {
+                    #[cfg(any(test, feature = "diagnostics"))]
                     raw_len,
                     format_version,
                     kind_count,
@@ -36,7 +37,10 @@ impl StratsState {
                 self.schema_last_error = Some(format!(
                     "failed to parse TStratSchema raw blob ({raw_len} bytes)"
                 ));
-                StratEvent::SchemaParseFailed { raw_len }
+                StratEvent::SchemaParseFailed {
+                    #[cfg(any(test, feature = "diagnostics"))]
+                    raw_len,
+                }
             }
         }
     }

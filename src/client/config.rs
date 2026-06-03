@@ -313,8 +313,8 @@ pub struct ClientConfig {
     /// clients in one process share the same worker, matching Delphi
     /// `TMoonProtoTymeSyncer` and its global offset.
     ///
-    /// `None` disables managed NTP. This is useful for tests and tools that
-    /// manage NTP explicitly through `ntp::spawn_sync_thread`.
+    /// `None` disables managed NTP. This is useful for tests, offline tools, or
+    /// applications that intentionally rely on system time.
     ///
     /// Use the same `ntp_host` for all clients in the process. If another host
     /// is requested while the process-level syncer is already running, the

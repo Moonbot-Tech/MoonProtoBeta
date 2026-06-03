@@ -98,18 +98,19 @@ impl StratsState {
     pub(crate) fn apply(&mut self, cmd: StratCommand) -> Option<StratEvent> {
         match cmd {
             StratCommand::Snapshot(snap) => {
-                let raw_len = snap.data.len();
                 if snap.full {
                     Some(StratEvent::SnapshotFull {
                         server_epoch: snap.server_epoch,
-                        raw_len,
+                        #[cfg(any(test, feature = "diagnostics"))]
+                        raw_len: snap.data.len(),
                         #[cfg(feature = "diagnostics")]
                         raw_data: snap.data,
                     })
                 } else {
                     Some(StratEvent::SnapshotPartial {
                         server_epoch: snap.server_epoch,
-                        raw_len,
+                        #[cfg(any(test, feature = "diagnostics"))]
+                        raw_len: snap.data.len(),
                         #[cfg(feature = "diagnostics")]
                         raw_data: snap.data,
                     })

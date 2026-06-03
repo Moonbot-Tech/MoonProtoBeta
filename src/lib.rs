@@ -140,7 +140,12 @@ pub mod commands;
 mod commands;
 pub mod events;
 pub mod key_import;
+#[cfg(feature = "diagnostics")]
+#[doc(hidden)]
 pub mod ntp;
+#[cfg(not(feature = "diagnostics"))]
+#[allow(dead_code, unreachable_pub)]
+mod ntp;
 pub mod state;
 pub mod time;
 

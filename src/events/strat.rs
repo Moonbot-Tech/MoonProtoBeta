@@ -48,6 +48,7 @@ impl EventDispatcher {
             let ev = if snap.full {
                 StratEvent::SnapshotFull {
                     server_epoch: snap.server_epoch,
+                    #[cfg(any(test, feature = "diagnostics"))]
                     raw_len,
                     #[cfg(feature = "diagnostics")]
                     raw_data: snap.data,
@@ -55,6 +56,7 @@ impl EventDispatcher {
             } else {
                 StratEvent::SnapshotPartial {
                     server_epoch: snap.server_epoch,
+                    #[cfg(any(test, feature = "diagnostics"))]
                     raw_len,
                     #[cfg(feature = "diagnostics")]
                     raw_data: snap.data,

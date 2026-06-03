@@ -80,8 +80,9 @@ for event in client.drain_events() {
 Snapshot events are signals that the decoded state is ready. Normal
 applications should read `state.strategy_snapshot(...)` or
 `state.strategy_snapshots()`. For logging, use
-`StratEvent::snapshot_server_epoch()` and `StratEvent::snapshot_raw_len()`;
-raw snapshot bytes are diagnostics-only.
+`StratEvent::snapshot_server_epoch()`. Raw snapshot sizes/bytes are
+diagnostics-only because terminal code should not depend on compressed protocol
+payloads.
 
 Server `TStratSnapshotRequest` packets are answered by the runtime from the
 library-owned local strategy list. Terminal code does not need to handle that
