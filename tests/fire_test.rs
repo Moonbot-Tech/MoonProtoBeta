@@ -770,9 +770,13 @@ impl Session {
     }
 
     fn request_coin_card_candles(&mut self, market: &str, kind: DeepHistoryKind) {
+        let snapshot = self.state_snapshot();
+        let handle = snapshot.markets().get(market).unwrap_or_else(|| {
+            panic!("MoonClient request_coin_card_candles market not found: {market}")
+        });
         self.client
             .candles()
-            .request_coin_card(market, kind)
+            .request_coin_card_for(&handle, kind)
             .expect("MoonClient request_coin_card_candles must queue");
         println!(
             "FIRETEST non-blocking CoinCard candles queued market={} kind={kind:?}",
@@ -783,7 +787,10 @@ impl Session {
     fn coin_card_candles_count(&self, market: &str, kind: DeepHistoryKind) -> usize {
         self.latest_snapshot
             .as_ref()
-            .and_then(|snapshot| snapshot.coin_card_candles().get(market, kind))
+            .and_then(|snapshot| {
+                let handle = snapshot.markets().get(market)?;
+                snapshot.coin_card_candles_for(&handle, kind)
+            })
             .map(|rows| rows.len())
             .unwrap_or(0)
     }
@@ -969,7 +976,11 @@ impl Session {
         market: &str,
         now_time: MoonTime,
     ) {
-        let Some(readers) = snapshot.market_history_readers(market) else {
+        let Some(handle) = snapshot.markets().get(market) else {
+            println!("FIRETEST ActiveLib market={market}: market handle not found");
+            return;
+        };
+        let Some(readers) = snapshot.market_history_readers_for(&handle) else {
             println!(
                 "FIRETEST ActiveLib market={market}: no retained readers; reason=market not retained by trades storage scope"
             );
@@ -1019,10 +1030,9 @@ impl Session {
         );
         let manual_25 = trade_volume(&futures_25);
         let manual_60 = trade_volume(&futures_60);
-        let derived = snapshot.market_history_derived_snapshot(market, now_time);
-        let price = snapshot.markets().price(market);
-        let handle = snapshot.markets().get(market);
-        let balance = handle.as_ref().map(|handle| handle.balance_position());
+        let derived = snapshot.market_history_derived_snapshot_for(&handle, now_time);
+        let price = Some(handle.price());
+        let balance = Some(handle.balance_position());
 
         println!(
             "FIRETEST ActiveLib market={market} LastPrice count={} expected_by_updates~{} span={:.2}s expected_by_2s_span~{} min={:.8} max={:.8} delta_all={:.4}% delta_1m={:.4}% delta_1h={:.4}% values=[{}]",
@@ -3720,7 +3730,12 @@ impl MoonClientPathStats {
         target_market: &str,
         elapsed_s: f64,
     ) {
-        if let Some(price) = snapshot.markets().price(target_market) {
+        let Some(market) = snapshot.markets().get(target_market) else {
+            return;
+        };
+
+        {
+            let price = market.price();
             self.first_market_price_at_s.get_or_insert(elapsed_s);
             self.last_market_price = Some(MarketProbePrice::from(&price));
             if price.bid <= 0.0 || price.ask <= 0.0 || price.ask < price.bid {
@@ -3730,18 +3745,18 @@ impl MoonClientPathStats {
                 ));
             }
         }
-        if let Some(state) = snapshot.markets().trade_state(target_market) {
-            if state.last_trade_price > 0.0 {
-                self.last_trade_price = Some(state.last_trade_price);
-            }
+
+        let state = market.trade_state();
+        if state.last_trade_price > 0.0 {
+            self.last_trade_price = Some(state.last_trade_price);
         }
-        if let Some(top) = snapshot.top_of_book(target_market, OrderBookKind::Futures) {
+        if let Some(top) = snapshot.top_of_book_for(&market, OrderBookKind::Futures) {
             if let (Some(bid), Some(ask)) = (top.bid, top.ask) {
                 self.last_book_bid = Some(bid.rate);
                 self.last_book_ask = Some(ask.rate);
             }
         }
-        if let Some(readers) = snapshot.market_history_readers(target_market) {
+        if let Some(readers) = snapshot.market_history_readers_for(&market) {
             if let Some(reader) = readers.last_prices.as_ref() {
                 self.retained_last_prices = reader.bounds().len;
             }
@@ -3758,16 +3773,13 @@ impl MoonClientPathStats {
             }
         }
         if let Some(derived) =
-            snapshot.market_history_derived_snapshot(target_market, moon_now_for_test())
+            snapshot.market_history_derived_snapshot_for(&market, moon_now_for_test())
         {
             self.derived_trade_vol_1m = derived.trade_volumes.one_minute.total_value();
             self.derived_trade_vol_5m = derived.trade_volumes.five_minutes.total_value();
             self.derived_candle_vol_1h = derived.candle_volumes.one_hour;
         }
-        if let Some(candles) = snapshot
-            .coin_card_candles()
-            .get(target_market, FIRETEST_COIN_CARD_KIND)
-        {
+        if let Some(candles) = snapshot.coin_card_candles_for(&market, FIRETEST_COIN_CARD_KIND) {
             self.coin_card_last_count = self.coin_card_last_count.max(candles.len());
         }
     }
