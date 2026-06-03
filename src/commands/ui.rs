@@ -591,7 +591,8 @@ impl TempBlacklistEntry<'_> {
 /// ```ignore
 /// if let Some(current) = &snapshot.settings().client_settings {
 ///     let mut settings = current.clone();
-///     settings.x_sell = 3;
+///     settings.fixed_sell_mode = false;
+///     settings.x_sell = 3; // main sell-percent slider value
 ///     settings.use_g_take_profit = true;
 ///     settings.g_take_profit = 1.5;
 ///     client.settings().send(settings);

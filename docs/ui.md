@@ -63,7 +63,10 @@ for event in client.drain_events() {
     ) {
         if let Some(snapshot) = client.snapshot() {
             if let Some(settings) = &snapshot.settings().client_settings {
-                println!("xSell={}", settings.x_sell);
+                println!(
+                    "sell target = {:.4}%",
+                    settings.effective_take_profit_percent()
+                );
             }
         }
     }
@@ -82,6 +85,7 @@ if let Some(mut settings) = client
     .snapshot()
     .and_then(|state| state.settings().client_settings.clone())
 {
+    settings.fixed_sell_mode = false;
     settings.x_sell = 50;
     client.settings().send(settings)?;
 }
@@ -267,6 +271,8 @@ page/control, and sends the whole snapshot back:
 ```rust
 if let Some(current) = &snapshot.settings().client_settings {
     let mut settings = current.clone();
+    settings.fixed_sell_mode = false;
+    settings.x_sell = 25;
     settings.use_g_take_profit = true;
     settings.g_take_profit = 2.5;
     client.settings().send(settings)?;

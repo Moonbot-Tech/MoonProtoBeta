@@ -52,10 +52,10 @@ fn main() {
         .expect("settings event must store ClientSettingsCommand");
 
     println!(
-        "[settings] take_profit_percent={} x_sell={} x_sell_scalp={} stop_loss={} use_take_profit={} take_profit={}",
+        "[settings] sell_target_percent={} fixed_mode={} fixed_slot={} stop_loss={} use_take_profit={} take_profit={}",
         settings.effective_take_profit_percent(),
-        settings.x_sell,
-        settings.x_sell_scalp,
+        settings.fixed_sell_mode,
+        settings.selected_fixed_sell_slot(),
         settings.price_drop_level,
         settings.use_g_take_profit,
         settings.g_take_profit,

@@ -502,7 +502,10 @@ for event in client.drain_events() {
     ) {
         if let Some(snapshot) = client.snapshot() {
             if let Some(settings) = &snapshot.settings().client_settings {
-                println!("xSell={}", settings.x_sell);
+                println!(
+                    "sell target = {:.4}%",
+                    settings.effective_take_profit_percent()
+                );
             }
         }
     }
