@@ -163,12 +163,7 @@ client.orders().cancel(order)?;
 client.orders().update_stops(order, stops)?;
 client.orders().update_vstop(
     order,
-    VStopParams {
-        enabled: true,
-        fixed: false,
-        level: 50_000.0,
-        volume: 12.0,
-    },
+    VStopParams::percent(50_000.0, 12.0),
 )?;
 client.orders().turn_panic_sell(order, true)?;
 client.orders().set_immune_for_orders([order], true)?;

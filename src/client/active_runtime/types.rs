@@ -332,6 +332,62 @@ impl VStopParams {
             volume: 0.0,
         }
     }
+
+    /// Enabled VStop with percentage-style level semantics.
+    pub const fn percent(level: f64, volume: f64) -> Self {
+        Self {
+            enabled: true,
+            fixed: false,
+            level,
+            volume,
+        }
+    }
+
+    /// Enabled VStop with fixed-price level semantics.
+    pub const fn fixed(level: f64, volume: f64) -> Self {
+        Self {
+            enabled: true,
+            fixed: true,
+            level,
+            volume,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::VStopParams;
+
+    #[test]
+    fn vstop_params_semantic_constructors_set_delphi_flags() {
+        assert_eq!(
+            VStopParams::disabled(),
+            VStopParams {
+                enabled: false,
+                fixed: false,
+                level: 0.0,
+                volume: 0.0,
+            }
+        );
+        assert_eq!(
+            VStopParams::percent(12.5, 3.0),
+            VStopParams {
+                enabled: true,
+                fixed: false,
+                level: 12.5,
+                volume: 3.0,
+            }
+        );
+        assert_eq!(
+            VStopParams::fixed(50_000.0, 8.0),
+            VStopParams {
+                enabled: true,
+                fixed: true,
+                level: 50_000.0,
+                volume: 8.0,
+            }
+        );
+    }
 }
 
 /// Error returned by the high-level [`MoonClient`](super::MoonClient) runtime API.
