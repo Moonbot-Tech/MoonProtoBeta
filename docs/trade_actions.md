@@ -92,6 +92,14 @@ If Init/BaseCheck route fields are unavailable, these methods return
 `MoonClientError::TradeContext` instead of exposing `TradeCtx` to application
 code.
 
+Manual strategy mode is an application decision, matching MoonBot UI behavior.
+When settings say `use_manual_strategy` and the trader selected
+`manual_strategy_id`, pass that id with `NewOrderParams::with_strategy_id`.
+Leaving the strategy id empty means a pure manual order without strategy
+management; it is not the same as "manual order under the selected strategy".
+If the manual strategy sell-percent control changes, send the retained strategy
+update through `client.strategies().sell_price_update(...)`.
+
 `new_order` returns a client-side ticket for optional click-to-order
 correlation. Normal order tables should treat the order snapshot as the source
 of truth and redraw from `snapshot().orders()`.
