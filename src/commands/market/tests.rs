@@ -266,6 +266,22 @@ fn token_tags_string_stays_readbuffer_fail_fast() {
 }
 
 #[test]
+fn token_tags_rejects_absurd_count_before_loop() {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&((MAX_MARKETS_LIST_ROWS as i32) + 1).to_le_bytes());
+
+    assert!(parse_token_tags_response(&buf).is_none());
+}
+
+#[test]
+fn market_indexes_rejects_absurd_count_before_loop() {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&((MAX_MARKETS_LIST_ROWS as i32) + 1).to_le_bytes());
+
+    assert!(parse_markets_indexes_response(&buf).is_none());
+}
+
+#[test]
 fn corr_market_roundtrip() {
     let c = CorrMarket {
         bn_market_name: "BTCUSDT".to_string(),

@@ -3,9 +3,11 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::commands::market::EngineStreamReader;
+use crate::commands::market::{EngineStreamReader, MAX_MARKETS_LIST_ROWS};
 
 use super::{MarketTokenTags, MarketsEvent, MarketsState, TokenTags};
+
+const MARKET_TOKEN_TAG_MIN_WIRE_SIZE: usize = 2;
 
 impl MarketsState {
     /// Apply the `emk_CheckBinanceTags` response.
@@ -33,8 +35,13 @@ impl MarketsState {
     // parity: MoonBot MoonProtoEngine.pas:CheckBinanceTags
     pub(crate) fn apply_token_tags_payload(&mut self, data: &[u8]) -> Option<MarketsEvent> {
         let mut r = EngineStreamReader::new(data);
-        let count = r.read_count()?;
-        let mut seen = HashSet::with_capacity(r.bounded_count_capacity(count, 6));
+        let count = r.read_count_bounded(
+            MARKET_TOKEN_TAG_MIN_WIRE_SIZE,
+            MAX_MARKETS_LIST_ROWS,
+            "CheckBinanceTags.tags",
+        )?;
+        let mut seen = HashSet::new();
+        seen.try_reserve(count).ok()?;
 
         for _ in 0..count {
             let market_name = r.read_str()?;

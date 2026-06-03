@@ -1,5 +1,10 @@
 #[cfg(test)]
+use super::MAX_MARKETS_LIST_ROWS;
+#[cfg(test)]
 use super::{write_str, EngineStreamReader};
+
+#[cfg(test)]
+const MARKET_TOKEN_TAG_MIN_WIRE_SIZE: usize = 2;
 
 /// `TTokenTag` flag set (Vars.pas:64). On the wire it is an i32 bitmask.
 ///
@@ -67,9 +72,13 @@ pub struct MarketTokenTags {
 #[cfg(test)]
 pub(crate) fn parse_token_tags_response(data: &[u8]) -> Option<Vec<MarketTokenTags>> {
     let mut r = EngineStreamReader::new(data);
-    // MarketTokenTags: market_name (string u16+chars) + tags (i32) = at least 6 bytes.
-    let count = r.read_count()?;
-    let mut out = Vec::with_capacity(r.bounded_count_capacity(count, 6));
+    let count = r.read_count_bounded(
+        MARKET_TOKEN_TAG_MIN_WIRE_SIZE,
+        MAX_MARKETS_LIST_ROWS,
+        "CheckBinanceTags.tags",
+    )?;
+    let mut out = Vec::new();
+    out.try_reserve_exact(count).ok()?;
     for _ in 0..count {
         let market_name = r.read_str()?;
         let tags_int = r.read_int()? as u32;

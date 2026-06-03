@@ -1562,6 +1562,15 @@ fn apply_token_tags_payload_keeps_read_tags_on_late_parse_error() {
 }
 
 #[test]
+fn apply_token_tags_payload_rejects_absurd_count_before_loop() {
+    let mut st = MarketsState::new();
+    let mut data = Vec::new();
+    data.extend_from_slice(&((MAX_MARKETS_LIST_ROWS as i32) + 1).to_le_bytes());
+
+    assert!(st.apply_token_tags_payload(&data).is_none());
+}
+
+#[test]
 fn apply_markets_indexes() {
     let mut st = MarketsState::new();
     let names = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
