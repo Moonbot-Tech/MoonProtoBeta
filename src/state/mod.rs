@@ -38,8 +38,7 @@ pub use history::{
     hl_address_color, Candle5mRow, CandleVolumeSnapshot, CandlesSnapshotApplySummary,
     CandlesSnapshotEvent, DerivedDeltaSnapshot, LastPricePoint, MMOrderCompanionData,
     MMOrderHistoryRow, MarkPricePoint, MarketDerivedSnapshot, MiniCandle,
-    RollingTradeVolumeSnapshot, TradeHistoryRow, TradeVolumeTotals, DELPHI_MSECS_PER_DAY,
-    DELPHI_SAME_TRADES_TIME_DAYS,
+    RollingTradeVolumeSnapshot, TradeHistoryRow, TradeVolumeTotals,
 };
 pub(crate) use history_store::TradeStorageScope;
 pub use history_store::{MarketHistoryConfig, MarketHistoryReaders, MarketHistorySizing};

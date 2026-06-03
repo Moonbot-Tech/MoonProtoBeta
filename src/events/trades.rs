@@ -9,10 +9,11 @@ use crate::commands::trades_stream::{
     decode_trades_packet, parse_watcher_fills, DecodedTradesPacket, TradeSectionRef,
 };
 use crate::protocol::Command;
+use crate::state::history::DELPHI_MSECS_PER_DAY;
 use crate::state::{
     iter_trades_resend_response, MarketHistoryMMOrderInput, MarketHistoryStreamBatch,
     MarketHistoryStreamSection, MarketHistoryStreamSectionKind, MarketHistoryTradeInput,
-    TradesEvent, TradesPacketEffect, DELPHI_MSECS_PER_DAY,
+    TradesEvent, TradesPacketEffect,
 };
 
 impl EventDispatcher {

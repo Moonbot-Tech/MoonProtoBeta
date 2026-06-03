@@ -67,7 +67,14 @@ pub(crate) struct MissingOrderStatusRequest {
 #[derive(Debug, Clone, PartialEq)]
 pub struct WatcherFillEvent {
     /// Delphi `Round(TDateTime * MSecsPerDay)` timestamp used by `TWSFill.Time`.
+    ///
+    /// This is diagnostics-only because it is not Unix milliseconds. Terminal UI
+    /// should use [`Self::time`] or [`Self::unix_millis`].
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub time_ms: i64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) time_ms: i64,
     /// Shifted Delphi `TDateTime` value for consumers that work in days.
     #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]

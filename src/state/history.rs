@@ -7,12 +7,12 @@
 use crate::state::seq_ring::SeqRingTimedRow;
 use crate::MoonTime;
 
+#[cfg(test)]
 const SECONDS_PER_DAY: f64 = 86_400.0;
-pub const DELPHI_MSECS_PER_DAY: f64 = 86_400_000.0;
+pub(crate) const DELPHI_MSECS_PER_DAY: f64 = 86_400_000.0;
 const MINI_CANDLE_SPLIT_MS: i64 = 5_000;
 const ROLLING_VOLUME_BUCKET_SECONDS: i64 = 5;
 const ROLLING_VOLUME_BUCKETS: usize = 5 * 60 / ROLLING_VOLUME_BUCKET_SECONDS as usize;
-pub const DELPHI_SAME_TRADES_TIME_DAYS: f64 = 0.2 / SECONDS_PER_DAY;
 
 /// Counts from one full 5m candles snapshot after Active Lib applies the
 /// current trades-retention scope.
