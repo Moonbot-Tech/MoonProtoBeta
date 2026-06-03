@@ -47,7 +47,18 @@ impl StratsState {
     }
 
     /// Raw DEFLATE blob of the latest schema as received in `TStratSchema.Data`.
+    ///
+    /// Normal terminal code reads the decoded [`StrategySchema`] through
+    /// [`Self::strategy_schema`]. The raw blob is kept for FireTest/protocol
+    /// diagnostics and for internal init metrics.
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub fn strategy_schema_raw(&self) -> Option<&[u8]> {
+        self.schema_raw.as_deref().map(Vec::as_slice)
+    }
+
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) fn strategy_schema_raw(&self) -> Option<&[u8]> {
         self.schema_raw.as_deref().map(Vec::as_slice)
     }
 
