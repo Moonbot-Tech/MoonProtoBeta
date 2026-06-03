@@ -29,6 +29,10 @@ use super::MoonKey;
 ///     (see `apply_regular_hl_ack`). For that one command that is marginally WORSE
 ///     than a drop (a drop is retried; a false ACK is sticky), so the
 ///     "self-corrects / strictly weaker than a drop" reasoning does NOT cover it.
+///     The operational hints are applied without even the ACK bitmap's session
+///     gate, so a forged Ping can also transiently throttle or over-fragment
+///     outgoing reliable sends — availability-only, self-corrected by the next
+///     genuine Ping.
 /// Even so the worst plaintext-transport tampering stays short of the account
 /// boundary: it is forge-gated (2^32 per delivered packet), the command content
 /// stays GCM-authenticated (only delivery is suppressed, never altered), and the
