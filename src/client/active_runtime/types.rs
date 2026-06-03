@@ -317,10 +317,10 @@ impl CoinCardCandlesTicket {
 /// before sending. This type only describes the UI intent.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VStopParams {
-    pub enabled: bool,
-    pub fixed: bool,
-    pub level: f64,
-    pub volume: f64,
+    pub(crate) enabled: bool,
+    pub(crate) fixed: bool,
+    pub(crate) level: f64,
+    pub(crate) volume: f64,
 }
 
 impl VStopParams {

@@ -56,9 +56,16 @@ fn main() {
     }
 
     // Example only: uncomment in a real trading UI after explicit user action.
-    // client.trade().new_order(
-    //     moonproto::NewOrderParams::new(market, moonproto::OrderSide::Long, 50_000.0, 0.001),
-    // )?;
+    // if let Some(snapshot) = client.snapshot() {
+    //     if let Some(market_handle) = snapshot.markets().get(market) {
+    //         client.trade().new_order(moonproto::NewOrderParams::for_market(
+    //             &market_handle,
+    //             moonproto::OrderSide::Long,
+    //             50_000.0,
+    //             0.001,
+    //         ))?;
+    //     }
+    // }
 
     if let Err(err) = client.settings().refresh() {
         println!("[settings] request queue failed: {err}");
