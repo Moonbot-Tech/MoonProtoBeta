@@ -8,6 +8,9 @@ use super::registry::read_string;
 use crate::commands::market::PositionType;
 use crate::commands::trade::OrderType;
 
+const MAX_BALANCE_ITEMS: usize = u16::MAX as usize + 1;
+const BALANCE_ITEM_MIN_WIRE_SIZE: usize = 2;
+
 /// One market's decoded balance row.
 ///
 /// Normal chart/order UI should read the active values from `Market`; this row
@@ -136,6 +139,22 @@ pub(crate) fn parse_balance(cmd_id: u8, data: &[u8]) -> Option<BalanceUpdate> {
         return Some(result);
     }
     let count = count_raw as usize;
+    if count > MAX_BALANCE_ITEMS {
+        log::warn!(
+            target: "moonproto::balance",
+            "Balance row count {count} exceeds cap {MAX_BALANCE_ITEMS}"
+        );
+        return None;
+    }
+    let min_wire = count.checked_mul(BALANCE_ITEM_MIN_WIRE_SIZE)?;
+    if data.len().saturating_sub(pos) < min_wire {
+        log::warn!(
+            target: "moonproto::balance",
+            "Balance row count {count} exceeds payload envelope"
+        );
+        return None;
+    }
+    result.items.try_reserve_exact(count).ok()?;
 
     for _ in 0..count {
         if let Some(item) = read_balance_item(data, &mut pos) {
@@ -329,5 +348,21 @@ mod tests {
         let parsed = parse_balance(3, &payload).unwrap();
 
         assert!(parsed.items.is_empty());
+    }
+
+    #[test]
+    fn balance_parser_rejects_absurd_count_before_loop() {
+        let payload = full_balance_payload_with_count((MAX_BALANCE_ITEMS as i32) + 1, &[]);
+
+        assert!(parse_balance(3, &payload).is_none());
+    }
+
+    #[test]
+    fn balance_parser_rejects_count_outside_payload_envelope() {
+        let mut item = Vec::new();
+        super::super::registry::write_string(&mut item, "");
+        let payload = full_balance_payload_with_count(2, &item);
+
+        assert!(parse_balance(3, &payload).is_none());
     }
 }
