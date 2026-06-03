@@ -285,6 +285,23 @@ mod parse_engine_response_tests {
     }
 
     #[test]
+    fn parse_update_transfer_assets_response_rejects_absurd_count_before_loop() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&((MAX_TRANSFER_ASSET_ROWS as i32) + 1).to_le_bytes());
+
+        assert_eq!(parse_update_transfer_assets_response(&data), None);
+    }
+
+    #[test]
+    fn parse_update_transfer_assets_response_rejects_count_outside_payload_envelope() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&(2i32).to_le_bytes());
+        data.extend_from_slice(&(0u16).to_le_bytes());
+
+        assert_eq!(parse_update_transfer_assets_response(&data), None);
+    }
+
+    #[test]
     fn parse_returns_none_on_short_payload() {
         // < 11 bytes: header does not parse.
         let too_short = vec![0u8; 10];

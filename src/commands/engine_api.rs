@@ -28,6 +28,8 @@ pub use self::response::EngineResponse;
 #[cfg(test)]
 const DELPHI_UNIX_EPOCH_DAYS: f64 = 25_569.0;
 const SECONDS_PER_DAY: f64 = 86_400.0;
+const MAX_TRANSFER_ASSET_ROWS: usize = 16_384;
+const TRANSFER_ASSET_MIN_WIRE_ROW_SIZE: usize = 2;
 
 fn read_zero_tail<const N: usize>(data: &[u8], pos: &mut usize) -> [u8; N] {
     let mut out = [0u8; N];
@@ -191,7 +193,24 @@ pub(crate) fn parse_update_transfer_assets_response(data: &[u8]) -> Option<Vec<T
     }
 
     let count = count_raw as usize;
-    let mut assets = Vec::with_capacity(count.min(1024));
+    if count > MAX_TRANSFER_ASSET_ROWS {
+        log::warn!(
+            target: "moonproto::engine_api",
+            "UpdateTransferAssets row count {count} exceeds cap {MAX_TRANSFER_ASSET_ROWS}"
+        );
+        return None;
+    }
+    let min_wire = count.checked_mul(TRANSFER_ASSET_MIN_WIRE_ROW_SIZE)?;
+    if data.len().saturating_sub(pos) < min_wire {
+        log::warn!(
+            target: "moonproto::engine_api",
+            "UpdateTransferAssets row count {count} exceeds payload envelope"
+        );
+        return None;
+    }
+
+    let mut assets = Vec::new();
+    assets.try_reserve_exact(count).ok()?;
     for _ in 0..count {
         let currency = read_string(data, &mut pos)?;
         let amount = f64::from_le_bytes(read_zero_tail::<8>(data, &mut pos));
