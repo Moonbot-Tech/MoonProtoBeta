@@ -9,6 +9,7 @@ use moonproto::{StopSettings, VStopParams};
 
 let Some(snapshot) = client.snapshot() else { return; };
 let Some(order) = snapshot.orders().get(ui_state.selected_order_uid()) else { return; };
+let Some(market) = snapshot.markets().find("BTC") else { return; };
 let stops = StopSettings::disabled()
     .with_stop_loss_percent(2.5, 0.1)
     .with_take_profit_price(50_500.0);
@@ -28,7 +29,7 @@ client.orders().update_vstop(
 client.orders().set_immune_for_orders([order], true)?;
 client.orders().turn_panic_sell(order, true)?;
 client.orders().request_status(order)?;
-client.orders().switch_panic_sell_by_market("BTCUSDT", true)?;
+client.orders().switch_panic_sell_for_market(&market, true)?;
 ```
 
 The runtime owner applies the intent to the live `Orders` state first, then
@@ -67,14 +68,17 @@ BaseCheck:
 ```rust
 use moonproto::{NewOrderParams, OrderSide};
 
+let Some(snapshot) = client.snapshot() else { return; };
+let Some(market) = snapshot.markets().find("BTC") else { return; };
+
 let _ticket = client.trade().new_order(
-    NewOrderParams::new("BTCUSDT", OrderSide::Long, 50_000.0, 0.001)
+    NewOrderParams::for_market(&market, OrderSide::Long, 50_000.0, 0.001)
         .with_strategy_id(strategy_id),
 )?;
 
-client.trade().join_orders("BTCUSDT", OrderSide::Long)?;
-client.trade().limit_close_position("BTCUSDT", OrderSide::Long)?;
-client.trade().penalty("BTCUSDT")?;
+client.trade().join_orders_for_market(&market, OrderSide::Long)?;
+client.trade().limit_close_position_for_market(&market, OrderSide::Long)?;
+client.trade().penalty_for_market(&market)?;
 ```
 
 Bulk buy/sell moves use named constructors for the trader-visible mode. The
@@ -83,8 +87,8 @@ runtime still serializes the exact Delphi packet mode internally:
 ```rust
 use moonproto::{FixedPosition, MoveAllBuysParams, ReplaceMultiKind};
 
-client.trade().move_all_buys(
-    "BTCUSDT",
+client.trade().move_all_buys_for_market(
+    &market,
     MoveAllBuysParams::replace_kind(ReplaceMultiKind::TopVol, 50_100.0, FixedPosition::Long),
 )?;
 ```
@@ -101,6 +105,10 @@ Order intent handles also accept a raw UID for CLI tools and scripts that only
 have an identifier. Desktop UI should prefer the visible `&Order` it already
 draws; the runtime still resolves that selector against the live order state
 before sending.
+
+Market-level helpers have the same split: terminal UI should keep the selected
+`MarketHandle` and call `*_for_market` methods or `...Params::for_market`.
+String-keyed methods remain for scripts and one-shot tools.
 
 ## Init Gate
 

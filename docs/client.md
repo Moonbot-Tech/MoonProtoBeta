@@ -171,10 +171,13 @@ active session:
 ```rust
 use moonproto::{NewOrderParams, OrderSide};
 
+let Some(snapshot) = client.snapshot() else { return; };
+let Some(market) = snapshot.markets().find("BTC") else { return; };
+
 let _ticket = client.trade().new_order(
-    NewOrderParams::new("BTCUSDT", OrderSide::Long, 50_000.0, 0.001),
+    NewOrderParams::for_market(&market, OrderSide::Long, 50_000.0, 0.001),
 )?;
-client.trade().join_orders("BTCUSDT", OrderSide::Long)?;
+client.trade().join_orders_for_market(&market, OrderSide::Long)?;
 ```
 
 Existing-order actions are applied to the live `Orders` state first and only
@@ -429,8 +432,11 @@ serialized balance snapshot.
 Regular UI actions do not build or pass `TradeCtx`:
 
 ```rust
-client.trade().new_order(NewOrderParams::new(
-    "BTCUSDT",
+let Some(snapshot) = client.snapshot() else { return; };
+let Some(market) = snapshot.markets().find("BTC") else { return; };
+
+client.trade().new_order(NewOrderParams::for_market(
+    &market,
     OrderSide::Long,
     50_000.0,
     0.001,

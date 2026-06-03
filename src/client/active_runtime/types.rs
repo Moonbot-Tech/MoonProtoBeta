@@ -466,6 +466,20 @@ impl NewOrderParams {
         }
     }
 
+    /// Build new-order params for a retained selected market.
+    ///
+    /// Terminal UI normally keeps `MarketHandle` after search/chart selection,
+    /// matching Delphi's `TMarket` reference. This constructor avoids turning
+    /// that selected object back into a user-visible lookup problem.
+    pub fn for_market(
+        market: &crate::state::MarketHandle,
+        side: OrderSide,
+        price: f64,
+        size: f64,
+    ) -> Self {
+        Self::new(market.name(), side, price, size)
+    }
+
     pub fn with_strategy_id(mut self, strategy_id: u64) -> Self {
         self.strategy_id = Some(strategy_id);
         self
@@ -500,6 +514,11 @@ impl SplitOrderParams {
             split_small_sell: false,
         }
     }
+
+    /// Build split-order params for a retained selected market.
+    pub fn for_market(market: &crate::state::MarketHandle, parts: i32) -> Self {
+        Self::new(market.name(), parts)
+    }
 }
 
 /// User-facing parameters for market close.
@@ -515,6 +534,11 @@ impl ClosePositionParams {
             market: market.into(),
             market_sell: true,
         }
+    }
+
+    /// Build close-position params for a retained selected market.
+    pub fn for_market(market: &crate::state::MarketHandle) -> Self {
+        Self::new(market.name())
     }
 }
 
@@ -533,5 +557,10 @@ impl SellOrderParams {
             price,
             size,
         }
+    }
+
+    /// Build sell-order params for a retained selected market.
+    pub fn for_market(market: &crate::state::MarketHandle, price: f64, size: f64) -> Self {
+        Self::new(market.name(), price, size)
     }
 }

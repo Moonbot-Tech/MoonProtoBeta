@@ -156,6 +156,18 @@ impl MoonOrders {
         })
     }
 
+    /// Apply market-level panic sell button semantics for a retained market.
+    ///
+    /// This is the terminal UI path: the chart/order panel already owns a
+    /// `MarketHandle`, so it should not re-search the selected market by name.
+    pub fn switch_panic_sell_for_market(
+        &self,
+        market: &crate::state::MarketHandle,
+        turn_on: bool,
+    ) -> Result<(), MoonClientError> {
+        self.switch_panic_sell_by_market(market.name(), turn_on)
+    }
+
     fn send_intent(&self, kind: RuntimeCommandKind) -> Result<(), MoonClientError> {
         self.tx
             .send(RuntimeCommand::OrderAction(kind))
@@ -165,9 +177,11 @@ impl MoonOrders {
 
 /// Market-level trade intent handle.
 ///
-/// These actions create or manage orders by market name. The caller does not
-/// pass `TradeCtx`; the runtime owner derives Delphi route bytes from the
-/// active session and queues the same wire commands as the low-level `Client`.
+/// These actions create or manage orders by selected market. Terminal UI can
+/// pass its retained `MarketHandle` through `*_for_market` helpers; scripts can
+/// still use market-name helpers. The caller never passes `TradeCtx`; the
+/// runtime owner derives Delphi route bytes from the active session and queues
+/// the same wire commands as the low-level `Client`.
 #[derive(Clone)]
 pub struct MoonTrade {
     pub(super) tx: mpsc::Sender<RuntimeCommand>,
@@ -196,6 +210,15 @@ impl MoonTrade {
         })
     }
 
+    /// Send `TJoinOrdersCommand` for a retained selected market.
+    pub fn join_orders_for_market(
+        &self,
+        market: &crate::state::MarketHandle,
+        side: OrderSide,
+    ) -> Result<(), MoonClientError> {
+        self.join_orders(market.name(), side)
+    }
+
     /// Send `TSplitOrderCommand`.
     pub fn split_order(&self, params: SplitOrderParams) -> Result<(), MoonClientError> {
         self.send_intent(RuntimeTradeCommandKind::SplitOrder(params))
@@ -216,6 +239,15 @@ impl MoonTrade {
         })
     }
 
+    /// Move all matching sell orders for a retained selected market.
+    pub fn move_all_sells_for_market(
+        &self,
+        market: &crate::state::MarketHandle,
+        params: crate::commands::trade::MoveAllSellsParams,
+    ) -> Result<(), MoonClientError> {
+        self.move_all_sells(market.name(), params)
+    }
+
     /// Move all matching buy orders.
     ///
     /// Build `params` with `MoveAllBuysParams` named constructors; the runtime
@@ -229,6 +261,15 @@ impl MoonTrade {
             market_name: market_name.into(),
             params,
         })
+    }
+
+    /// Move all matching buy orders for a retained selected market.
+    pub fn move_all_buys_for_market(
+        &self,
+        market: &crate::state::MarketHandle,
+        params: crate::commands::trade::MoveAllBuysParams,
+    ) -> Result<(), MoonClientError> {
+        self.move_all_buys(market.name(), params)
     }
 
     /// Send `TDoClosePositionCommand`.
@@ -251,6 +292,15 @@ impl MoonTrade {
         })
     }
 
+    /// Send `TDoLimitClosePositionCommand` for a retained selected market.
+    pub fn limit_close_position_for_market(
+        &self,
+        market: &crate::state::MarketHandle,
+        side: OrderSide,
+    ) -> Result<(), MoonClientError> {
+        self.limit_close_position(market.name(), side)
+    }
+
     /// Send `TDoSplitPositionCommand`.
     pub fn split_position(
         &self,
@@ -261,6 +311,15 @@ impl MoonTrade {
             market_name: market_name.into(),
             side,
         })
+    }
+
+    /// Send `TDoSplitPositionCommand` for a retained selected market.
+    pub fn split_position_for_market(
+        &self,
+        market: &crate::state::MarketHandle,
+        side: OrderSide,
+    ) -> Result<(), MoonClientError> {
+        self.split_position(market.name(), side)
     }
 
     /// Send `TDoSellOrderCommand`.
@@ -280,11 +339,28 @@ impl MoonTrade {
         })
     }
 
+    /// Send `TDoMarketSplitPositionCommand` for a retained selected market.
+    pub fn market_split_position_for_market(
+        &self,
+        market: &crate::state::MarketHandle,
+        side: OrderSide,
+    ) -> Result<(), MoonClientError> {
+        self.market_split_position(market.name(), side)
+    }
+
     /// Send `TPenaltyCommand`.
     pub fn penalty(&self, market_name: impl Into<String>) -> Result<(), MoonClientError> {
         self.send_intent(RuntimeTradeCommandKind::Penalty {
             market_name: market_name.into(),
         })
+    }
+
+    /// Send `TPenaltyCommand` for a retained selected market.
+    pub fn penalty_for_market(
+        &self,
+        market: &crate::state::MarketHandle,
+    ) -> Result<(), MoonClientError> {
+        self.penalty(market.name())
     }
 
     fn send_intent(&self, kind: RuntimeTradeCommandKind) -> Result<(), MoonClientError> {
