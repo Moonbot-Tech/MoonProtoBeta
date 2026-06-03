@@ -92,6 +92,48 @@ fn worker_does_not_create_market_from_stream_batch() {
 }
 
 #[test]
+fn worker_continues_after_command_panic() {
+    let worker = MarketHistoryWorker::spawn(MarketHistoryConfig {
+        futures_trades_capacity: 0,
+        spot_trades_capacity: 0,
+        liquidation_capacity: 0,
+        mm_orders_capacity: 0,
+        last_price_capacity: 4,
+        mini_candles_capacity: 0,
+        candles_5m_capacity: 0,
+    });
+    assert!(worker.configure_markets(vec!["BTCUSDT".to_string()], Some(TradeStorageScope::All)));
+    assert!(worker.handle().panic_once_for_test());
+
+    worker
+        .handle()
+        .send_last_price_batch(MarketHistoryLastPriceBatch {
+            now_time: 45_000.25,
+            rows: vec![MarketHistoryLastPriceInput {
+                market_name: Arc::<str>::from("BTCUSDT"),
+                current: 100.5,
+                bid: 100.0,
+                ask: 101.0,
+                mark_price: 100.75,
+                mark_price_found: true,
+                is_btc_market: true,
+                is_base_usdt_market: false,
+            }],
+        });
+    assert!(worker.flush(mt(45_000.25)));
+
+    let last_prices = worker.readers("BTCUSDT").unwrap().last_prices.unwrap();
+    let mut out = Vec::new();
+    last_prices.copy_last(4, &mut out);
+    assert_eq!(
+        out.len(),
+        1,
+        "history worker must log/drop one panicking command and continue"
+    );
+    assert_eq!(out[0].current, 100.5);
+}
+
+#[test]
 fn worker_stores_last_price_batch_for_enabled_market() {
     let worker = MarketHistoryWorker::spawn(MarketHistoryConfig {
         futures_trades_capacity: 0,

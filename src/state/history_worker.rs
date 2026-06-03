@@ -145,6 +145,8 @@ enum MarketHistoryCommand {
         now_time: MoonTime,
         reply: mpsc::SyncSender<()>,
     },
+    #[cfg(test)]
+    PanicOnce,
     Stop,
 }
 
@@ -384,6 +386,11 @@ impl MarketHistoryHandle {
         }
         reply_rx.recv().is_ok()
     }
+
+    #[cfg(test)]
+    pub(crate) fn panic_once_for_test(&self) -> bool {
+        self.tx.send(MarketHistoryCommand::PanicOnce).is_ok()
+    }
 }
 
 fn worker_loop(
@@ -396,69 +403,113 @@ fn worker_loop(
     let mut last_now_time = MoonTime::ZERO;
 
     loop {
-        match rx.recv_timeout(STORE_WORKER_RECV_TIMEOUT) {
-            Ok(MarketHistoryCommand::SetEpsProfile(eps_profile)) => {
-                registry.set_eps_profile(eps_profile);
-            }
-            Ok(MarketHistoryCommand::ConfigureMarkets {
-                market_slots,
-                scope,
-            }) => {
-                registry.configure_market_index_slots(&market_slots, scope.as_ref());
-                publish_read_index(&read_index, &registry);
-            }
-            #[cfg(test)]
-            Ok(MarketHistoryCommand::Readers { market_name, reply }) => {
-                let reply_value = registry
-                    .read_handle(&market_name)
-                    .map(|handle| handle.readers());
-                let _ = reply.send(reply_value);
-            }
-            #[cfg(test)]
-            Ok(MarketHistoryCommand::RollingVolumes {
-                market_name,
-                now_time,
-                reply,
-            }) => {
-                let _ = reply.send(
-                    registry
-                        .get(&market_name)
-                        .map(|store| store.rolling_volumes_snapshot(now_time)),
+        let keep_running = catch_unwind(AssertUnwindSafe(|| {
+            handle_worker_command(
+                rx.recv_timeout(STORE_WORKER_RECV_TIMEOUT),
+                &mut registry,
+                &read_index,
+                &mut last_now_time,
+                &mut last_maintenance,
+            )
+        }));
+        match keep_running {
+            Ok(true) => {}
+            Ok(false) => break,
+            Err(payload) => {
+                log::error!(
+                    target: "moonproto::history_worker",
+                    "moonproto-history-worker command panicked; dropping command and continuing: {}",
+                    panic_payload_message(payload.as_ref())
                 );
             }
-            Ok(MarketHistoryCommand::StreamBatch(batch)) => {
-                last_now_time = moon_time_from_delphi_days(batch.now_time);
-                process_stream_batch(&mut registry, batch);
-            }
-            Ok(MarketHistoryCommand::LastPriceBatch(batch)) => {
-                last_now_time = moon_time_from_delphi_days(batch.now_time);
-                process_last_price_batch(&mut registry, batch);
-            }
-            Ok(MarketHistoryCommand::CandlesSnapshot(markets)) => {
-                process_candles_snapshot(&mut registry, markets);
-            }
-            Ok(MarketHistoryCommand::Barrier { reply }) => {
-                let _ = reply.send(());
-            }
-            #[cfg(test)]
-            Ok(MarketHistoryCommand::Flush { now_time, reply }) => {
-                last_now_time = now_time;
-                run_store_maintenance(&mut registry, now_time);
-                last_maintenance = Instant::now();
-                let _ = reply.send(());
-            }
-            Ok(MarketHistoryCommand::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                read_index.write().clear();
-                break;
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
 
         if last_maintenance.elapsed() >= STORE_WORKER_MAINTENANCE_INTERVAL {
-            run_store_maintenance(&mut registry, last_now_time);
-            last_maintenance = Instant::now();
+            let maintenance = catch_unwind(AssertUnwindSafe(|| {
+                run_store_maintenance(&mut registry, last_now_time);
+                last_maintenance = Instant::now();
+            }));
+            if let Err(payload) = maintenance {
+                log::error!(
+                    target: "moonproto::history_worker",
+                    "moonproto-history-worker maintenance panicked; skipping tick and continuing: {}",
+                    panic_payload_message(payload.as_ref())
+                );
+                last_maintenance = Instant::now();
+            }
         }
     }
+}
+
+fn handle_worker_command(
+    command: Result<MarketHistoryCommand, mpsc::RecvTimeoutError>,
+    registry: &mut MarketHistoryRegistry,
+    read_index: &MarketHistoryReadIndex,
+    last_now_time: &mut MoonTime,
+    _last_maintenance: &mut Instant,
+) -> bool {
+    match command {
+        Ok(MarketHistoryCommand::SetEpsProfile(eps_profile)) => {
+            registry.set_eps_profile(eps_profile);
+        }
+        Ok(MarketHistoryCommand::ConfigureMarkets {
+            market_slots,
+            scope,
+        }) => {
+            registry.configure_market_index_slots(&market_slots, scope.as_ref());
+            publish_read_index(read_index, registry);
+        }
+        #[cfg(test)]
+        Ok(MarketHistoryCommand::Readers { market_name, reply }) => {
+            let reply_value = registry
+                .read_handle(&market_name)
+                .map(|handle| handle.readers());
+            let _ = reply.send(reply_value);
+        }
+        #[cfg(test)]
+        Ok(MarketHistoryCommand::RollingVolumes {
+            market_name,
+            now_time,
+            reply,
+        }) => {
+            let _ = reply.send(
+                registry
+                    .get(&market_name)
+                    .map(|store| store.rolling_volumes_snapshot(now_time)),
+            );
+        }
+        Ok(MarketHistoryCommand::StreamBatch(batch)) => {
+            *last_now_time = moon_time_from_delphi_days(batch.now_time);
+            process_stream_batch(registry, batch);
+        }
+        Ok(MarketHistoryCommand::LastPriceBatch(batch)) => {
+            *last_now_time = moon_time_from_delphi_days(batch.now_time);
+            process_last_price_batch(registry, batch);
+        }
+        Ok(MarketHistoryCommand::CandlesSnapshot(markets)) => {
+            process_candles_snapshot(registry, markets);
+        }
+        Ok(MarketHistoryCommand::Barrier { reply }) => {
+            let _ = reply.send(());
+        }
+        #[cfg(test)]
+        Ok(MarketHistoryCommand::Flush { now_time, reply }) => {
+            *last_now_time = now_time;
+            run_store_maintenance(registry, now_time);
+            *_last_maintenance = Instant::now();
+            let _ = reply.send(());
+        }
+        #[cfg(test)]
+        Ok(MarketHistoryCommand::PanicOnce) => {
+            panic!("test history worker panic");
+        }
+        Ok(MarketHistoryCommand::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+            read_index.write().clear();
+            return false;
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {}
+    }
+    true
 }
 
 fn publish_read_index(read_index: &MarketHistoryReadIndex, registry: &MarketHistoryRegistry) {
