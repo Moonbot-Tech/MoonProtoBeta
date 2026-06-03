@@ -107,10 +107,9 @@ impl Client {
     /// owns the runtime thread and has no user-selected loop duration.
     #[cfg(test)]
     pub(crate) fn run(&mut self, duration: Duration, on_data: OnDataFn) {
-        // Low-level raw API for consumers that intentionally do not use
-        // active-library auto-actions such as RequestOrderBookFull or trades
-        // resend tail-check. The user callback runs through the app queue, not
-        // inside the protocol tick.
+        // Test-only raw pump. It keeps the old callback queue shape available
+        // for protocol unit tests without exposing a finite-duration runtime
+        // choice to terminal applications.
         let (app_tx, app_rx) = mpsc::channel::<RawAppEvent>();
         let lifecycle_pair = if self.lifecycle_event_sender_installed() {
             None
