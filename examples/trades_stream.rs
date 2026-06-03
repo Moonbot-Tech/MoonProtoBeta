@@ -6,7 +6,9 @@
 use std::env;
 use std::time::{Duration, Instant};
 
-use moonproto::state::TradesEvent;
+use moonproto::state::{
+    MarketHandle, MarketHistoryReaders, SeqRingCursor, TradeHistoryRow, TradesEvent,
+};
 use moonproto::{Event, TradesStreamMode};
 
 mod common;
@@ -46,9 +48,24 @@ fn main() {
         println!("[subscribe] all-trades, retained all markets");
     }
 
+    let selected_market: Option<MarketHandle> = market_filter.as_deref().and_then(|name| {
+        client
+            .snapshot()
+            .and_then(|snapshot| snapshot.markets().get(name))
+    });
+    if market_filter.is_some() && selected_market.is_none() {
+        eprintln!(
+            "[warn] selected market was not found in the current market snapshot; \
+             waiting for stream signals only"
+        );
+    }
+
     let mut signals = 0u64;
     let mut trades = 0u64;
     let mut printed = 0u64;
+    let mut readers: Option<MarketHistoryReaders> = None;
+    let mut cursor: Option<SeqRingCursor> = None;
+    let mut rows: Vec<TradeHistoryRow> = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(watch_secs);
 
     while Instant::now() < deadline {
@@ -56,28 +73,38 @@ fn main() {
             match event {
                 Event::Trade(TradesEvent::Applied { .. }) => {
                     signals += 1;
-                    if let Some(name) = market_filter.as_deref() {
+                    if let Some(market) = selected_market.as_ref() {
                         let Some(snapshot) = client.snapshot() else {
                             continue;
                         };
-                        let Some(tail) = snapshot.markets().trade_state(name) else {
+                        if readers.is_none() {
+                            readers = snapshot.market_history_readers_for(market);
+                        }
+                        let Some(reader) = readers.as_ref().and_then(|r| r.futures_trades.clone())
+                        else {
                             continue;
                         };
-                        if tail.last_trade_price <= 0.0 {
-                            continue;
+                        let cursor = cursor.get_or_insert_with(|| reader.cursor_from_oldest());
+                        rows.clear();
+                        let meta = reader.copy_new_since(cursor, 4096, &mut rows);
+                        if meta.clipped {
+                            println!("[retained-gap] local cursor fell behind retained history");
                         }
-                        trades += 1;
-                        if printed < 25 {
-                            printed += 1;
-                            let side = if tail.last_trade_was_sell {
-                                "sell"
-                            } else {
-                                "buy"
-                            };
+                        trades += rows.len() as u64;
+                        let remaining_to_print = 25u64.saturating_sub(printed) as usize;
+                        for row in rows.iter().take(remaining_to_print) {
+                            let side = if row.is_buy() { "buy" } else { "sell" };
                             println!(
-                                "[trade-tail] {name} {} price={}",
-                                side, tail.last_trade_price
+                                "[retained-trade] {} {side} price={} qty={} time_ms={}",
+                                market.name(),
+                                row.price,
+                                row.quantity(),
+                                row.unix_millis()
                             );
+                            printed += 1;
+                            if printed >= 25 {
+                                break;
+                            }
                         }
                     } else {
                         trades += 1;

@@ -42,9 +42,10 @@ belongs to the current server token.
 
 ```rust
 use moonproto::Event;
-use moonproto::state::{SeqRingCursor, TradesEvent};
+use moonproto::state::{MarketHistoryReaders, SeqRingCursor, TradesEvent};
 
 let mut cursor: Option<SeqRingCursor> = None;
+let mut readers: Option<MarketHistoryReaders> = None;
 let mut rows = Vec::new();
 let Some(snapshot) = client.snapshot() else { return; };
 let Some(market) = snapshot.markets().get("BTCUSDT") else { return; };
@@ -54,8 +55,15 @@ for event in client.drain_events() {
         match trade_event {
             TradesEvent::Applied { .. } => {
                 let Some(state) = client.snapshot() else { continue; };
-                let Some(readers) = state.market_history_readers_for(&market) else { continue; };
-                let Some(reader) = readers.futures_trades else { continue; };
+                if readers.is_none() {
+                    readers = state.market_history_readers_for(&market);
+                }
+                let Some(reader) = readers
+                    .as_ref()
+                    .and_then(|readers| readers.futures_trades.clone())
+                else {
+                    continue;
+                };
 
                 let cursor = cursor.get_or_insert_with(|| reader.cursor_from_now());
                 rows.clear();
@@ -73,8 +81,10 @@ for event in client.drain_events() {
 
 `TradesEvent::Applied` is a signal, not a payload carrier. By the time it is
 emitted, Active Lib has already updated live market tails and queued retained
-history writes. Applications read rows from `MarketHistoryReaders` with their
-own `SeqRingCursor`.
+history writes. A UI normally resolves the selected `MarketHandle` once, keeps
+the `MarketHistoryReaders` once they become available, and advances its own
+`SeqRingCursor` on each signal. Re-searching by string or rebuilding readers on
+every paint/event tick is unnecessary.
 
 Gap, duplicate, out-of-order, resend, and bucket-close notifications are hidden
 diagnostic telemetry. Applications do not drive recovery from them;
@@ -125,9 +135,9 @@ Each `SeqRingReader` supports:
 
 ```rust
 reader.copy_last(limit, &mut out);
-reader.copy_from_time(time_days, limit, &mut out);
-reader.copy_time_range(from_days, to_days, limit, &mut out);
-let cursor = reader.cursor_at_or_after_time(time_days);
+reader.copy_from_time(time, limit, &mut out);
+reader.copy_time_range(from_time, to_time, limit, &mut out);
+let cursor = reader.cursor_at_or_after_time(time);
 reader.copy_from_cursor(cursor, limit, &mut out);
 reader.with_from_cursor(cursor, limit, |view| { /* zero-copy slices */ });
 reader.copy_new_since(&mut cursor, limit, &mut out);
