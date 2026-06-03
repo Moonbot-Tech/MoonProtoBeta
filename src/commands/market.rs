@@ -36,6 +36,9 @@ use self::list::build_markets_list_response_with_local_shift;
 pub(crate) use self::list::MarketsListResponse;
 #[cfg(test)]
 pub(crate) use self::list::{build_markets_list_response, parse_markets_list_response};
+pub(crate) use self::list::{
+    CORR_MARKET_MIN_WIRE_SIZE, MARKET_MIN_WIRE_SIZE, MAX_MARKETS_LIST_ROWS,
+};
 #[cfg(test)]
 pub(crate) use self::prices::build_markets_prices_response;
 #[cfg(test)]

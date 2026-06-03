@@ -7,6 +7,10 @@ use super::{CorrMarket, Market};
 #[cfg(test)]
 use crate::commands::candles::current_local_time_shift_minutes;
 
+pub(crate) const CORR_MARKET_MIN_WIRE_SIZE: usize = 6;
+pub(crate) const MARKET_MIN_WIRE_SIZE: usize = 20;
+pub(crate) const MAX_MARKETS_LIST_ROWS: usize = u16::MAX as usize + 1;
+
 /// `emk_GetMarketsList` response: full list of markets + CorrMarkets.
 /// Wire-form (MoonProtoEngineServer.pas:60-82 `WriteMarketsToStream`):
 ///   `count:i32 + markets[count] + corr_count:i32 + corr_markets[corr_count]`.
@@ -30,10 +34,13 @@ pub(super) fn parse_markets_list_response_with_local_shift(
     local_shift_minutes: f64,
 ) -> Option<MarketsListResponse> {
     let mut r = EngineStreamReader::new(data);
-    // A Market is certainly larger than 16 bytes; the count is used only for
-    // prealloc, not for a Delphi-incompatible early reject.
-    let count = r.read_count()?;
-    let mut markets = Vec::with_capacity(r.bounded_count_capacity(count, 16));
+    let count = r.read_count_bounded(
+        MARKET_MIN_WIRE_SIZE,
+        MAX_MARKETS_LIST_ROWS,
+        "GetMarketsList.markets",
+    )?;
+    let mut markets = Vec::new();
+    markets.try_reserve_exact(count).ok()?;
     for _ in 0..count {
         markets.push(read_market_with_local_shift(
             &mut r,
@@ -41,9 +48,13 @@ pub(super) fn parse_markets_list_response_with_local_shift(
             local_shift_minutes,
         )?);
     }
-    // A CorrMarket is larger than 8 bytes; bounded prealloc only.
-    let corr_count = r.read_count()?;
-    let mut corr_markets = Vec::with_capacity(r.bounded_count_capacity(corr_count, 8));
+    let corr_count = r.read_count_bounded(
+        CORR_MARKET_MIN_WIRE_SIZE,
+        MAX_MARKETS_LIST_ROWS,
+        "GetMarketsList.corr_markets",
+    )?;
+    let mut corr_markets = Vec::new();
+    corr_markets.try_reserve_exact(corr_count).ok()?;
     for _ in 0..corr_count {
         corr_markets.push(read_corr_market(&mut r)?);
     }

@@ -3,6 +3,7 @@ use crate::commands::candles::DeepPrice;
 use crate::commands::market::{
     write_market, ArbIsolationFlags, ArbPlatformCode, BaseCurrency, CorrMarketPriceUpdate,
     MarketArbNowEntry, MarketPriceUpdate, MarketsListResponse, MarketsPricesResponse, PositionType,
+    MAX_MARKETS_LIST_ROWS,
 };
 use crate::commands::trade::OrderType;
 use crate::MoonTime;
@@ -271,6 +272,18 @@ fn apply_markets_list_payload_keeps_read_market_on_late_corr_parse_error() {
         Some("BTCUSDT"),
         "Delphi rebuilds SrvMarkets after the market loop and before CorrMarkets"
     );
+}
+
+#[test]
+fn apply_markets_list_payload_rejects_absurd_market_count_before_loop() {
+    let mut st = MarketsState::new();
+    let mut data = Vec::new();
+    data.extend_from_slice(&((MAX_MARKETS_LIST_ROWS as i32) + 1).to_le_bytes());
+
+    let ev = st.apply_markets_list_payload_with_local_shift(&data, 2, 0.0);
+
+    assert!(ev.is_none());
+    assert_eq!(st.market_count(), 0);
 }
 
 #[test]

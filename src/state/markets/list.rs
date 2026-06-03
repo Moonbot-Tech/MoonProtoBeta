@@ -7,7 +7,8 @@ use std::time::Instant;
 
 use crate::commands::candles::current_local_time_shift_minutes;
 use crate::commands::market::{
-    read_corr_market, read_market_with_local_shift, EngineStreamReader, Market, MarketsListResponse,
+    read_corr_market, read_market_with_local_shift, EngineStreamReader, Market,
+    MarketsListResponse, CORR_MARKET_MIN_WIRE_SIZE, MARKET_MIN_WIRE_SIZE, MAX_MARKETS_LIST_ROWS,
 };
 
 #[cfg(any(test, feature = "diagnostics"))]
@@ -148,9 +149,15 @@ impl MarketsState {
         self.new_markets_pending_price_refresh = 0;
         self.new_markets_added.clear();
         let mut r = EngineStreamReader::new(data);
-        let count = r.read_count()?;
+        let count = r.read_count_bounded(
+            MARKET_MIN_WIRE_SIZE,
+            MAX_MARKETS_LIST_ROWS,
+            "GetMarketsList.markets",
+        )?;
         let mut incoming_server_names = if rebuild_server_indexes {
-            Vec::with_capacity(r.bounded_count_capacity(count, 16))
+            let mut names = Vec::new();
+            names.try_reserve_exact(count).ok()?;
+            names
         } else {
             Vec::new()
         };
@@ -203,7 +210,11 @@ impl MarketsState {
         let index_rebuild_ns = elapsed_ns_u64(index_rebuild_start);
 
         let corr_loop_start = timing_mark();
-        let corr_count = r.read_count()?;
+        let corr_count = r.read_count_bounded(
+            CORR_MARKET_MIN_WIRE_SIZE,
+            MAX_MARKETS_LIST_ROWS,
+            "GetMarketsList.corr_markets",
+        )?;
         for _ in 0..corr_count {
             let cm = read_corr_market(&mut r)?;
             self.apply_one_corr_market_from_list(cm);

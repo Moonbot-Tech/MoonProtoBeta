@@ -301,6 +301,32 @@ fn markets_list_response_roundtrip() {
 }
 
 #[test]
+fn markets_list_response_rejects_absurd_market_count_before_loop() {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&((MAX_MARKETS_LIST_ROWS as i32) + 1).to_le_bytes());
+
+    assert!(parse_markets_list_response(&buf, 2).is_none());
+}
+
+#[test]
+fn markets_list_response_rejects_count_outside_payload_envelope() {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&1i32.to_le_bytes());
+
+    assert!(parse_markets_list_response(&buf, 2).is_none());
+}
+
+#[test]
+fn markets_list_response_rejects_corr_count_outside_payload_envelope() {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&0i32.to_le_bytes());
+    buf.extend_from_slice(&2i32.to_le_bytes());
+    write_str(&mut buf, "");
+
+    assert!(parse_markets_list_response(&buf, 2).is_none());
+}
+
+#[test]
 fn markets_prices_response_with_funding() {
     let resp = MarketsPricesResponse {
         send_funding: true,
