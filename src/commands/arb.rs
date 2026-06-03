@@ -90,7 +90,10 @@ pub(crate) fn parse_arb_prices(payload: &[u8]) -> Option<ArbPricesCommand> {
     let blob = if len > 0 {
         let len = len as usize;
         if pos + len <= payload.len() {
-            payload[pos..pos + len].to_vec()
+            let mut blob = Vec::new();
+            blob.try_reserve_exact(len).ok()?;
+            blob.extend_from_slice(&payload[pos..pos + len]);
+            blob
         } else {
             Vec::new()
         }
@@ -158,7 +161,7 @@ fn parse_price_items_compact(data: &[u8], pos: &mut usize) -> Vec<ArbPriceBlock>
             break;
         }
 
-        let mut prices = Vec::with_capacity(price_count);
+        let mut prices = Vec::new();
         for _ in 0..price_count {
             let platform_code = data[*pos];
             *pos += 1;
@@ -186,7 +189,8 @@ fn parse_isolation_compact(data: &[u8], pos: &mut usize) -> Vec<ArbIsolationEntr
 
     let count = u16::from_le_bytes([data[*pos], data[*pos + 1]]) as usize;
     *pos += 2;
-    let mut entries = Vec::with_capacity(count);
+    let possible_count = data.len().saturating_sub(*pos) / 4;
+    let mut entries = Vec::with_capacity(count.min(possible_count));
 
     for _ in 0..count {
         if *pos + 4 > data.len() {

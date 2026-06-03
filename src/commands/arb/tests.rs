@@ -192,6 +192,28 @@ fn compact_truncated_isolation_keeps_complete_entries() {
 }
 
 #[test]
+fn compact_isolation_declared_count_is_bounded_by_payload() {
+    let mut payload = vec![3u8, CMD_ISOL];
+    payload.extend_from_slice(&u16::MAX.to_le_bytes());
+    payload.extend_from_slice(&42u16.to_le_bytes());
+    payload.push(7);
+    payload.push(0b01);
+
+    let parsed = parse_arb_payload_compact(&payload).unwrap();
+    assert_eq!(
+        parsed,
+        ArbPayload::Isolation {
+            entries: vec![ArbIsolationEntry {
+                market_index: 42,
+                platform_code: 7,
+                flags: 0b01,
+            }],
+            version: 3,
+        }
+    );
+}
+
+#[test]
 fn compact_rejects_invalid_header() {
     assert!(parse_arb_payload_compact(&[]).is_none());
     assert!(parse_arb_payload_compact(&[1]).is_none());
