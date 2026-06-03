@@ -55,6 +55,8 @@ mod trace;
 pub(crate) use trace::trace_flags;
 pub use trace::{BulkReplaceNotify, CorridorUpdate, OrderTracePoint};
 
+const MAX_ALL_STATUSES_ORDERS: usize = u16::MAX as usize + 1;
+
 /// Parameters for `TMoveAllSellsCommand`.
 ///
 /// Applications should create this with the named constructors below. The raw
@@ -364,6 +366,13 @@ impl AllStatuses {
             });
         }
         let count = count_raw as usize;
+        if count > MAX_ALL_STATUSES_ORDERS {
+            log::warn!(
+                target: "moonproto::trade",
+                "AllStatuses order count {count} exceeds cap {MAX_ALL_STATUSES_ORDERS}"
+            );
+            return None;
+        }
         let mut orders = Vec::with_capacity(count.min(r.len() / 11));
         for _ in 0..count {
             if r.is_empty() {

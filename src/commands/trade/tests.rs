@@ -323,6 +323,15 @@ fn all_statuses_negative_count_is_empty_snapshot() {
 }
 
 #[test]
+fn all_statuses_rejects_absurd_count_before_loop() {
+    let mut raw = Vec::new();
+    write_base_command_header(&mut raw, 8, 0xAA);
+    raw.extend_from_slice(&((MAX_ALL_STATUSES_ORDERS as i32) + 1).to_le_bytes());
+
+    assert!(TradeCommand::parse(&raw).is_none());
+}
+
+#[test]
 // parity: MoonBot MoonProtoTradeStruct.pas:TAllStatuses.CreateFromStream
 fn all_statuses_keeps_present_items_when_count_overstates_remaining() {
     let mut raw = Vec::new();
