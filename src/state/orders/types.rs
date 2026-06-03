@@ -1,6 +1,6 @@
 //! Order read-model and action/event types.
 
-use crate::commands::trade::{OrderType, OrderWorkerStatus, TradeCtx};
+use crate::commands::trade::{FixedPosition, OrderType, OrderWorkerStatus, TradeCtx};
 #[cfg(any(test, feature = "diagnostics"))]
 use crate::time::DelphiTime;
 use crate::MoonTime;
@@ -115,6 +115,43 @@ pub(crate) struct PanicSellSend {
     pub ctx: TradeCtx,
     pub market: String,
     pub turn_on: bool,
+}
+
+/// One side of the Delphi chart "unprotected position" calculation.
+///
+/// `difference = position_size - closing_sell_quantity`: positive means the
+/// position is not fully covered by active sell-close orders; negative means
+/// sell-close orders exceed the current position. Delphi blinks the label for
+/// either mismatch.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PositionProtectionSide {
+    pub side: FixedPosition,
+    pub position_size: f64,
+    pub closing_sell_quantity: f64,
+    pub difference: f64,
+    pub missing_quantity: f64,
+    pub has_warning: bool,
+}
+
+impl Default for PositionProtectionSide {
+    fn default() -> Self {
+        Self {
+            side: FixedPosition::Both,
+            position_size: 0.0,
+            closing_sell_quantity: 0.0,
+            difference: 0.0,
+            missing_quantity: 0.0,
+            has_warning: false,
+        }
+    }
+}
+
+/// Delphi chart position-protection snapshot for one market.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct MarketPositionProtection {
+    pub both: PositionProtectionSide,
+    pub long: PositionProtectionSide,
+    pub short: PositionProtectionSide,
 }
 
 /// One chart point in Delphi `TOrderLine.Points`.

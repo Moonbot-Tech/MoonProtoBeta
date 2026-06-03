@@ -29,19 +29,25 @@ if let Some(market) = markets.get("BTCUSDT") {
     let pos = market.balance_position();
     let price = market.price();
     let tail = market.trade_state();
+    let deltas = market.delta_state();
+    let protection = state.position_protection_for(&market);
     market.with(|market| {
         println!("tick={} max_lev={}", market.tick_size(), market.max_leverage);
     });
     println!(
-        "liq={} bid={} ask={} mark={} last_trade={} funding_ms={:?}",
+        "liq={} bid={} ask={} mark={} last_trade={} coin1h={} protected={}",
         pos.liq_price,
         price.bid,
         price.ask,
         price.mark_price,
         tail.last_trade_price,
-        price.funding_time().unix_millis()
+        deltas.coin_1h_delta,
+        !protection.both.has_warning
     );
 }
+
+let global_deltas = markets.global_deltas();
+println!("btc1h={} exchange1h={}", global_deltas.btc_1h_delta, global_deltas.exchange_1h_delta);
 
 let tags = markets.tags("BTCUSDT");
 if tags.contains(TokenTags::ALPHA) {
@@ -57,9 +63,21 @@ totals view, not the primary per-market UI object.
 
 For chart overlays that only need position fields, `MarketHandle::balance_position`
 returns a small copy without cloning the whole market object.
+For the Delphi "unprotected position" warning, use
+`snapshot.position_protection_for(&market)`: the library counts active
+non-emulator `SellSet` close orders by side, and the UI only decides how to
+draw/blink that warning.
 For price/funding/mark-price and live trade-tail overlays, use
 `MarketHandle::price()` and `MarketHandle::trade_state()` on the same retained
 handle instead of resolving the market name again.
+For signed MoonBot signal deltas, use `MarketHandle::delta_state()` for the
+selected market and `MarketsState::global_deltas()` for BTC/exchange signals.
+These are separate from retained-history range/max-move analytics. If the UI
+wants Delphi's "Exclude blacklisted markets from the market delta calculation"
+checkbox, call
+`client.settings().set_exclude_blacklisted_markets_from_exchange_delta(true)`;
+the runtime then applies `coins_black_list_text` to retained markets before
+computing `Exchange1hDelta` / `Exchange24hDelta`.
 
 Arbitrage relay packets also apply to the live market. Use
 `MarketHandle::arb_slot(ArbPlatformCode::...)` or
@@ -107,8 +125,10 @@ pub enum MarketsEvent {
 `MarketsState` is a read API over the live market catalog. Its internal COW
 maps/lists and server-index helpers are not the terminal surface. Normal UI code
 uses `iter()`, `get() -> MarketHandle`, `market_snapshot(name)`, `price(name)`,
-`tags(name)`, `trade_state(name)`, and the count helpers. Selected-market UI
-should keep the `MarketHandle` returned by `get()` and read through that handle.
+`tags(name)`, `trade_state(name)`, `delta_state(name)`, `global_deltas()`,
+`exclude_blacklisted_markets_from_exchange_delta()`, and the count helpers.
+Selected-market UI should keep the `MarketHandle` returned by `get()` and read
+through that handle.
 
 ```rust
 pub struct MarketPrice {
@@ -150,6 +170,30 @@ pub struct MarketTradeState {
     pub last_trade_price_ema15: f64,
     pub last_trade_price_ema5: f64,
     pub last_trade_was_sell: bool,
+}
+```
+
+```rust
+pub struct MarketDeltaState {
+    pub last_price_ema: f64,
+    pub coin_1h_avg: f64,
+    pub coin_24h_avg: f64,
+    pub coin_1h_delta: f64,
+    pub coin_1h_delta_ema: f64,
+    pub coin_24h_delta: f64,
+    pub coin_24h_delta_ema: f64,
+}
+
+pub struct MarketGlobalDeltas {
+    pub btc_1h_avg: f64,
+    pub btc_24h_avg: f64,
+    pub btc_72h_avg: f64,
+    pub btc_1h_delta: f64,
+    pub btc_24h_delta: f64,
+    pub btc_72h_delta: f64,
+    pub exchange_1h_delta: f64,
+    pub exchange_24h_delta: f64,
+    pub exchange_market_count: usize,
 }
 ```
 
@@ -234,6 +278,8 @@ markets.price("BTCUSDT");
 markets.ref_btc_corr_market("DOGEUSDT");
 markets.base_currency_price("BTC");
 markets.trade_state("BTCUSDT");
+markets.delta_state("BTCUSDT");
+markets.global_deltas();
 markets.tags("BTCUSDT");
 markets.market_count();
 markets.corr_count();

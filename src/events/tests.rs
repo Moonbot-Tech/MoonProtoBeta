@@ -437,6 +437,8 @@ fn event_market(name: &str) -> Market {
         last_balance_epoch: 0,
         trade_tail: Default::default(),
         price: Default::default(),
+        delta_state: Default::default(),
+        market_blacklisted_cfg: false,
         arb_slots: std::collections::HashMap::new(),
     }
 }
@@ -2125,7 +2127,7 @@ fn candles_snapshot_ready_after_worker_barrier_exposes_reader_rows() {
     }];
 
     let summary = d
-        .apply_candles_snapshot(&markets)
+        .apply_candles_snapshot(&markets, 0)
         .expect("snapshot is queued to retained history");
     let barrier = d
         .market_history_barrier_async()

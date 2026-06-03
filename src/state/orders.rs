@@ -44,8 +44,11 @@ pub use self::model::Order;
 pub use self::types::ApplyResult;
 #[cfg(not(any(test, feature = "diagnostics")))]
 pub(crate) use self::types::ApplyResult;
+pub use self::types::{
+    MarketPositionProtection, OrderEvent, OrderTraceChartPoint, OrderTraceLine,
+    PositionProtectionSide, SellReason,
+};
 pub(crate) use self::types::{OrderCancelSend, PanicSellSend};
-pub use self::types::{OrderEvent, OrderTraceChartPoint, OrderTraceLine, SellReason};
 
 const BULK_REPLACE_TIMEOUT_MS: i64 = 5000;
 const SELL_DONE_REMOVAL_GRACE_MS: i64 = 400;

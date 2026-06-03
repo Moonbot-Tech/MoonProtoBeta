@@ -93,6 +93,8 @@ fn test_market(name: &str) -> Market {
         last_balance_epoch: 0,
         trade_tail: Default::default(),
         price: Default::default(),
+        delta_state: Default::default(),
+        market_blacklisted_cfg: false,
         arb_slots: std::collections::HashMap::new(),
     }
 }

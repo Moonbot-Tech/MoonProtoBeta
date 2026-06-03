@@ -23,8 +23,11 @@ state.
   refresh.
 - Per-market chart-visible fields: position size/entry/liquidation/leverage,
   balance fields, arb slots, last trade tail, LastPrice line, MarkPrice line,
-  retained trades, retained 5m candles, and derived volume/delta snapshots when
-  trades storage is enabled.
+  retained trades, retained 5m candles, unprotected-position warning inputs,
+  signed BTC/exchange signal deltas, and derived volume/delta snapshots when
+  trades storage is enabled. The local
+  `settings().set_exclude_blacklisted_markets_from_exchange_delta(...)` policy
+  mirrors Delphi `ExcludeBlackListDelta` for the exchange-delta aggregate.
 - Transferable wallet assets for Spot, Futures, and Quarterly wallets. These
   are separate from per-market balances and are refreshed by an explicit async
   Active Lib command.

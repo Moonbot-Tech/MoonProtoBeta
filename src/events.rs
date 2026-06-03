@@ -740,7 +740,7 @@ impl EventDispatcher {
             Command::Balance => self.client_new_data_balance(payload, history_now_time_days, out),
             Command::Strat => self.client_new_data_strat(payload, out),
             Command::UI => self.client_new_data_ui(payload, out),
-            Command::API => self.client_new_data_api(payload, history_now_time_days, out),
+            Command::API => self.client_new_data_api(payload, now_ms, history_now_time_days, out),
             Command::LogMsg => self.client_new_data_log_msg(payload, out),
             #[cfg(any(test, feature = "diagnostics"))]
             _ => out.push(Event::Raw {

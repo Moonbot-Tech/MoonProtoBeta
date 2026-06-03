@@ -5,8 +5,8 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use crate::commands::market::{
-    ArbPlatformCode, Market, MarketArbNowEntry, MarketArbSlot, MarketPrice, MarketTradeState,
-    PositionType,
+    ArbPlatformCode, Market, MarketArbNowEntry, MarketArbSlot, MarketDeltaState, MarketPrice,
+    MarketTradeState, PositionType,
 };
 use crate::commands::trade::OrderType;
 
@@ -69,6 +69,16 @@ impl MarketHandle {
     /// Copy the Delphi `TMarket` live trade-tail state.
     pub fn trade_state(&self) -> MarketTradeState {
         self.with(|market| market.trade_tail)
+    }
+
+    /// Copy the Delphi `TMarket` signed delta state.
+    ///
+    /// This is the UI-facing counterpart of `Coin1hDelta`, `Coin1hDeltaEMA`,
+    /// `Coin24hDelta`, and their retained moving averages. It is intentionally
+    /// separate from `MarketDerivedSnapshot::deltas`, which stores positive
+    /// min/max movement over retained history windows.
+    pub fn delta_state(&self) -> MarketDeltaState {
+        self.with(|market| market.delta_state)
     }
 
     /// Copy one arbitrage slot by platform code.
@@ -209,6 +219,24 @@ pub(crate) struct MarketLastPriceHistoryInput {
     pub mark_price_found: bool,
     pub is_btc_market: bool,
     pub is_base_usdt_market: bool,
+}
+
+/// Global signed market deltas retained by Active Lib.
+///
+/// These are the terminal-visible `BTC1hDelta` / `Exchange1hDelta` family from
+/// MoonBot. They are signed trend/deviation signals, not the positive min/max
+/// `Last*Delta` movement values exposed in `MarketDerivedSnapshot`.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct MarketGlobalDeltas {
+    pub btc_1h_avg: f64,
+    pub btc_24h_avg: f64,
+    pub btc_72h_avg: f64,
+    pub btc_1h_delta: f64,
+    pub btc_24h_delta: f64,
+    pub btc_72h_delta: f64,
+    pub exchange_1h_delta: f64,
+    pub exchange_24h_delta: f64,
+    pub exchange_market_count: usize,
 }
 
 /// Delphi `TBaseCurrencyPrice` analogue, keyed by `base_currency`.

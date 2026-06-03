@@ -101,7 +101,11 @@ for event in client.drain_events() {
 - Publishes typed events and immutable snapshots for UI read models.
 - Keeps chart-visible market state on the selected market/history model:
   balance/position/liquidation fields live on `Market`, arb prices live in
-  `MarketHandle::arb_slot`, and retained trades/5m candles are available through
+  `MarketHandle::arb_slot`, unprotected-position state is read through
+  `snapshot.position_protection_for(&market_handle)`, signed BTC/exchange
+  signal deltas live in `snapshot.markets().global_deltas()` with the optional
+  local blacklist-exclusion policy from `client.settings()`, and retained
+  trades/5m candles are available through
   `snapshot.market_history_readers_for(&market_handle)` when trades storage is
   enabled.
 - Maintains per-client `ServerTimeDelta` for order timestamps.

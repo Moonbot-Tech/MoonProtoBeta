@@ -21,6 +21,7 @@ pub(super) enum RuntimeCommand {
     OrderSnapshotRefresh,
     TransferAssetsRefresh,
     TransferAssetsRefreshKind(crate::state::ExchangeKind),
+    SetExcludeBlacklistedMarketsFromExchangeDelta(bool),
     EngineAction {
         kind: crate::events::EngineActionKind,
         ticket: super::EngineActionTicket,

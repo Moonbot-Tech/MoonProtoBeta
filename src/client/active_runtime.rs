@@ -690,6 +690,18 @@ impl MoonClient {
         self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::SendSettings(settings)))
     }
 
+    /// Set local Active Lib market-delta policy.
+    ///
+    /// This mirrors Delphi `cfg.ExcludeBlackListDelta`. It is deliberately not a
+    /// `TClientSettingsCommand` wire field: Delphi keeps it as local terminal
+    /// configuration, and the runtime applies it to retained `Market` state.
+    pub(crate) fn set_exclude_blacklisted_markets_from_exchange_delta(
+        &self,
+        exclude: bool,
+    ) -> Result<(), MoonClientError> {
+        self.send_no_reply(RuntimeCommand::SetExcludeBlacklistedMarketsFromExchangeDelta(exclude))
+    }
+
     /// Request a MoonBot version update.
     pub(crate) fn request_version_update(
         &self,

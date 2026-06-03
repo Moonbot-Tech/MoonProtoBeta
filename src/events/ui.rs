@@ -17,8 +17,17 @@ impl EventDispatcher {
                 self.force_markets_list_refresh = true;
             }
             Some(cmd_v) => {
+                let coin_blacklist_text = match &cmd_v {
+                    UICommand::ClientSettings(settings) => {
+                        Some(settings.coins_black_list_text.clone())
+                    }
+                    _ => None,
+                };
                 if let Some(ev) = self.settings.apply(cmd_v) {
                     out.push(Event::Settings(ev));
+                }
+                if let Some(text) = coin_blacklist_text {
+                    self.markets.set_coin_blacklist_text(&text);
                 }
             }
             None => Self::push_parse_failed(out, Command::UI, payload),

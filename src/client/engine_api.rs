@@ -151,7 +151,10 @@ impl Client {
         let (uid, rx) = self.api_request_candles_data_async_registered();
         match self.wait_for_receiver_in_owned_runtime(dispatcher, &rx, timeout) {
             Ok(merged) => {
-                if dispatcher.apply_candles_snapshot(&merged.markets).is_some() {
+                if dispatcher
+                    .apply_candles_snapshot(&merged.markets, self.now_ms())
+                    .is_some()
+                {
                     if let Some(rx) = dispatcher.market_history_barrier_async() {
                         let _ = rx.recv();
                     }

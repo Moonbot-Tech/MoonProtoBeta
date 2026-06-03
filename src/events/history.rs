@@ -53,6 +53,7 @@ impl EventDispatcher {
     pub(crate) fn apply_candles_snapshot(
         &mut self,
         markets: &[crate::commands::candles::RequestCandlesMarket],
+        now_ms: i64,
     ) -> Option<crate::state::CandlesSnapshotApplySummary> {
         self.sync_market_history_storage();
         let Some(handle) = &self.market_history else {
@@ -60,9 +61,20 @@ impl EventDispatcher {
         };
         let received_markets = markets.len();
         let received_candles = markets.iter().map(|market| market.candles_5m.len()).sum();
-        let rows = markets
+        let now_time = crate::MoonTime::now();
+        let retained_source = markets
             .iter()
             .filter(|market| self.active_trade_storage_allows_market(&market.market_name))
+            .collect::<Vec<_>>();
+        self.markets.apply_candles_delta_baselines(
+            retained_source
+                .iter()
+                .map(|market| (market.market_name.as_str(), market.candles_5m.as_slice())),
+            now_time,
+            now_ms,
+        );
+        let rows = retained_source
+            .iter()
             .map(|market| MarketHistoryCandlesSnapshot {
                 market_name: market.market_name.clone(),
                 candles_5m: market

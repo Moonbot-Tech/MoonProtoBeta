@@ -142,6 +142,9 @@ pub(super) fn handle_command(
             schedule_transfer_assets_refresh_kind(client, &mut pending.transfer_assets, kind, None);
             false
         }
+        RuntimeCommand::SetExcludeBlacklistedMarketsFromExchangeDelta(exclude) => dispatcher
+            .markets
+            .set_exclude_blacklisted_markets_from_exchange_delta(exclude),
         RuntimeCommand::EngineAction {
             kind,
             ticket,

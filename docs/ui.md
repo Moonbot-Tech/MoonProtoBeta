@@ -296,6 +296,7 @@ Common settings controls:
 | Buy/sell iceberg flags | two checkboxes | `buy_iceberg`, `sell_iceberg` |
 | Signed order ids | checkbox | `sign_orders` |
 | Global coin blacklist | multiline/token text editor + enable checkbox | `coins_black_list_text`, `use_coins_black_list` |
+| Exclude blacklist from market delta | checkbox | `client.settings().set_exclude_blacklisted_markets_from_exchange_delta(...)` |
 | Temporary coin blacklist | editable table | `temp_blacklist_entries()`, `set_temp_blacklist_entries(...)` |
 | Manual strategy override | checkbox + strategy selector | `use_manual_strategy`, `manual_strategy_id` |
 | Position/stop-market options | checkboxes + small numeric input | `free_position_check`, `use_stop_market`, `vol_drop_level` |
@@ -306,6 +307,12 @@ Common settings controls:
 `fixed_sell_price` is not the best source for drawing the selected fixed-sell
 button: MoonBot derives the active fixed price from `s_price[sb_num]` after
 applying settings. Use the fixed-sell helpers for UI display.
+
+`set_exclude_blacklisted_markets_from_exchange_delta` is local Active Lib
+policy, not a `TClientSettingsCommand` wire field. It mirrors Delphi
+`cfg.ExcludeBlackListDelta`: when enabled, markets whose currency appears in
+`coins_black_list_text` are skipped from `MarketsState::global_deltas()`
+exchange-delta aggregation.
 
 AutoStart is stored on the wire as two fixed Delphi blobs, but Active Lib keeps
 that detail inside the retained settings snapshot. Normal UI code edits typed

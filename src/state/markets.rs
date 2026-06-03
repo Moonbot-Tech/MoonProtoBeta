@@ -34,10 +34,12 @@ pub(crate) use self::types::MarketLastPriceHistoryInput;
 pub use self::types::MarketsListApplyTiming;
 #[cfg(not(feature = "diagnostics"))]
 pub(crate) use self::types::MarketsListApplyTiming;
-pub use self::types::{BaseCurrencyPrice, MarketBalancePosition, MarketHandle, MarketsEvent};
+pub use self::types::{
+    BaseCurrencyPrice, MarketBalancePosition, MarketGlobalDeltas, MarketHandle, MarketsEvent,
+};
 // The live trade tail and price now live on the `Market` object itself (Delphi
 // `TMarket` shape); re-export them here so the public `state::markets` path is stable.
-pub use crate::commands::market::{MarketPrice, MarketTradeState};
+pub use crate::commands::market::{MarketDeltaState, MarketPrice, MarketTradeState};
 
 #[derive(Debug, Clone, Default)]
 pub struct MarketsState {
@@ -117,6 +119,10 @@ pub struct MarketsState {
     server_base_currency_code: Option<BaseCurrency>,
     last_markets_list_timing: Option<MarketsListApplyTiming>,
     eps_profile: EpsProfile,
+    global_deltas: MarketGlobalDeltas,
+    last_update_delta500_ms: i64,
+    coin_blacklist: Arc<Vec<String>>,
+    exclude_blacklisted_markets_from_exchange_delta: bool,
 }
 
 impl MarketsState {

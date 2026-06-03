@@ -504,6 +504,20 @@ impl MoonSettings<'_> {
         self.client.send_settings(settings)
     }
 
+    /// Exclude globally blacklisted coins from `markets().global_deltas()`.
+    ///
+    /// Delphi exposes this as the local checkbox
+    /// "Exclude blacklisted markets from the market delta calculation". It does
+    /// not travel inside `TClientSettingsCommand`; Active Lib applies it locally
+    /// to the retained market analytics state.
+    pub fn set_exclude_blacklisted_markets_from_exchange_delta(
+        &self,
+        exclude: bool,
+    ) -> Result<(), MoonClientError> {
+        self.client
+            .set_exclude_blacklisted_markets_from_exchange_delta(exclude)
+    }
+
     /// Request the normal release update flow.
     pub fn request_release_update(&self) -> Result<(), MoonClientError> {
         self.client.request_version_update("", true)

@@ -107,6 +107,8 @@ impl MarketsState {
             self.indexes_synchronized = true;
         }
         self.markets_list_refresh_needed = false;
+        self.rebuild_market_blacklisted_cfg();
+        self.refresh_exchange_signed_deltas();
 
         MarketsEvent::MarketsListReplaced {
             count: self.markets.len(),
@@ -213,6 +215,8 @@ impl MarketsState {
         self.check_currency_ref_markets();
         let ref_passes_ns = elapsed_ns_u64(ref_passes_start);
         self.markets_list_refresh_needed = false;
+        self.rebuild_market_blacklisted_cfg();
+        self.refresh_exchange_signed_deltas();
         #[cfg(not(any(test, feature = "diagnostics")))]
         let _ = (
             total_start,

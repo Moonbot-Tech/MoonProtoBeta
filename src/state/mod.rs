@@ -53,8 +53,8 @@ pub(crate) use history_worker::{
 #[doc(hidden)]
 pub use markets::MarketsListApplyTiming;
 pub use markets::{
-    BaseCurrencyPrice, MarketBalancePosition, MarketHandle, MarketPrice, MarketTradeState,
-    MarketsEvent, MarketsState,
+    BaseCurrencyPrice, MarketBalancePosition, MarketDeltaState, MarketGlobalDeltas, MarketHandle,
+    MarketPrice, MarketTradeState, MarketsEvent, MarketsState,
 };
 pub(crate) use order_books::OrderBookControl;
 pub use order_books::{
@@ -65,7 +65,10 @@ pub use order_books::{
 pub use orders::ApplyResult;
 #[cfg(not(any(test, feature = "diagnostics")))]
 pub(crate) use orders::ApplyResult;
-pub use orders::{Order, OrderEvent, OrderTraceChartPoint, OrderTraceLine, Orders, SellReason};
+pub use orders::{
+    MarketPositionProtection, Order, OrderEvent, OrderTraceChartPoint, OrderTraceLine, Orders,
+    PositionProtectionSide, SellReason,
+};
 #[cfg(test)]
 pub(crate) use seq_ring::SeqRingWriter;
 pub use seq_ring::{

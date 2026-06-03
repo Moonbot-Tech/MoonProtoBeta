@@ -52,6 +52,7 @@ let markets = state.markets();
 
 if let Some(eth) = markets.get("ETHUSDT") {
     let pos = eth.balance_position();
+    let protection = state.position_protection_for(&eth);
     let side = if pos.pos_dir == OrderType::Buy { "long" } else { "short" };
     if pos.position_type == PositionType::Isolated {
         println!("isolated liquidation line at {}", pos.liq_price);
@@ -63,6 +64,9 @@ if let Some(eth) = markets.get("ETHUSDT") {
         pos.liq_price,
         pos.leverage_x
     );
+    if protection.both.has_warning {
+        println!("position is not fully covered by active close orders");
+    }
     println!("direction={side}");
 }
 
@@ -80,6 +84,8 @@ are stable across listing refreshes, so a chart can keep the handle for the
 selected market and read fresh fields from it. Use `MarketHandle::with` for
 zero-copy reads of many market fields, or `MarketHandle::balance_position` when
 the UI only needs the live balance/position subset.
+Use `snapshot.position_protection_for(&market)` for the chart warning that
+compares the retained position with active non-emulator close orders.
 
 ## Getting A Fresh Snapshot
 

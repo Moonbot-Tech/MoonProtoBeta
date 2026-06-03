@@ -696,6 +696,10 @@ pub struct Market {
     pub trade_tail: MarketTradeState,
     // --- Active Lib live price state (Delphi TMarket bid/ask/last/mark fields) ---
     pub price: MarketPrice,
+    // --- Active Lib signed delta state (Delphi Coin1hDelta/Coin24hDelta fields) ---
+    pub delta_state: MarketDeltaState,
+    // --- Active Lib UI/config blacklist state (Delphi TMarket.MarketBlackListedCfg) ---
+    pub(crate) market_blacklisted_cfg: bool,
     // --- Active Lib live arbitrage state (Delphi TMarket.ArbSlots/ArbNow) ---
     #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
@@ -814,6 +818,51 @@ impl MarketPrice {
     #[doc(hidden)]
     pub fn funding_time_delphi(self) -> DelphiTime {
         DelphiTime::from_days(self.funding_time)
+    }
+}
+
+/// Delphi `TMarket` signed delta state used by strategies and terminal panels.
+///
+/// These fields are different from the positive min/max `Last*Delta` values:
+/// `coin_1h_delta` is a signed deviation of the current price from the retained
+/// one-hour average, and `coin_1h_delta_ema` uses the short `LastPriceEMA`.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct MarketDeltaState {
+    pub last_price_ema: f64,
+    pub coin_1h_avg: f64,
+    pub coin_24h_avg: f64,
+    pub coin_1h_delta: f64,
+    pub coin_1h_delta_ema: f64,
+    pub coin_24h_delta: f64,
+    pub coin_24h_delta_ema: f64,
+    pub last_update_avg_ms: i64,
+}
+
+impl MarketDeltaState {
+    // parity: MoonBot MarketsU.pas:TMarket.AddFrom (Coin1hDelta/Coin24hDelta block)
+    pub(crate) fn apply_price_mean(&mut self, p_mean: f64, now_ms: i64, eps: f64, eps_m: f64) {
+        if p_mean <= eps_m {
+            return;
+        }
+        if self.coin_1h_avg > eps && (self.last_update_avg_ms - now_ms).abs() > 30_000 {
+            self.last_update_avg_ms = now_ms;
+            self.coin_1h_avg = p_mean * 0.01 + self.coin_1h_avg * 0.99;
+        }
+        if self.last_price_ema < eps_m {
+            self.last_price_ema = p_mean;
+        } else {
+            self.last_price_ema = (self.last_price_ema * 4.0 + p_mean) * 0.2;
+        }
+        if self.coin_1h_avg > eps {
+            self.coin_1h_delta = (p_mean - self.coin_1h_avg) / self.coin_1h_avg * 100.0;
+            self.coin_1h_delta_ema =
+                (self.last_price_ema - self.coin_1h_avg) / self.coin_1h_avg * 100.0;
+        }
+        if self.coin_24h_avg > eps {
+            self.coin_24h_delta = (p_mean - self.coin_24h_avg) / self.coin_24h_avg * 100.0;
+            self.coin_24h_delta_ema =
+                (self.last_price_ema - self.coin_24h_avg) / self.coin_24h_avg * 100.0;
+        }
     }
 }
 
@@ -1191,6 +1240,8 @@ pub(crate) fn read_market_with_local_shift(
         // market's funding fields when the market enters the universe (Delphi
         // `market_price_from_market` analogue), and `UpdateMarketsList` fills the rest.
         price: MarketPrice::default(),
+        delta_state: MarketDeltaState::default(),
+        market_blacklisted_cfg: false,
         arb_slots: HashMap::new(),
     })
 }

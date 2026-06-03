@@ -227,6 +227,10 @@ if let Some(derived) = snapshot.market_history_derived_snapshot_now_for(&market)
     draw_volume(derived.trade_volumes.five_minutes);
     draw_delta(derived.deltas.one_hour);
 }
+
+let signed = market.delta_state();
+let global = snapshot.markets().global_deltas();
+draw_btc_market_signals(signed.coin_1h_delta, global.btc_1h_delta, global.exchange_1h_delta);
 ```
 
 For normal chart panels, read this snapshot once per UI tick for the selected
@@ -234,6 +238,12 @@ market and render volume/delta labels from it. Re-scanning retained trade or
 candle rings separately for every 1m/3m/5m/1h label is unnecessary. Manual
 retained-history scans are for custom analytics that intentionally differ from
 the Active Lib read model.
+
+`MarketDerivedSnapshot::deltas` is range/max-move chart analytics. MoonBot's
+signed `Coin1hDelta`, `BTC1hDelta`, and `Exchange1hDelta` live in
+`MarketHandle::delta_state()` and `MarketsState::global_deltas()`. Use the
+signed state for BTC/exchange blink, panic, and restart guards; do not substitute
+`derived.deltas.one_hour`.
 
 ```rust
 pub struct RollingTradeVolumeSnapshot {

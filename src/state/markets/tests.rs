@@ -1,9 +1,11 @@
 use super::*;
+use crate::commands::candles::DeepPrice;
 use crate::commands::market::{
     write_market, ArbIsolationFlags, ArbPlatformCode, BaseCurrency, CorrMarketPriceUpdate,
     MarketArbNowEntry, MarketPriceUpdate, MarketsListResponse, MarketsPricesResponse, PositionType,
 };
 use crate::commands::trade::OrderType;
+use crate::MoonTime;
 
 fn mk_market(name: &str, idx: u16) -> Market {
     Market {
@@ -75,6 +77,8 @@ fn mk_market(name: &str, idx: u16) -> Market {
         last_balance_epoch: 0,
         trade_tail: Default::default(),
         price: Default::default(),
+        delta_state: Default::default(),
+        market_blacklisted_cfg: false,
         arb_slots: std::collections::HashMap::new(),
     }
 }
@@ -105,6 +109,24 @@ fn push_price_update(
     out.extend_from_slice(&ask.to_le_bytes());
     out.extend_from_slice(&mark_price.to_le_bytes());
     out.push(mark_price_found as u8);
+}
+
+fn deep_price(mean: f32, time: MoonTime) -> DeepPrice {
+    DeepPrice {
+        open: mean,
+        close: mean,
+        high: mean,
+        low: mean,
+        volume: 1.0,
+        time: time.to_delphi_days(),
+    }
+}
+
+fn assert_near(actual: f64, expected: f64, eps: f64) {
+    assert!(
+        (actual - expected).abs() <= eps,
+        "actual={actual}, expected={expected}, eps={eps}"
+    );
 }
 
 #[test]
@@ -539,6 +561,143 @@ fn apply_prices_updates_by_index() {
     assert_eq!(st.price("BTC").unwrap().bid, 50000.0);
     assert_eq!(st.price("BTC").unwrap().ask, 50001.0);
     assert_eq!(st.price("ETH").unwrap().mark_price, 3000.25);
+}
+
+#[test]
+// parity: MoonBot MarketsU.pas:CheckHourlyValues/AddFrom/SetDelta500 + Bworks.pas:Exchange1hDelta
+fn candle_baselines_and_price_updates_publish_signed_delphi_deltas() {
+    let mut st = MarketsState::new();
+    let mut btc = mk_pair_market("BTCUSDT", "BTC", "USDT", 0);
+    btc.is_btc_market = true;
+    let mut eth = mk_pair_market("ETHUSDT", "ETH", "USDT", 1);
+    eth.is_btc_market = true;
+    st.apply_markets_list(MarketsListResponse {
+        markets: vec![btc, eth],
+        corr_markets: vec![],
+    });
+    st.apply_markets_indexes(vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
+
+    let now = MoonTime::from_unix_millis(3 * crate::time::MILLIS_PER_HOUR);
+    let candles = vec![
+        deep_price(
+            100.0,
+            MoonTime::from_unix_millis(now.unix_millis() - 10 * crate::time::MILLIS_PER_MINUTE),
+        ),
+        deep_price(
+            100.0,
+            MoonTime::from_unix_millis(now.unix_millis() - 5 * crate::time::MILLIS_PER_MINUTE),
+        ),
+        deep_price(100.0, now),
+    ];
+    let eth_candles = vec![
+        deep_price(
+            50.0,
+            MoonTime::from_unix_millis(now.unix_millis() - 10 * crate::time::MILLIS_PER_MINUTE),
+        ),
+        deep_price(
+            50.0,
+            MoonTime::from_unix_millis(now.unix_millis() - 5 * crate::time::MILLIS_PER_MINUTE),
+        ),
+        deep_price(50.0, now),
+    ];
+    st.apply_candles_delta_baselines(
+        [
+            ("BTCUSDT", candles.as_slice()),
+            ("ETHUSDT", eth_candles.as_slice()),
+        ],
+        now,
+        30_000,
+    );
+
+    let expected_btc_delta = (110.0 - 100.0) / 100.0 * 100.0;
+    let expected_eth_delta = (70.0 - 50.0) / 50.0 * 100.0;
+    st.apply_markets_prices_at(
+        MarketsPricesResponse {
+            send_funding: false,
+            prices: vec![
+                MarketPriceUpdate {
+                    m_index: 0,
+                    bid: 109.0,
+                    ask: 111.0,
+                    funding_rate: 0.0,
+                    funding_time: 0.0,
+                    mark_price: 110.0,
+                    mark_price_found: true,
+                },
+                MarketPriceUpdate {
+                    m_index: 1,
+                    bid: 69.0,
+                    ask: 71.0,
+                    funding_rate: 0.0,
+                    funding_time: 0.0,
+                    mark_price: 70.0,
+                    mark_price_found: true,
+                },
+            ],
+            send_corr_markets: false,
+            corr_prices: vec![],
+        },
+        31_000,
+    );
+
+    let delta = st.delta_state("BTCUSDT").unwrap();
+    assert_near(delta.coin_1h_avg, 100.0, 0.000001);
+    assert_near(delta.coin_1h_delta, expected_btc_delta, 0.000001);
+    assert_near(delta.coin_1h_delta_ema, expected_btc_delta, 0.000001);
+    assert_near(
+        st.delta_state("ETHUSDT").unwrap().coin_1h_delta,
+        expected_eth_delta,
+        0.000001,
+    );
+
+    let global = st.global_deltas();
+    assert_near(global.btc_1h_avg, 100.0, 0.000001);
+    assert_near(global.btc_1h_delta, expected_btc_delta, 0.000001);
+    assert_near(
+        global.exchange_1h_delta,
+        expected_btc_delta + expected_eth_delta,
+        0.000001,
+    );
+    assert_eq!(global.exchange_market_count, 2);
+}
+
+#[test]
+// parity: MoonBot MarketsU.pas:TMarket.IsBlackListed + Bworks.pas:Exchange1hDelta
+fn exchange_signed_delta_can_exclude_cfg_blacklisted_markets() {
+    let mut st = MarketsState::new();
+    let mut btc = mk_pair_market("BTCUSDT", "BTC", "USDT", 0);
+    btc.is_btc_market = true;
+    btc.delta_state.coin_1h_delta = 10.0;
+    btc.delta_state.coin_24h_delta_ema = 100.0;
+    let mut eth = mk_pair_market("ETHUSDT", "ETH", "USDT", 1);
+    eth.is_btc_market = true;
+    eth.delta_state.coin_1h_delta = 20.0;
+    eth.delta_state.coin_24h_delta_ema = 200.0;
+    let mut sol = mk_pair_market("SOLUSDT", "SOL", "USDT", 2);
+    sol.is_btc_market = true;
+    sol.delta_state.coin_1h_delta = 30.0;
+    sol.delta_state.coin_24h_delta_ema = 300.0;
+
+    st.apply_markets_list(MarketsListResponse {
+        markets: vec![btc, eth, sol],
+        corr_markets: vec![],
+    });
+
+    let global = st.global_deltas();
+    assert_near(global.exchange_1h_delta, 60.0, 0.000001);
+    assert_near(global.exchange_24h_delta, 600.0, 0.000001);
+    assert_eq!(global.exchange_market_count, 3);
+
+    assert!(st.set_coin_blacklist_text(" ETH "));
+    let global = st.global_deltas();
+    assert_near(global.exchange_1h_delta, 60.0, 0.000001);
+
+    assert!(st.set_exclude_blacklisted_markets_from_exchange_delta(true));
+    let global = st.global_deltas();
+    assert_near(global.exchange_1h_delta, 40.0, 0.000001);
+    assert_near(global.exchange_24h_delta, 400.0, 0.000001);
+    assert_eq!(global.exchange_market_count, 2);
+    assert!(st.exclude_blacklisted_markets_from_exchange_delta());
 }
 
 #[test]

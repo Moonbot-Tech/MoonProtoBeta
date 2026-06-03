@@ -73,6 +73,25 @@ impl MoonStateSnapshot {
         self.top_of_book(market.name(), kind)
     }
 
+    /// Delphi chart "unprotected position" state for a stable market handle.
+    ///
+    /// This folds `MarketHandle::balance_position()` and
+    /// `Orders::TotalSellQuantity` into one user-facing read. A chart can draw
+    /// the liquidation/position row and warning blink from the returned values
+    /// without scanning retained orders itself.
+    pub fn position_protection_for(
+        &self,
+        market: &MarketHandle,
+    ) -> crate::state::MarketPositionProtection {
+        let pos = market.balance_position();
+        self.orders.position_protection(
+            market.name(),
+            pos.pos_size,
+            pos.long_pos_size,
+            pos.short_pos_size,
+        )
+    }
+
     /// Read-only account-level state.
     pub fn account(&self) -> &AccountState {
         &self.account

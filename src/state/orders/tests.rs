@@ -140,6 +140,56 @@ fn from_cache_status_does_not_create_unknown_order() {
 }
 
 #[test]
+// parity: MoonBot TaskWorkers.pas:TOrdersWorkers.TotalSellQuantity + ChartFrameUnit.pas:HasUnprotectedPos
+fn position_protection_counts_active_non_emulator_sell_workers_by_side() {
+    let mut orders = Orders::new();
+
+    let mut long_sell = make_status(42, "BTCUSDT", OrderWorkerStatus::SellSet, 1);
+    long_sell.sell_order.quantity_remaining = 1.5;
+    orders.apply(order_status_cmd(long_sell));
+
+    let mut short_sell = make_status(43, "BTCUSDT", OrderWorkerStatus::SellSet, 1);
+    short_sell.is_short = true;
+    short_sell.sell_order.quantity_remaining = 2.0;
+    orders.apply(order_status_cmd(short_sell));
+
+    let mut emulator_sell = make_status(44, "BTCUSDT", OrderWorkerStatus::SellSet, 1);
+    emulator_sell.emulator_mode = true;
+    emulator_sell.sell_order.quantity_remaining = 99.0;
+    orders.apply(order_status_cmd(emulator_sell));
+
+    let mut other_market_sell = make_status(45, "ETHUSDT", OrderWorkerStatus::SellSet, 1);
+    other_market_sell.sell_order.quantity_remaining = 99.0;
+    orders.apply(order_status_cmd(other_market_sell));
+
+    let mut buy_set = make_status(46, "BTCUSDT", OrderWorkerStatus::BuySet, 1);
+    buy_set.sell_order.quantity_remaining = 99.0;
+    orders.apply(order_status_cmd(buy_set));
+
+    assert_eq!(
+        orders.total_sell_quantity("BTCUSDT", FixedPosition::Both),
+        3.5
+    );
+    assert_eq!(
+        orders.total_sell_quantity("BTCUSDT", FixedPosition::Long),
+        1.5
+    );
+    assert_eq!(
+        orders.total_sell_quantity("BTCUSDT", FixedPosition::Short),
+        2.0
+    );
+
+    let protection = orders.position_protection("BTCUSDT", 4.0, 1.5, 2.5);
+    assert!(protection.both.has_warning);
+    assert_eq!(protection.both.closing_sell_quantity, 3.5);
+    assert_eq!(protection.both.missing_quantity, 0.5);
+    assert!(!protection.long.has_warning);
+    assert_eq!(protection.long.missing_quantity, 0.0);
+    assert!(protection.short.has_warning);
+    assert_eq!(protection.short.missing_quantity, 0.5);
+}
+
+#[test]
 // parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
 fn existing_full_status_keeps_worker_identity_fields() {
     let mut orders = Orders::new();

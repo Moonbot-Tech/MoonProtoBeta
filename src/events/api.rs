@@ -1,4 +1,4 @@
-﻿//! Active `MPC_API` response dispatch.
+//! Active `MPC_API` response dispatch.
 //!
 //! Mirrors Delphi `ProcessApiCommand`: unmatched/fire-and-forget responses apply
 //! active side effects first. Diagnostics builds may also emit the original
@@ -20,11 +20,12 @@ impl EventDispatcher {
     pub(super) fn client_new_data_api(
         &mut self,
         payload: &[u8],
+        now_ms: i64,
         history_now_time_days: Option<f64>,
         out: &mut Vec<Event>,
     ) {
         match parse_engine_response(payload) {
-            Some(resp) => self.process_api_command(resp, history_now_time_days, out),
+            Some(resp) => self.process_api_command(resp, now_ms, history_now_time_days, out),
             None => Self::push_parse_failed(out, Command::API, payload),
         }
     }
@@ -33,6 +34,7 @@ impl EventDispatcher {
     fn process_api_command(
         &mut self,
         resp: EngineResponse,
+        now_ms: i64,
         history_now_time_days: Option<f64>,
         out: &mut Vec<Event>,
     ) {
@@ -42,7 +44,12 @@ impl EventDispatcher {
                     self.apply_get_markets_list_response(&resp, out);
                 }
                 EngineMethod::UpdateMarketsList => {
-                    self.apply_update_markets_list_response(&resp, history_now_time_days, out);
+                    self.apply_update_markets_list_response(
+                        &resp,
+                        now_ms,
+                        history_now_time_days,
+                        out,
+                    );
                 }
                 EngineMethod::GetMarketsIndexes => {
                     if let Some(names) = parse_markets_indexes_response(&resp.data) {
@@ -102,6 +109,7 @@ impl EventDispatcher {
     pub(crate) fn apply_update_markets_list_response(
         &mut self,
         resp: &EngineResponse,
+        now_ms: i64,
         history_now_time_days: Option<f64>,
         out: &mut Vec<Event>,
     ) -> bool {
@@ -114,12 +122,14 @@ impl EventDispatcher {
         let mut last_price_rows = Vec::new();
         let ev = if wants_history {
             self.markets
-                .apply_markets_prices_payload_collecting_last_price(
+                .apply_markets_prices_payload_collecting_last_price_at(
                     &resp.data,
                     Some(&mut last_price_rows),
+                    now_ms,
                 )
         } else {
-            self.markets.apply_markets_prices_payload(&resp.data)
+            self.markets
+                .apply_markets_prices_payload_collecting_last_price_at(&resp.data, None, now_ms)
         };
         let Some(ev) = ev else {
             return false;
