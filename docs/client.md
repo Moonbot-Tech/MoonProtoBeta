@@ -446,9 +446,9 @@ client.trade().new_order(NewOrderParams::for_market(
 
 The runtime derives `TradeCtx` from `base_currency_code` and `exchange_code`
 learned during Init/BaseCheck. `new_order` also returns `NewOrderTicket`; keep
-it only when the UI wants to correlate a click with the later server-created
-order. Normal order tables should read the created order from
-`snapshot().orders()`.
+`ticket.client_order_id` only when the UI wants to correlate a click or
+optimistic pending row with the later server-created order. Normal order tables
+should read the created order from `snapshot().orders()`.
 
 ## Engine API Requests
 

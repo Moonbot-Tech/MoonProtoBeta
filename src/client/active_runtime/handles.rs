@@ -195,7 +195,11 @@ impl MoonTrade {
             params,
             request_uid,
         })?;
-        Ok(NewOrderTicket { request_uid })
+        Ok(NewOrderTicket {
+            client_order_id: request_uid,
+            #[cfg(any(test, feature = "diagnostics"))]
+            request_uid,
+        })
     }
 
     /// Send `TJoinOrdersCommand`.
