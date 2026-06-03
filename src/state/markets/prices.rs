@@ -390,6 +390,10 @@ impl MarketsState {
                 exchange_24h += market.delta_state.coin_24h_delta_ema;
             });
         }
+        // Delphi keeps the old "trimmed average" denominator even though the
+        // min/max subtraction is currently commented out in `Bworks.pas`.
+        // Machine-effect parity is therefore: sum included markets, then divide
+        // by `count - 2` only when that denominator is positive.
         let denom = count.saturating_sub(2);
         if denom > 0 {
             exchange_1h /= denom as f64;
