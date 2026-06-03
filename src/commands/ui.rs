@@ -667,9 +667,17 @@ pub struct ClientSettingsCommand {
     #[cfg(not(any(test, feature = "diagnostics")))]
     pub(crate) as_cfg2: Vec<u8>,
     /// HotkeysConfig.SPrice[1..6].
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub s_price: [f32; 6],
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) s_price: [f32; 6],
     /// HotkeysConfig.sbNum.
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub sb_num: u8,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) sb_num: u8,
     /// MultiOrders.JoinSellKind (TJoinSellKind: 0=None, 1=FixPrice, 2=FixProfit).
     #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
@@ -684,7 +692,7 @@ impl ClientSettingsCommand {
     /// Effective take-profit percentage shown by the main sell control.
     ///
     /// Mirrors terminal state after Delphi `ApplySettingsFromServer` calls
-    /// `UpdateFixedButtons`: fixed-sell mode uses the selected `SPrice[sbNum]`
+    /// `UpdateFixedButtons`: fixed-sell mode uses the selected fixed-sell
     /// preset, normal mode uses `x_sell`, and `x_sell == 0` falls back to scalp
     /// mode (`x_sell_scalp / 50`).
     pub fn effective_take_profit_percent(&self) -> f64 {
@@ -723,7 +731,7 @@ impl ClientSettingsCommand {
     /// Select one of the six fixed-sell buttons.
     ///
     /// Mirrors Delphi `UpdateFixedButtons`: the slot is clamped to `1..=6` and
-    /// `fixed_sell_price` is synchronized from `SPrice[sbNum]`.
+    /// `fixed_sell_price` is synchronized from the selected preset.
     pub fn set_selected_fixed_sell_slot(&mut self, slot_1_based: usize) {
         let slot = slot_1_based.clamp(1, 6);
         self.sb_num = slot as u8;
@@ -735,7 +743,7 @@ impl ClientSettingsCommand {
         self.s_price[self.selected_fixed_sell_slot() - 1]
     }
 
-    /// Set a fixed-sell preset button value (`SPrice[slot]`).
+    /// Set a fixed-sell preset button value.
     ///
     /// The value is the same raw preset value Delphi edits in
     /// `BTCBalanceEdit`; display helpers apply `x_tmode` when drawing the

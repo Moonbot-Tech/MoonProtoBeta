@@ -263,7 +263,7 @@ application code does not parse `UICommand` directly; it reads the applied
 `ClientSettingsCommand` is the full settings snapshot. It contains sell settings,
 stop/trailing/take-profit settings, iceberg flags, order-signing flag, coin
 blacklist fields, manual strategy id, stop-market settings, AutoStart settings,
-hotkey sell prices, multi-order join mode, and `ArbConfigCompact`.
+fixed-sell button presets, multi-order join mode, and `ArbConfigCompact`.
 
 Normal UI code clones the retained snapshot, changes the fields behind one UI
 page/control, and sends the whole snapshot back:
@@ -311,9 +311,9 @@ Common settings controls:
 | AutoStart pages | settings sub-panels | `auto_start_config()`, `auto_start_config2()` typed views |
 
 `fixed_sell_price` is not the best source for drawing the selected fixed-sell
-button: MoonBot derives the active fixed price from `s_price[sb_num]` after
-applying settings. Use the fixed-sell helpers for UI display and edits; setter
-helpers keep `fixed_sell_price` synchronized.
+button: MoonBot derives the active fixed price from the selected fixed-sell
+preset after applying settings. Use the fixed-sell helpers for UI display and
+edits; setter helpers keep `fixed_sell_price` synchronized.
 
 `set_exclude_blacklisted_markets_from_exchange_delta` is local Active Lib
 policy, not a `TClientSettingsCommand` wire field. It mirrors Delphi
