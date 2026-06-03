@@ -114,7 +114,7 @@ impl WatcherFillEvent {
 #[derive(Debug, Clone, PartialEq)]
 pub struct WatcherFillsEvent {
     pub(crate) market_index: u16,
-    pub market_name: String,
+    pub market_name: Arc<str>,
     pub user: [u8; 20],
     pub fills: Vec<WatcherFillEvent>,
 }

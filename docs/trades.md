@@ -91,7 +91,9 @@ diagnostic telemetry. Applications do not drive recovery from them;
 `MoonClient` does that automatically.
 
 Watcher fills are emitted as `Event::WatcherFills(WatcherFillsEvent)` because
-they are domain events rather than retained trade-history rows.
+they are domain events rather than retained trade-history rows. The event carries
+a shared market name; use `event.market_name.as_ref()` when matching it with UI
+state.
 
 ## Retained Readers
 

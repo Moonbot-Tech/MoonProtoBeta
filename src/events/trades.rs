@@ -1,4 +1,4 @@
-﻿//! Active `MPC_TradesStream` / `MPC_TradesResendResponse` dispatch.
+//! Active `MPC_TradesStream` / `MPC_TradesResendResponse` dispatch.
 //!
 //! This file keeps the Delphi `ProcessTradesStream` machine-effect block
 //! together: packet-number recovery, known-market gating, retained-history
@@ -281,11 +281,11 @@ impl EventDispatcher {
                     data,
                 } => {
                     if self.markets.has_server_market_index(market_index) {
-                        let Some(market_name) = self.markets.market_name_by_index(market_index)
-                        else {
+                        let Some(market) = self.markets.market_by_index(market_index) else {
                             continue;
                         };
-                        if !self.trade_section_visible_to_active_lib(market_name) {
+                        let market_name = market.name_arc();
+                        if !self.trade_section_visible_to_active_lib(market_name.as_ref()) {
                             continue;
                         }
                         let Some(records) = parse_watcher_fills(data) else {
@@ -315,7 +315,7 @@ impl EventDispatcher {
                         if !fills.is_empty() {
                             out.push(Event::WatcherFills(WatcherFillsEvent {
                                 market_index,
-                                market_name: market_name.to_string(),
+                                market_name,
                                 user,
                                 fills,
                             }));

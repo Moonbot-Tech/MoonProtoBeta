@@ -2438,7 +2438,7 @@ fn active_dispatch_emits_typed_watcher_fills() {
         })
         .expect("WatcherFills section must reach user code as typed domain event");
     assert_eq!(watcher.market_index(), 0);
-    assert_eq!(watcher.market_name, "BTCUSDT");
+    assert_eq!(watcher.market_name.as_ref(), "BTCUSDT");
     assert_eq!(watcher.user, user);
     assert_eq!(watcher.fills.len(), 1);
     let fill = &watcher.fills[0];

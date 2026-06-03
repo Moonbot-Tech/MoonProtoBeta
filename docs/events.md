@@ -166,8 +166,8 @@ snapshot has been processed by the history worker. At that point
 `arb_now(ArbPlatformCode::...)` from the
 selected market instead of handling raw server `market_index` blocks.
 
-`WatcherFillsEvent` contains `market_name`, HyperDex user address, decoded fill
-rows, and `MoonTime` helpers.
+`WatcherFillsEvent` contains a shared `market_name` (`event.market_name.as_ref()`),
+HyperDex user address, decoded fill rows, and `MoonTime` helpers.
 
 `ServerLogEvent` contains the server log text and typed time helpers. Use
 `log.time()` / `log.unix_millis()` for UI timestamps.
