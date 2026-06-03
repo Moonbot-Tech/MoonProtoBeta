@@ -58,12 +58,6 @@ impl<'a> EngineStreamReader<'a> {
         Some(raw as usize)
     }
 
-    pub(crate) fn bounded_count_capacity(&self, count: usize, min_elem_size: usize) -> usize {
-        self.remaining()
-            .checked_div(min_elem_size)
-            .map_or(count, |max| count.min(max))
-    }
-
     pub(crate) fn read_count_bounded(
         &mut self,
         min_elem_size: usize,

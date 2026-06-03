@@ -78,8 +78,8 @@ use moonproto::state::{
 use moonproto::Command;
 use moonproto::{
     parse_key_info, ClientConfig, ClientSettingsCommand, ConnectConfig, DeepHistoryKind,
-    EngineMethod, EngineResponse, ExchangeKind, FieldValue, ImportedKeys, InitConfig,
-    InitialStrategies, LifecycleEvent, MoonClient, MoonStateSnapshot, MoonTime, OrderCompact,
+    EngineMethod, EngineResponse, ExchangeKind, ExchangeOrder, FieldValue, ImportedKeys,
+    InitConfig, InitialStrategies, LifecycleEvent, MoonClient, MoonStateSnapshot, MoonTime,
     OrderWorkerStatus, ProtocolMetricsSnapshot, StrategyDynamicPicklist, StrategyFieldLayout,
     StrategyFieldUiKind, StrategyFields, StrategyKind, StrategySchema, StrategySnapshot,
     TradesStreamMode, TransportMode,
@@ -5052,8 +5052,8 @@ fn run_order_lifecycle_gate_body(cfg: &FireConfig, a: &mut Session, b: &mut Sess
 }
 
 fn delphi_sell_report_delta_base(
-    buy: &OrderCompact,
-    sell: &OrderCompact,
+    buy: &ExchangeOrder,
+    sell: &ExchangeOrder,
     reverse_base_currency: bool,
 ) -> Option<f64> {
     if sell.spent_btc <= EPS || sell.total_btc <= EPS {

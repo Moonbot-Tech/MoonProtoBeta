@@ -186,7 +186,7 @@ pub use commands::strategy_serializer::{
     field_names, FieldValue, StrategyActiveMode, StrategyFields, StrategyKind, StrategySnapshot,
 };
 pub use commands::trade::{
-    FixedPosition, OrderCompact, OrderSubType, OrderType, OrderWorkerStatus, ReplaceMultiKind,
+    ExchangeOrder, FixedPosition, OrderSubType, OrderType, OrderWorkerStatus, ReplaceMultiKind,
     StopSettings,
 };
 pub use commands::ui::{

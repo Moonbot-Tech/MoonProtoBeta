@@ -118,12 +118,15 @@ impl PriceZone {
     }
 }
 
-/// `TOrderCompact` (MarketsU.pas:180), 117-byte packed record.
+/// Exchange-side order leg retained inside a tracked order.
 ///
-/// Delphi serializes this record with `ms.Read/Write(BuyOrder,
-/// SizeOf(BuyOrder))`, i.e. direct packed-struct bytes.
+/// On the wire this is Delphi `TOrderCompact`
+/// (MarketsU.pas:180), a 117-byte packed record serialized with
+/// `ms.Read/Write(BuyOrder, SizeOf(BuyOrder))`. The public type name describes
+/// the terminal meaning; `OrderCompact` remains only as an internal protocol
+/// alias for parity tests and packet readers.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct OrderCompact {
+pub struct ExchangeOrder {
     pub int_id: i64,
     pub quantity: f64,
     pub quantity_remaining: f64,
@@ -161,6 +164,8 @@ pub struct OrderCompact {
     pub(crate) is_short: DelphiBool,
 }
 
+pub(crate) type OrderCompact = ExchangeOrder;
+
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
 struct WireOrderCompact {
@@ -193,7 +198,7 @@ struct WireOrderCompact {
 pub(crate) const ORDER_COMPACT_SIZE: usize = std::mem::size_of::<WireOrderCompact>();
 const _: [(); 117] = [(); ORDER_COMPACT_SIZE];
 
-impl OrderCompact {
+impl ExchangeOrder {
     fn from_wire(wire: WireOrderCompact) -> Self {
         Self {
             int_id: wire.int_id.get(),

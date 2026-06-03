@@ -192,14 +192,19 @@ fn market_write_str_writes_only_declared_wrapped_len() {
 
 #[test]
 // parity: MoonBot MoonProtoEngineStruct.pas:TEngineStreamCommand.ReadInt
-fn market_count_reader_does_not_precheck_remaining() {
+fn market_count_reader_raw_and_bounded_paths_are_separate() {
     let bytes = 2i32.to_le_bytes();
     let mut r = EngineStreamReader::new(&bytes);
 
     let count = r.read_count().unwrap();
 
     assert_eq!(count, 2);
-    assert_eq!(r.bounded_count_capacity(count, 27), 0);
+    assert_eq!(r.remaining(), 0);
+
+    let mut bounded = EngineStreamReader::new(&bytes);
+    assert!(bounded
+        .read_count_bounded(27, usize::MAX, "test.count")
+        .is_none());
 }
 
 #[test]

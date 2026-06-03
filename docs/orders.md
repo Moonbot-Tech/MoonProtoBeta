@@ -55,8 +55,8 @@ pub struct Order {
     pub currency: BaseCurrency,
     pub platform: ExchangeCode,
     pub status: OrderWorkerStatus,
-    pub buy_order: OrderCompact,
-    pub sell_order: OrderCompact,
+    pub buy_order: ExchangeOrder,
+    pub sell_order: ExchangeOrder,
     pub buy_price: f64,
     pub sell_price: f64,
     pub stops: StopSettings,
@@ -90,7 +90,8 @@ pub struct Order {
 server order state. Normal code does not write them manually; order actions use
 them to build the correct wire header.
 
-`buy_order` and `sell_order` contain exchange-side order values such as
+`buy_order` and `sell_order` are `ExchangeOrder` values. They contain
+exchange-side order values such as
 `actual_price`, `quantity`, `quantity_remaining`, `mean_price`, `leverage`, and
 open/close/create times. `order_type` and `sub_type` are typed values; use
 their `name()` helpers for labels. The local `buy_price` and `sell_price`
@@ -99,9 +100,9 @@ exchange execution prices.
 
 Order timestamps are Delphi `TDateTime` values on the wire, but raw time fields
 are not the normal terminal API. Use `open_time()`, `close_time()`, and
-`create_time()` on `OrderCompact`.
+`create_time()` on `ExchangeOrder`.
 For exchange-order flags, use `is_opened()`, `is_closed()`, `canceled()`, and
-`is_short()` on `OrderCompact`; the underlying packed boolean bytes and
+`is_short()` on `ExchangeOrder`; the underlying packed boolean bytes and
 packed-record byte IO are wire details kept inside Active Lib/tests.
 
 `sell_reason` is a typed `SellReason` value. Use

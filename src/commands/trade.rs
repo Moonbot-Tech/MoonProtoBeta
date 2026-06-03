@@ -15,9 +15,9 @@
 //! ## Packed Records
 //!
 //! `TOrderCompact`, `TStopSettings`, and `TOrderUpdateData` are Delphi
-//! `packed record` values. Public Rust structs expose normal fields, while the
-//! private `Wire*` structs mirror the fixed wire layout with compile-time size
-//! checks.
+//! `packed record` values. Public terminal types expose normal fields, while
+//! the private `Wire*` structs mirror the fixed wire layout with compile-time
+//! size checks.
 
 use super::registry::{write_string, CURRENT_PROTO_CMD_VER};
 use std::convert::TryInto;
@@ -43,11 +43,14 @@ pub use enums::{
 mod headers;
 pub(crate) use headers::{BaseCommandHeader, MarketCommandHeader, TradeEpochHeader};
 mod records;
+pub(crate) use records::OrderCompact;
 use records::{
     read_f32_zero_tail, read_f64_zero_tail, read_i32_zero_tail, read_immune_item_zero_tail,
     read_u16_zero_tail, read_u64_zero_tail, read_u8_zero_tail,
 };
-pub use records::{DelphiBool, ImmuneItem, OrderCompact, OrderUpdateData, PriceZone, StopSettings};
+pub use records::{
+    DelphiBool, ExchangeOrder, ImmuneItem, OrderUpdateData, PriceZone, StopSettings,
+};
 #[allow(unused_imports)]
 pub(crate) use records::{ORDER_COMPACT_SIZE, ORDER_UPDATE_DATA_SIZE, STOP_SETTINGS_SIZE};
 mod trace;

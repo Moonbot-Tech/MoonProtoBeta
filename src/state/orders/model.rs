@@ -22,15 +22,15 @@ pub struct Order {
     pub platform: ExchangeCode,
     /// Current worker lifecycle status.
     pub status: OrderWorkerStatus,
-    /// Exchange buy-side order.
-    pub buy_order: OrderCompact,
-    /// Exchange sell-side order.
-    pub sell_order: OrderCompact,
+    /// Exchange buy-side order leg.
+    pub buy_order: ExchangeOrder,
+    /// Exchange sell-side order leg.
+    pub sell_order: ExchangeOrder,
     /// Delphi `pBuyOrder.Price`: desired/local replace price, not part of
-    /// `TOrderCompact` wire data.
+    /// exchange-order wire data.
     pub buy_price: f64,
     /// Delphi `pSellOrder.Price`: desired/local replace price, not part of
-    /// `TOrderCompact` wire data.
+    /// exchange-order wire data.
     pub sell_price: f64,
     /// Stop settings.
     pub stops: StopSettings,
