@@ -34,8 +34,10 @@
 
 #![cfg_attr(feature = "diagnostics", allow(dead_code))]
 
+use super::market::ArbPlatformCode;
 use super::registry::{decode_utf8_delphi, read_string, write_string, CURRENT_PROTO_CMD_VER};
 use super::strat::StratCheckedItem;
+use std::time::Duration;
 use zerocopy::byteorder::little_endian::{F32 as LeF32, F64 as LeF64, I32 as LeI32, U16 as LeU16};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
@@ -358,6 +360,26 @@ impl Default for ArbConfigCompact {
     }
 }
 
+impl ArbConfigCompact {
+    /// Whether arbitrage data for `platform` should be requested/shown.
+    pub fn is_wanted(&self, platform: ArbPlatformCode) -> bool {
+        self.wanted[platform.to_byte() as usize]
+    }
+
+    /// Set the wanted flag for one arbitrage platform.
+    pub fn set_wanted(&mut self, platform: ArbPlatformCode, wanted: bool) {
+        self.wanted[platform.to_byte() as usize] = wanted;
+    }
+
+    /// Iterate enabled platform codes.
+    pub fn wanted_platforms(&self) -> impl Iterator<Item = ArbPlatformCode> + '_ {
+        self.wanted
+            .iter()
+            .enumerate()
+            .filter_map(|(code, wanted)| wanted.then_some(ArbPlatformCode::from_byte(code as u8)))
+    }
+}
+
 // =============================================================================
 //  EmuTradePoint (6-byte packed record)
 // =============================================================================
@@ -532,13 +554,27 @@ impl JoinSellKind {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TempBlacklistEntry<'a> {
     pub symbol: &'a str,
-    /// Remaining blacklist duration in Delphi days.
-    pub remaining_days: f64,
+    remaining_days: f64,
 }
 
 impl TempBlacklistEntry<'_> {
+    /// Remaining blacklist duration as normal Rust time.
+    ///
+    /// Delphi serializes the value as `TDateTime` day delta, but terminal code
+    /// should treat it as a duration row.
+    pub fn remaining_duration(self) -> Duration {
+        if !self.remaining_days.is_finite() || self.remaining_days <= 0.0 {
+            return Duration::ZERO;
+        }
+        Duration::from_secs_f64(self.remaining_days * 86_400.0)
+    }
+
     pub fn remaining_hours(self) -> f64 {
         self.remaining_days * 24.0
+    }
+
+    pub fn remaining_days(self) -> f64 {
+        self.remaining_days
     }
 }
 
@@ -683,9 +719,43 @@ impl ClientSettingsCommand {
         usize::from(self.sb_num.clamp(1, 6))
     }
 
+    /// Select one of the six fixed-sell buttons.
+    ///
+    /// Mirrors Delphi `UpdateFixedButtons`: the slot is clamped to `1..=6` and
+    /// `fixed_sell_price` is synchronized from `SPrice[sbNum]`.
+    pub fn set_selected_fixed_sell_slot(&mut self, slot_1_based: usize) {
+        let slot = slot_1_based.clamp(1, 6);
+        self.sb_num = slot as u8;
+        self.fixed_sell_price = f64::from(self.s_price[slot - 1]);
+    }
+
     /// Current fixed-sell preset value selected by [`Self::selected_fixed_sell_slot`].
     pub fn selected_fixed_sell_price(&self) -> f32 {
         self.s_price[self.selected_fixed_sell_slot() - 1]
+    }
+
+    /// Set a fixed-sell preset button value (`SPrice[slot]`).
+    ///
+    /// The value is the same raw preset value Delphi edits in
+    /// `BTCBalanceEdit`; display helpers apply `x_tmode` when drawing the
+    /// visible percentage. If the edited slot is selected, `fixed_sell_price`
+    /// is synchronized immediately.
+    pub fn set_fixed_sell_preset_price(&mut self, slot_1_based: usize, price: f32) -> bool {
+        if !(1..=6).contains(&slot_1_based) {
+            return false;
+        }
+        self.s_price[slot_1_based - 1] = price;
+        if self.selected_fixed_sell_slot() == slot_1_based {
+            self.fixed_sell_price = f64::from(price);
+        }
+        true
+    }
+
+    /// Set the currently selected fixed-sell preset value.
+    pub fn set_selected_fixed_sell_price(&mut self, price: f32) {
+        let slot = self.selected_fixed_sell_slot();
+        self.s_price[slot - 1] = price;
+        self.fixed_sell_price = f64::from(price);
     }
 
     /// Delphi visible percentage for the currently selected fixed-sell preset.
@@ -719,8 +789,23 @@ impl ClientSettingsCommand {
     ///
     /// Delphi stores this as two parallel arrays (`TempBLSymbols` and
     /// `TempBLTimes`). Terminal code should edit rows as `(symbol,
-    /// remaining_days)`; the wire arrays are rebuilt here for exact roundtrip.
+    /// remaining duration)`; the wire arrays are rebuilt here for exact roundtrip.
     pub fn set_temp_blacklist_entries<I, S>(&mut self, entries: I)
+    where
+        I: IntoIterator<Item = (S, Duration)>,
+        S: Into<String>,
+    {
+        self.temp_bl_symbols.clear();
+        self.temp_bl_times.clear();
+        for (symbol, remaining) in entries {
+            self.temp_bl_symbols.push(symbol.into());
+            self.temp_bl_times.push(remaining.as_secs_f64() / 86_400.0);
+        }
+    }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
+    pub fn set_temp_blacklist_entries_days<I, S>(&mut self, entries: I)
     where
         I: IntoIterator<Item = (S, f64)>,
         S: Into<String>,

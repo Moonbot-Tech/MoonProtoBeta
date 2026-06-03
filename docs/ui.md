@@ -278,8 +278,8 @@ Useful helpers:
 | UI area | API |
 |---|---|
 | Main sell / scalp / fixed-sell display value | `effective_take_profit_percent()` |
-| Six fixed sell buttons | `fixed_sell_presets()`, `fixed_sell_preset_percent(slot)`, `selected_fixed_sell_slot()`, `selected_fixed_sell_percent()` |
-| Temporary blacklist rows | `temp_blacklist_entries()`, `set_temp_blacklist_entries(...)` |
+| Six fixed sell buttons | `fixed_sell_presets()`, `fixed_sell_preset_percent(slot)`, `selected_fixed_sell_slot()`, `selected_fixed_sell_percent()`, `set_selected_fixed_sell_slot(...)`, `set_fixed_sell_preset_price(...)` |
+| Temporary blacklist rows | `temp_blacklist_entries()` returns symbol + `Duration`; `set_temp_blacklist_entries(...)` accepts symbol + `Duration` |
 | Multi-order sell join combo | `JoinSellKind`, `join_sell_mode()`, `set_join_sell_mode(...)` |
 | AutoStart settings page | `auto_start_config()`, `set_auto_start_config(...)`, `update_auto_start_config(...)` |
 | AutoStart recovery/session page | `auto_start_config2()`, `set_auto_start_config2(...)`, `update_auto_start_config2(...)` |
@@ -289,7 +289,7 @@ Common settings controls:
 | UI meaning | Suggested control | Fields/helpers |
 |---|---|---|
 | Main take-profit target | numeric percent input/slider | `x_sell`, `x_tmode`, `x_sell_scalp`, `effective_take_profit_percent()` |
-| Fixed-sell mode | segmented control or toggle | `fixed_sell_mode`, `fixed_sell_presets()`, `selected_fixed_sell_slot()`, `selected_fixed_sell_percent()` |
+| Fixed-sell mode | segmented control or toggle | `fixed_sell_mode`, fixed-sell read/set helpers; helpers keep `fixed_sell_price` synchronized like MoonBot `UpdateFixedButtons` |
 | Stop-loss / trailing / global take-profit | numeric percent inputs + enable checkbox | `price_drop_level`, `trailing_drop`, `use_g_take_profit`, `g_take_profit` |
 | Panic-on-price-drop protection | checkbox | `panic_if_price_drop` |
 | Emulator mode | checkbox/toggle | `emu_mode` |
@@ -297,16 +297,17 @@ Common settings controls:
 | Signed order ids | checkbox | `sign_orders` |
 | Global coin blacklist | multiline/token text editor + enable checkbox | `coins_black_list_text`, `use_coins_black_list` |
 | Exclude blacklist from market delta | checkbox | `client.settings().set_exclude_blacklisted_markets_from_exchange_delta(...)` |
-| Temporary coin blacklist | editable table | `temp_blacklist_entries()`, `set_temp_blacklist_entries(...)` |
+| Temporary coin blacklist | editable table | `temp_blacklist_entries()` / `set_temp_blacklist_entries(...)` with normal Rust `Duration` values |
 | Manual strategy override | checkbox + strategy selector | `use_manual_strategy`, `manual_strategy_id` |
 | Position/stop-market options | checkboxes + small numeric input | `free_position_check`, `use_stop_market`, `vol_drop_level` |
 | Multi-order join-sell mode | combo/segmented control | `JoinSellKind`, `join_sell_mode()`, `set_join_sell_mode(...)` |
-| Arbitrage display options | platform checklist + display toggles | `arb_config` |
+| Arbitrage display options | platform checklist + display toggles | `arb_config.is_wanted(...)`, `set_wanted(...)`, `wanted_platforms()`, plus display flags |
 | AutoStart pages | settings sub-panels | `auto_start_config()`, `auto_start_config2()` typed views |
 
 `fixed_sell_price` is not the best source for drawing the selected fixed-sell
 button: MoonBot derives the active fixed price from `s_price[sb_num]` after
-applying settings. Use the fixed-sell helpers for UI display.
+applying settings. Use the fixed-sell helpers for UI display and edits; setter
+helpers keep `fixed_sell_price` synchronized.
 
 `set_exclude_blacklisted_markets_from_exchange_delta` is local Active Lib
 policy, not a `TClientSettingsCommand` wire field. It mirrors Delphi

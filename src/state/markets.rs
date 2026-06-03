@@ -27,7 +27,7 @@ mod tags;
 mod text;
 mod types;
 
-use self::text::same_text_ascii;
+use self::text::{contains_text_ascii, same_text_ascii, starts_text_ascii};
 pub(crate) use self::types::MarketLastPriceHistoryInput;
 #[cfg(feature = "diagnostics")]
 #[doc(hidden)]

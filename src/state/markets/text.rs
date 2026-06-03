@@ -4,6 +4,25 @@ pub(super) fn same_text_ascii(left: &str, right: &str) -> bool {
     left.eq_ignore_ascii_case(right)
 }
 
+pub(super) fn starts_text_ascii(text: &str, prefix: &str) -> bool {
+    text.as_bytes()
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
+}
+
+pub(super) fn contains_text_ascii(text: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let text = text.as_bytes();
+    let needle = needle.as_bytes();
+    if needle.len() > text.len() {
+        return false;
+    }
+    text.windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
 pub(super) fn replace_text_ascii_case_insensitive(input: &str, from: &str, to: &str) -> String {
     if from.is_empty() {
         return input.to_string();

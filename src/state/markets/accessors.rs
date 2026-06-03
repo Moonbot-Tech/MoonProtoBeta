@@ -36,6 +36,49 @@ impl MarketsState {
         self.handles_by_name.get(market_name).cloned()
     }
 
+    /// Find the best market for terminal search-box input.
+    ///
+    /// This is the Rust Active Lib analogue of MoonBot's chart search flow:
+    /// users may type a full market name (`BTCUSDT`) or a coin/token symbol
+    /// (`BTC`, `SOL`). The result is a stable [`MarketHandle`] that UI can keep
+    /// like Delphi keeps `TMarket`.
+    pub fn find(&self, input: &str) -> Option<MarketHandle> {
+        self.search(input, 1).into_iter().next()
+    }
+
+    /// Search markets for popup/autocomplete UI.
+    ///
+    /// Ordering is Delphi-shaped and stable in current market-list order:
+    /// exact symbol/name/canonical matches first, then prefix matches, then
+    /// contains matches. `limit = 0` returns an empty vector.
+    pub fn search(&self, input: &str, limit: usize) -> Vec<MarketHandle> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let query = input.trim();
+        if query.is_empty() {
+            return Vec::new();
+        }
+
+        let mut exact = Vec::new();
+        let mut prefix = Vec::new();
+        let mut contains = Vec::new();
+        for handle in self.markets.iter() {
+            match handle.with(|market| market_search_quality(market, query)) {
+                MarketSearchQuality::Exact => exact.push(handle.clone()),
+                MarketSearchQuality::Prefix => prefix.push(handle.clone()),
+                MarketSearchQuality::Contains => contains.push(handle.clone()),
+                MarketSearchQuality::None => {}
+            }
+        }
+
+        let mut out = Vec::with_capacity(limit.min(exact.len() + prefix.len() + contains.len()));
+        append_limited(&mut out, exact, limit);
+        append_limited(&mut out, prefix, limit);
+        append_limited(&mut out, contains, limit);
+        out
+    }
+
     /// Get an owned market snapshot by name.
     pub fn market_snapshot(&self, market_name: &str) -> Option<Market> {
         self.get(market_name).map(|handle| handle.snapshot())
@@ -200,4 +243,58 @@ fn parse_coin_blacklist_text(text: &str) -> Vec<String> {
         .filter(|word| !word.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MarketSearchQuality {
+    None,
+    Contains,
+    Prefix,
+    Exact,
+}
+
+fn market_search_quality(market: &Market, query: &str) -> MarketSearchQuality {
+    let exact_fields = [
+        market.bn_market_name.as_str(),
+        market.market_name.as_str(),
+        market.market_name_mb_classic.as_str(),
+        market.market_currency.as_str(),
+        market.market_currency_canonic.as_str(),
+        market.market_currency_long.as_str(),
+    ];
+    if exact_fields
+        .iter()
+        .any(|field| same_text_ascii(field, query))
+    {
+        return MarketSearchQuality::Exact;
+    }
+
+    let prefix_fields = [
+        market.market_currency_canonic.as_str(),
+        market.market_currency.as_str(),
+        market.bn_market_name.as_str(),
+        market.market_name.as_str(),
+        market.market_name_mb_classic.as_str(),
+    ];
+    if prefix_fields
+        .iter()
+        .any(|field| starts_text_ascii(field, query))
+    {
+        return MarketSearchQuality::Prefix;
+    }
+
+    if prefix_fields
+        .iter()
+        .chain([market.market_currency_long.as_str()].iter())
+        .any(|field| contains_text_ascii(field, query))
+    {
+        return MarketSearchQuality::Contains;
+    }
+
+    MarketSearchQuality::None
+}
+
+fn append_limited(out: &mut Vec<MarketHandle>, items: Vec<MarketHandle>, limit: usize) {
+    let remaining = limit.saturating_sub(out.len());
+    out.extend(items.into_iter().take(remaining));
 }

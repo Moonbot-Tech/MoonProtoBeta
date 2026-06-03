@@ -13,11 +13,16 @@ market payloads or server indexes themselves.
 
 ## Reading State
 
-`MarketsState::get(name)` returns a stable `MarketHandle`, not a temporary
-borrow. This mirrors Delphi `TMarkets = TSlowSafeList<TMarket>`: listing
-refresh may replace the surrounding list/dictionaries, but existing `TMarket`
-objects stay alive and are mutated in place. UI code may keep the handle after a
-search and read it later without re-searching by name.
+`MarketsState::find(input)` / `search(input, limit)` are the normal terminal
+search-box helpers: users may type a full market name (`BTCUSDT`) or a coin
+symbol (`BTC`, `SOL`). The result is a stable `MarketHandle`, not a temporary
+borrow. `MarketsState::get(name)` remains the exact-name path for code that
+already has the canonical name.
+
+This mirrors Delphi `TMarkets = TSlowSafeList<TMarket>`: listing refresh may
+replace the surrounding list/dictionaries, but existing `TMarket` objects stay
+alive and are mutated in place. UI code may keep the handle after a search and
+read it later without re-searching by name.
 
 ```rust
 use moonproto::TokenTags;
@@ -25,7 +30,7 @@ use moonproto::TokenTags;
 let Some(state) = client.snapshot() else { return; };
 let markets = state.markets();
 
-if let Some(market) = markets.get("BTCUSDT") {
+if let Some(market) = markets.find("BTC") {
     let pos = market.balance_position();
     let price = market.price();
     let tail = market.trade_state();

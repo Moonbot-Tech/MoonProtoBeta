@@ -153,6 +153,47 @@ fn apply_markets_list_initial_populates_state() {
 }
 
 #[test]
+fn market_search_returns_stable_handles_by_user_input_meaning() {
+    let mut st = MarketsState::new();
+    let mut btc = mk_market("BTCUSDT", 0);
+    btc.market_currency = "BTC".to_string();
+    btc.market_currency_canonic = "BTC".to_string();
+    btc.market_currency_long = "Bitcoin".to_string();
+    btc.market_name = "USDT-BTC".to_string();
+
+    let mut eth = mk_market("ETHUSDT", 1);
+    eth.market_currency = "ETH".to_string();
+    eth.market_currency_canonic = "ETH".to_string();
+    eth.market_currency_long = "Ethereum".to_string();
+    eth.market_name = "USDT-ETH".to_string();
+
+    let mut sol = mk_market("SOLUSDT", 2);
+    sol.market_currency = "SOL".to_string();
+    sol.market_currency_canonic = "SOL".to_string();
+    sol.market_currency_long = "Solana".to_string();
+    sol.market_name = "USDT-SOL".to_string();
+
+    st.apply_markets_list(MarketsListResponse {
+        markets: vec![btc, eth, sol],
+        corr_markets: vec![],
+    });
+
+    assert_eq!(st.find("BTCUSDT").unwrap().name(), "BTCUSDT");
+    assert_eq!(st.find("btc").unwrap().name(), "BTCUSDT");
+    assert_eq!(st.find("so").unwrap().name(), "SOLUSDT");
+    assert_eq!(st.find("ther").unwrap().name(), "ETHUSDT");
+    assert!(st.find("").is_none());
+
+    let names: Vec<_> = st
+        .search("t", 2)
+        .into_iter()
+        .map(|m| m.name().to_string())
+        .collect();
+    assert_eq!(names, vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
+    assert!(st.get("BTCUSDT").unwrap().ptr_eq(&st.find("BTC").unwrap()));
+}
+
+#[test]
 fn market_handle_balance_position_reads_live_market_fields() {
     let mut st = MarketsState::new();
     st.apply_markets_list(MarketsListResponse {

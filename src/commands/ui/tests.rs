@@ -578,9 +578,19 @@ fn client_settings_ui_helpers_match_delphi_meaning() {
     assert_eq!(settings.selected_fixed_sell_percent(), 60.0);
     assert_eq!(settings.fixed_sell_preset_percent(2), Some(20.0));
     assert_eq!(settings.fixed_sell_preset_percent(0), None);
+    settings.set_selected_fixed_sell_slot(2);
+    assert_eq!(settings.sb_num, 2);
+    assert_eq!(settings.fixed_sell_price, 2.0);
+    assert!(settings.set_fixed_sell_preset_price(2, 7.5));
+    assert_eq!(settings.selected_fixed_sell_price(), 7.5);
+    assert_eq!(settings.fixed_sell_price, 7.5);
+    assert!(!settings.set_fixed_sell_preset_price(0, 1.0));
+    settings.set_selected_fixed_sell_price(8.5);
+    assert_eq!(settings.s_price[1], 8.5);
+    assert_eq!(settings.fixed_sell_price, 8.5);
     assert_eq!(
         settings.fixed_sell_presets(),
-        &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+        &[1.0, 8.5, 3.0, 4.0, 5.0, 6.0]
     );
 
     assert_eq!(settings.join_sell_mode(), JoinSellKind::FixedProfit);
@@ -596,15 +606,36 @@ fn client_settings_ui_helpers_match_delphi_meaning() {
     assert_eq!(entries[1].symbol, "SHIB");
     assert_eq!(entries[1].remaining_hours(), 6.0);
 
-    settings.set_temp_blacklist_entries([("SOL", 1.0), ("PEPE", 0.125)]);
+    settings.set_temp_blacklist_entries([
+        ("SOL", std::time::Duration::from_secs(86_400)),
+        ("PEPE", std::time::Duration::from_secs(10_800)),
+    ]);
     assert_eq!(
         settings.temp_bl_symbols,
         vec!["SOL".to_string(), "PEPE".to_string()]
     );
     assert_eq!(settings.temp_bl_times, [1.0, 0.125]);
     let entries: Vec<_> = settings.temp_blacklist_entries().collect();
+    assert_eq!(
+        entries[0].remaining_duration(),
+        std::time::Duration::from_secs(86_400)
+    );
     assert_eq!(entries[0].remaining_hours(), 24.0);
     assert_eq!(entries[1].remaining_hours(), 3.0);
+    settings.set_temp_blacklist_entries_days([("BNB", 0.25)]);
+    let entries: Vec<_> = settings.temp_blacklist_entries().collect();
+    assert_eq!(entries[0].symbol, "BNB");
+    assert_eq!(
+        entries[0].remaining_duration(),
+        std::time::Duration::from_secs(21_600)
+    );
+
+    assert!(!settings.arb_config.is_wanted(ArbPlatformCode::ByBit));
+    settings.arb_config.set_wanted(ArbPlatformCode::ByBit, true);
+    settings.arb_config.set_wanted(ArbPlatformCode::Gate, true);
+    assert!(settings.arb_config.is_wanted(ArbPlatformCode::ByBit));
+    let wanted: Vec<_> = settings.arb_config.wanted_platforms().collect();
+    assert_eq!(wanted, vec![ArbPlatformCode::ByBit, ArbPlatformCode::Gate]);
 }
 
 #[test]
