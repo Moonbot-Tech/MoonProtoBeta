@@ -188,6 +188,16 @@ impl MMOrderHistoryRow {
     pub fn unix_millis(self) -> i64;
 }
 
+pub struct MMOrderCompanionData {
+    /* private fields */
+}
+
+impl MMOrderCompanionData {
+    pub fn taker(&self) -> &[u8; 20];
+    pub fn taker_hex(&self) -> String;
+    pub fn color_argb(&self) -> u32;
+}
+
 pub struct MiniCandle {
     pub time: MoonTime,
     pub cnt: i32,
@@ -217,6 +227,11 @@ for side.
 Old detailed futures rows evicted from the retained futures trade ring are
 compacted into `MiniCandle` rows. This keeps older chart context available
 without retaining every old trade forever.
+
+`mm_order_companion` mirrors MoonBot's `TMMOrderData` side buffer. It is aligned
+by slot with `mm_orders` and carries the HyperDex taker address plus the
+Delphi-compatible display color. Use `taker_hex()` for taker logs/tooltips and
+`color_argb()` for chart coloring.
 
 ## Candles And Derived Analytics
 

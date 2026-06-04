@@ -184,6 +184,18 @@ fn hl_address_color_matches_delphi_xor_scale() {
 }
 
 #[test]
+fn hl_address_hex_matches_delphi_display_shape() {
+    let mut taker = [0u8; 20];
+    for (idx, byte) in taker.iter_mut().enumerate() {
+        *byte = idx as u8;
+    }
+    assert_eq!(
+        hl_address_hex(&taker),
+        "0x000102030405060708090a0b0c0d0e0f10111213"
+    );
+}
+
+#[test]
 // parity: MoonBot MarketsU.pas:TMarket.ResizeOrdersHistory (UseTradesCompression)
 fn compacts_trades_to_mini_candles() {
     let t0 = 45_000.0;

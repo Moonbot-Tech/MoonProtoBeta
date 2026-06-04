@@ -35,9 +35,9 @@ pub use account::{AccountEvent, AccountState};
 pub use balances::{BalanceEvent, BalancesState, GlobalBalance};
 pub use coin_card_candles::{CoinCardCandlesEvent, CoinCardCandlesState};
 pub use history::{
-    hl_address_color, Candle5mRow, CandleVolumeSnapshot, CandlesSnapshotApplySummary,
-    CandlesSnapshotEvent, DerivedDeltaSnapshot, LastPricePoint, MMOrderCompanionData,
-    MMOrderHistoryRow, MarkPricePoint, MarketDerivedSnapshot, MiniCandle,
+    hl_address_color, hl_address_hex, Candle5mRow, CandleVolumeSnapshot,
+    CandlesSnapshotApplySummary, CandlesSnapshotEvent, DerivedDeltaSnapshot, LastPricePoint,
+    MMOrderCompanionData, MMOrderHistoryRow, MarkPricePoint, MarketDerivedSnapshot, MiniCandle,
     RollingTradeVolumeSnapshot, TradeHistoryRow, TradeVolumeTotals,
 };
 pub(crate) use history_store::TradeStorageScope;

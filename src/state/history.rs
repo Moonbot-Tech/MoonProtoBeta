@@ -170,8 +170,25 @@ impl SeqRingTimedRow for MMOrderHistoryRow {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub struct MMOrderCompanionData {
-    pub taker: [u8; 20],
-    pub color: u32,
+    pub(crate) taker: [u8; 20],
+    pub(crate) color: u32,
+}
+
+impl MMOrderCompanionData {
+    /// HyperDex taker address bytes from Delphi `THLAddress`.
+    pub fn taker(&self) -> &[u8; 20] {
+        &self.taker
+    }
+
+    /// HyperDex taker address formatted like Delphi `HLAddressToHex(..., true)`.
+    pub fn taker_hex(&self) -> String {
+        hl_address_hex(&self.taker)
+    }
+
+    /// Deterministic ARGB color produced by Delphi `HLAddressColor`.
+    pub fn color_argb(&self) -> u32 {
+        self.color
+    }
 }
 
 // parity: MoonBot HLHelpers.pas:HLAddressColor
@@ -189,6 +206,18 @@ pub fn hl_address_color(taker: [u8; 20]) -> u32 {
 
     let scale = |x: u8| -> u32 { ((u32::from(x) * 5) >> 3) + 80 };
     0xFF00_0000 | (scale(r) << 16) | (scale(g) << 8) | scale(b)
+}
+
+// parity: MoonBot HLHelpers.pas:HLAddressToHex(..., true)
+pub fn hl_address_hex(address: &[u8; 20]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(42);
+    out.push_str("0x");
+    for b in address {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
 }
 
 /// Delphi `THistoricalPrices` used by `Market.HistoryPrice`.

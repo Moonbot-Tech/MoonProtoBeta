@@ -131,14 +131,7 @@ impl WatcherFillsEvent {
 
     /// HyperDex user address formatted like Delphi `HLAddressToHex(..., true)`.
     pub fn user_hex(&self) -> String {
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        let mut out = String::with_capacity(42);
-        out.push_str("0x");
-        for b in self.user {
-            out.push(HEX[(b >> 4) as usize] as char);
-            out.push(HEX[(b & 0x0f) as usize] as char);
-        }
-        out
+        crate::state::hl_address_hex(&self.user)
     }
 
     /// Server-local market index retained for protocol diagnostics.
