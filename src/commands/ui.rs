@@ -595,8 +595,7 @@ impl TempBlacklistEntry<'_> {
 /// ```ignore
 /// if let Some(current) = &snapshot.settings().client_settings {
 ///     let mut settings = current.clone();
-///     settings.fixed_sell_mode = false;
-///     settings.x_sell = 3; // main sell-percent slider value
+///     settings.set_main_take_profit_percent(3.0);
 ///     settings.use_g_take_profit = true;
 ///     settings.g_take_profit = 1.5;
 ///     client.settings().send(settings);
@@ -711,6 +710,39 @@ impl ClientSettingsCommand {
         } else {
             f64::from(self.x_sell_scalp) / 50.0
         }
+    }
+
+    /// Set the normal main take-profit slider and leave scalp/fixed-sell modes.
+    ///
+    /// Delphi stores this as `xSell` plus the shared `xTMode` scale flag. The
+    /// terminal-facing helper writes the exact visible percent in the regular
+    /// scale (`xTMode=false`), so UI code does not have to remember the historic
+    /// storage trick. Values are rounded and clamped to Delphi's visible
+    /// `1..=900` percent range.
+    pub fn set_main_take_profit_percent(&mut self, percent: f64) {
+        let percent = if percent.is_finite() { percent } else { 1.0 };
+        let percent = percent.round().clamp(1.0, 900.0) as i32;
+        self.fixed_sell_mode = false;
+        self.x_tmode = false;
+        self.x_sell = percent;
+    }
+
+    /// Set the scalp/min-price sell mode percentage.
+    ///
+    /// Delphi selects this mode by storing `xSell=0` and the visible percent as
+    /// `xSellScalp / 50`. This helper writes the mode directly from a normal
+    /// percent value and keeps the wire-compatible integer storage internal to
+    /// the settings snapshot.
+    pub fn set_scalp_take_profit_percent(&mut self, percent: f64) {
+        let percent = if percent.is_finite() {
+            percent.max(0.0)
+        } else {
+            0.0
+        };
+        let raw = (percent * 50.0).round().clamp(0.0, i32::MAX as f64) as i32;
+        self.fixed_sell_mode = false;
+        self.x_sell = 0;
+        self.x_sell_scalp = raw;
     }
 
     /// Delphi visible percentage for a 1-based fixed-sell preset button.

@@ -592,6 +592,19 @@ fn client_settings_ui_helpers_match_delphi_meaning() {
         settings.fixed_sell_presets(),
         &[1.0, 8.5, 3.0, 4.0, 5.0, 6.0]
     );
+    settings.set_main_take_profit_percent(37.6);
+    assert!(!settings.fixed_sell_mode);
+    assert!(!settings.x_tmode);
+    assert_eq!(settings.x_sell, 38);
+    assert_eq!(settings.effective_take_profit_percent(), 38.0);
+    settings.set_main_take_profit_percent(1500.0);
+    assert_eq!(settings.x_sell, 900);
+    assert_eq!(settings.effective_take_profit_percent(), 900.0);
+    settings.set_scalp_take_profit_percent(1.25);
+    assert!(!settings.fixed_sell_mode);
+    assert_eq!(settings.x_sell, 0);
+    assert_eq!(settings.x_sell_scalp, 63);
+    assert_eq!(settings.effective_take_profit_percent(), 1.26);
 
     assert_eq!(settings.join_sell_mode(), JoinSellKind::FixedProfit);
     settings.set_join_sell_mode(JoinSellKind::FixedPrice);

@@ -85,8 +85,7 @@ if let Some(mut settings) = client
     .snapshot()
     .and_then(|state| state.settings().client_settings.clone())
 {
-    settings.fixed_sell_mode = false;
-    settings.x_sell = 50;
+    settings.set_main_take_profit_percent(50.0);
     client.settings().send(settings)?;
 }
 client.settings().set_mm_orders_subscription(true)?;
@@ -271,8 +270,7 @@ page/control, and sends the whole snapshot back:
 ```rust
 if let Some(current) = &snapshot.settings().client_settings {
     let mut settings = current.clone();
-    settings.fixed_sell_mode = false;
-    settings.x_sell = 25;
+    settings.set_main_take_profit_percent(25.0);
     settings.use_g_take_profit = true;
     settings.g_take_profit = 2.5;
     client.settings().send(settings)?;
@@ -283,7 +281,7 @@ Useful helpers:
 
 | UI area | API |
 |---|---|
-| Main sell / scalp / fixed-sell display value | `effective_take_profit_percent()` |
+| Main sell / scalp / fixed-sell display value | `effective_take_profit_percent()`, `set_main_take_profit_percent(...)`, `set_scalp_take_profit_percent(...)` |
 | Six fixed sell buttons | `fixed_sell_presets()`, `fixed_sell_preset_percent(slot)`, `selected_fixed_sell_slot()`, `selected_fixed_sell_percent()`, `set_selected_fixed_sell_slot(...)`, `set_fixed_sell_preset_price(...)` |
 | Temporary blacklist rows | `temp_blacklist_entries()` returns symbol + `Duration`; `set_temp_blacklist_entries(...)` accepts symbol + `Duration` |
 | Multi-order sell join combo | `JoinSellKind`, `join_sell_mode()`, `set_join_sell_mode(...)` |
@@ -294,7 +292,7 @@ Common settings controls:
 
 | UI meaning | Suggested control | Fields/helpers |
 |---|---|---|
-| Main take-profit target | numeric percent input/slider | `x_sell`, `x_tmode`, `x_sell_scalp`, `effective_take_profit_percent()` |
+| Main take-profit target | numeric percent input/slider | `set_main_take_profit_percent(...)`, `set_scalp_take_profit_percent(...)`, `effective_take_profit_percent()` |
 | Fixed-sell mode | segmented control or toggle | `fixed_sell_mode`, fixed-sell read/set helpers; helpers keep `fixed_sell_price` synchronized like MoonBot `UpdateFixedButtons` |
 | Stop-loss / trailing / global take-profit | numeric percent inputs + enable checkbox | `price_drop_level`, `trailing_drop`, `use_g_take_profit`, `g_take_profit` |
 | Panic-on-price-drop protection | checkbox | `panic_if_price_drop` |
@@ -318,6 +316,11 @@ platform rows by code/metadata instead of indexing a raw protocol byte.
 button: MoonBot derives the active fixed price from the selected fixed-sell
 preset after applying settings. Use the fixed-sell helpers for UI display and
 edits; setter helpers keep `fixed_sell_price` synchronized.
+
+`x_sell`, `x_tmode`, and `x_sell_scalp` are preserved field names from the
+MoonBot settings snapshot. Prefer the take-profit helpers above in UI code:
+they write the same fields while hiding the historic `x_tmode` scale flag and
+the scalp-mode `x_sell=0` convention.
 
 `set_exclude_blacklisted_markets_from_exchange_delta` is local Active Lib
 policy, not a `TClientSettingsCommand` wire field. It mirrors Delphi
