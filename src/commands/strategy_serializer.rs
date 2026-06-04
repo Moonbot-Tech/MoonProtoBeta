@@ -97,6 +97,7 @@ pub(crate) use self::reader::{
 #[cfg(test)]
 pub(crate) use self::reader::{parse_strategy_batch_plain, parse_strategy_batch_plain_with_schema};
 pub use self::types::field_names;
+pub(crate) use self::types::strategy_last_date_to_moon_time;
 pub use self::types::{
     FieldValue, StrategyActiveMode, StrategyFields, StrategyKind, StrategySnapshot,
 };

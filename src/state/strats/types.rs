@@ -1,3 +1,6 @@
+use crate::commands::strategy_serializer::strategy_last_date_to_moon_time;
+use crate::MoonTime;
+
 /// Cached serialized `TStrategySerializer` payload for replying to
 /// `TStratSnapshotRequest`.
 #[derive(Debug, Clone)]
@@ -13,7 +16,9 @@ pub struct StrategyInfo {
     pub strategy_id: u64,
     /// Strategy version from the `TStrategySerializer` header.
     pub strategy_ver: i32,
-    /// Last update time as the packed integer value carried by the serializer.
+    /// Unix epoch milliseconds used by Delphi `FLastEditDate`/rollback guards.
+    ///
+    /// UI code should use [`Self::last_edit_time`] for labels.
     pub last_date: u64,
     /// Sell price copied from decoded snapshot field `SellPrice`, when present.
     pub sell_price: f64,
@@ -39,6 +44,11 @@ impl StrategyInfo {
             prev_checked: false,
             folder_path: std::sync::Arc::from(""),
         }
+    }
+
+    /// Last edit timestamp as the normal public MoonProto time type.
+    pub fn last_edit_time(&self) -> MoonTime {
+        strategy_last_date_to_moon_time(self.last_date)
     }
 }
 

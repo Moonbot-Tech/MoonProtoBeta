@@ -122,6 +122,23 @@ fn strategy_with_fields(
 }
 
 #[test]
+fn strategy_snapshot_last_edit_time_helpers_keep_unix_ms_guard_value() {
+    let at = crate::MoonTime::from_unix_millis(1_737_000_000_000);
+    let snapshot = StrategySnapshot::new_at(
+        77,
+        3,
+        at,
+        true,
+        StrategyKind::from_byte(5),
+        "Folder",
+        StrategyFields::new(),
+    );
+
+    assert_eq!(snapshot.last_date, 1_737_000_000_000);
+    assert_eq!(snapshot.last_edit_time(), at);
+}
+
+#[test]
 fn strategy_fields_typed_getters_and_aliases_hide_string_bag_boilerplate() {
     let strategy = strategy_with_fields(
         StrategyKind::NEW_LISTING,

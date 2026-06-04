@@ -4,6 +4,7 @@ use super::{
     TID_BOOL, TID_BYTE, TID_DOUBLE, TID_INT32, TID_INT64, TID_SINGLE, TID_STRING, TID_UINT32,
     TID_UINT64, TID_WORD,
 };
+use crate::MoonTime;
 
 /// Common Delphi `TStrategy` field names.
 ///
@@ -152,7 +153,12 @@ impl FieldValue {
 pub struct StrategySnapshot {
     pub strategy_id: u64,
     pub strategy_ver: i32,
-    /// Unix epoch milliseconds, converted to Delphi time by the server.
+    /// Unix epoch milliseconds used by Delphi `FLastEditDate`/rollback guards.
+    ///
+    /// UI code should use [`Self::last_edit_time`] for display and
+    /// [`Self::new_at`] when creating snapshots from a typed timestamp. The raw
+    /// integer stays public because local strategy sync must preserve the exact
+    /// monotonic value sent to the server.
     pub last_date: u64,
     pub checked: bool,
     #[cfg(any(test, feature = "diagnostics"))]
@@ -376,6 +382,39 @@ impl StrategySnapshot {
         }
     }
 
+    /// Build one local strategy snapshot from a typed UI timestamp.
+    ///
+    /// The serializer still stores `last_date` as Unix milliseconds because
+    /// Delphi uses that integer for stale-snapshot guards; this constructor
+    /// keeps application code on the normal MoonProto time type.
+    pub fn new_at<P>(
+        strategy_id: u64,
+        strategy_ver: i32,
+        last_edit_time: MoonTime,
+        checked: bool,
+        kind: StrategyKind,
+        path: P,
+        fields: StrategyFields,
+    ) -> Self
+    where
+        P: Into<Arc<str>>,
+    {
+        Self::new(
+            strategy_id,
+            strategy_ver,
+            moon_time_to_strategy_last_date(last_edit_time),
+            checked,
+            kind,
+            path,
+            fields,
+        )
+    }
+
+    /// Last edit timestamp as the normal public MoonProto time type.
+    pub fn last_edit_time(&self) -> MoonTime {
+        strategy_last_date_to_moon_time(self.last_date)
+    }
+
     // parity: MoonBot Strategies.pas:TStrategy.StrategyKind
     pub fn kind(&self) -> StrategyKind {
         StrategyKind(self.kind)
@@ -431,4 +470,12 @@ impl StrategySnapshot {
             StrategyActiveMode::Standalone => self.checked,
         }
     }
+}
+
+pub(crate) fn strategy_last_date_to_moon_time(last_date: u64) -> MoonTime {
+    MoonTime::from_unix_millis(last_date.min(i64::MAX as u64) as i64)
+}
+
+pub(crate) fn moon_time_to_strategy_last_date(time: MoonTime) -> u64 {
+    time.unix_millis().max(0) as u64
 }

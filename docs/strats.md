@@ -203,9 +203,13 @@ pub struct StrategyInfo {
 
 `StrategyInfo` is a lightweight UI/index state. Full `TStrategy` fields are not
 stored there; they are stored as `StrategySnapshot` values owned by the
-runtime state. `checked` is Delphi `CheckedDirect`; `prev_checked` is Delphi
-`PrevChecked`. Checked deltas are pending while these fields differ and become
-acknowledged only after server `TStratCheckedEcho` or `TStratCheckedSync`.
+runtime state. `last_date` is the exact Unix-millisecond value used by Delphi
+rollback guards; UI labels should use `info.last_edit_time()` /
+`snapshot.last_edit_time()` and new local snapshots can be built with
+`StrategySnapshot::new_at(..., MoonTime, ...)`. `checked` is Delphi
+`CheckedDirect`; `prev_checked` is Delphi `PrevChecked`. Checked deltas are
+pending while these fields differ and become acknowledged only after server
+`TStratCheckedEcho` or `TStratCheckedSync`.
 `sell_price` is copied from the decoded snapshot field `SellPrice` when that
 field exists; incoming `TStratSellPriceUpdate` packets are not applied by the
 active client because Delphi client has no receive branch for that command.
