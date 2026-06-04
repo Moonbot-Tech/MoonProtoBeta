@@ -356,7 +356,7 @@ impl VStopParams {
 
 #[cfg(test)]
 mod tests {
-    use super::VStopParams;
+    use super::{ClosePositionParams, SplitOrderParams, VStopParams};
 
     #[test]
     fn vstop_params_semantic_constructors_set_delphi_flags() {
@@ -387,6 +387,42 @@ mod tests {
                 volume: 8.0,
             }
         );
+    }
+
+    #[test]
+    fn split_order_params_hide_wire_flags_behind_intents() {
+        let normal = SplitOrderParams::new("BTCUSDT", 3);
+        assert_eq!(normal.market, "BTCUSDT");
+        assert_eq!(normal.parts, 3);
+        assert!(!normal.is_strategy_piece());
+        assert!(!normal.sells_strategy_piece());
+
+        let piece = SplitOrderParams::strategy_piece("ETHUSDT", 2);
+        assert_eq!(piece.market, "ETHUSDT");
+        assert_eq!(piece.parts, 2);
+        assert!(piece.is_strategy_piece());
+        assert!(!piece.sells_strategy_piece());
+
+        let piece_sell = SplitOrderParams::strategy_piece_and_sell("SOLUSDT", 2);
+        assert_eq!(piece_sell.market, "SOLUSDT");
+        assert_eq!(piece_sell.parts, 2);
+        assert!(piece_sell.is_strategy_piece());
+        assert!(piece_sell.sells_strategy_piece());
+    }
+
+    #[test]
+    fn close_position_default_matches_delphi_limit_close() {
+        let limit = ClosePositionParams::new("BTCUSDT");
+        assert_eq!(limit.market, "BTCUSDT");
+        assert!(!limit.uses_market_order());
+
+        let explicit_limit = ClosePositionParams::limit_orders("ETHUSDT");
+        assert_eq!(explicit_limit.market, "ETHUSDT");
+        assert!(!explicit_limit.uses_market_order());
+
+        let market = ClosePositionParams::market_order("SOLUSDT");
+        assert_eq!(market.market, "SOLUSDT");
+        assert!(market.uses_market_order());
     }
 }
 
@@ -561,12 +597,18 @@ pub struct NewOrderTicket {
 pub struct SplitOrderParams {
     pub market: String,
     pub parts: i32,
-    pub split_small: bool,
-    pub split_small_sell: bool,
+    split_small: bool,
+    split_small_sell: bool,
 }
 
 impl SplitOrderParams {
+    /// Split the selected sell order into `parts`.
     pub fn new(market: impl Into<String>, parts: i32) -> Self {
+        Self::equal_parts(market, parts)
+    }
+
+    /// Split the selected sell order into `parts`.
+    pub fn equal_parts(market: impl Into<String>, parts: i32) -> Self {
         Self {
             market: market.into(),
             parts,
@@ -575,9 +617,58 @@ impl SplitOrderParams {
         }
     }
 
-    /// Build split-order params for a retained selected market.
+    /// Split a strategy-defined small piece.
+    ///
+    /// MoonBot may replace `parts` with the strategy piece size before creating
+    /// the new order.
+    pub fn strategy_piece(market: impl Into<String>, parts: i32) -> Self {
+        Self {
+            market: market.into(),
+            parts,
+            split_small: true,
+            split_small_sell: false,
+        }
+    }
+
+    /// Split a strategy-defined small piece and route that piece into sell.
+    pub fn strategy_piece_and_sell(market: impl Into<String>, parts: i32) -> Self {
+        Self {
+            market: market.into(),
+            parts,
+            split_small: true,
+            split_small_sell: true,
+        }
+    }
+
+    /// Build equal-parts split params for a retained selected market.
     pub fn for_market(market: &crate::state::MarketHandle, parts: i32) -> Self {
         Self::new(market.name(), parts)
+    }
+
+    /// Build equal-parts split params for a retained selected market.
+    pub fn equal_parts_for_market(market: &crate::state::MarketHandle, parts: i32) -> Self {
+        Self::equal_parts(market.name(), parts)
+    }
+
+    /// Build small-piece split params for a retained selected market.
+    pub fn strategy_piece_for_market(market: &crate::state::MarketHandle, parts: i32) -> Self {
+        Self::strategy_piece(market.name(), parts)
+    }
+
+    /// Build small-piece-and-sell split params for a retained selected market.
+    pub fn strategy_piece_and_sell_for_market(
+        market: &crate::state::MarketHandle,
+        parts: i32,
+    ) -> Self {
+        Self::strategy_piece_and_sell(market.name(), parts)
+    }
+
+    pub const fn is_strategy_piece(&self) -> bool {
+        self.split_small
+    }
+
+    pub const fn sells_strategy_piece(&self) -> bool {
+        self.split_small_sell
     }
 }
 
@@ -585,20 +676,48 @@ impl SplitOrderParams {
 #[derive(Debug, Clone)]
 pub struct ClosePositionParams {
     pub market: String,
-    pub market_sell: bool,
+    market_sell: bool,
 }
 
 impl ClosePositionParams {
+    /// Close the current position by placing closing limit orders.
     pub fn new(market: impl Into<String>) -> Self {
+        Self::limit_orders(market)
+    }
+
+    /// Close the current position by placing closing limit orders.
+    pub fn limit_orders(market: impl Into<String>) -> Self {
+        Self {
+            market: market.into(),
+            market_sell: false,
+        }
+    }
+
+    /// Force market-order close semantics.
+    pub fn market_order(market: impl Into<String>) -> Self {
         Self {
             market: market.into(),
             market_sell: true,
         }
     }
 
-    /// Build close-position params for a retained selected market.
+    /// Build limit-close params for a retained selected market.
     pub fn for_market(market: &crate::state::MarketHandle) -> Self {
         Self::new(market.name())
+    }
+
+    /// Build limit-close params for a retained selected market.
+    pub fn limit_orders_for_market(market: &crate::state::MarketHandle) -> Self {
+        Self::limit_orders(market.name())
+    }
+
+    /// Build market-close params for a retained selected market.
+    pub fn market_order_for_market(market: &crate::state::MarketHandle) -> Self {
+        Self::market_order(market.name())
+    }
+
+    pub const fn uses_market_order(&self) -> bool {
+        self.market_sell
     }
 }
 

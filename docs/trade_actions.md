@@ -61,7 +61,7 @@ build `TradeCtx`; the runtime derives the route bytes learned during Init
 BaseCheck:
 
 ```rust
-use moonproto::{NewOrderParams, OrderSide};
+use moonproto::{ClosePositionParams, NewOrderParams, OrderSide, SplitOrderParams};
 
 let Some(snapshot) = client.snapshot() else { return; };
 let Some(market) = snapshot.markets().find("BTC") else { return; };
@@ -72,6 +72,9 @@ let _ticket = client.trade().new_order(
 )?;
 
 client.trade().join_orders_for_market(&market, OrderSide::Long)?;
+client.trade().split_order(SplitOrderParams::for_market(&market, 3))?;
+client.trade().close_position(ClosePositionParams::for_market(&market))?;
+client.trade().close_position(ClosePositionParams::market_order_for_market(&market))?;
 client.trade().limit_close_position_for_market(&market, OrderSide::Long)?;
 client.trade().penalty_for_market(&market)?;
 ```
@@ -112,6 +115,15 @@ before sending.
 Market-level helpers have the same split: terminal UI should keep the selected
 `MarketHandle` and call `*_for_market` methods or `...Params::for_market`.
 String-keyed methods remain for scripts and one-shot tools.
+
+`SplitOrderParams::for_market` means the normal equal-parts split. The small
+strategy-piece buttons use `strategy_piece_for_market` or
+`strategy_piece_and_sell_for_market`, so application code does not pass raw
+split-mode booleans.
+
+`ClosePositionParams::for_market` means the Delphi default: place closing limit
+orders for the current position. Use `market_order_for_market` only for the
+explicit force-market-close button.
 
 ## Init Gate
 

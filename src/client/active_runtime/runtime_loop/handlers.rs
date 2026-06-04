@@ -484,8 +484,8 @@ pub(super) fn handle_trade_action(
                 ctx,
                 &params.market,
                 params.parts,
-                params.split_small,
-                params.split_small_sell,
+                params.is_strategy_piece(),
+                params.sells_strategy_piece(),
             ))
         }
         RuntimeTradeCommandKind::MoveAllSells {
@@ -504,7 +504,7 @@ pub(super) fn handle_trade_action(
         }
         RuntimeTradeCommandKind::ClosePosition(params) => {
             let ctx = client.random_trade_ctx()?;
-            Ok(client.do_close_position(ctx, &params.market, params.market_sell))
+            Ok(client.do_close_position(ctx, &params.market, params.uses_market_order()))
         }
         RuntimeTradeCommandKind::LimitClosePosition { market_name, side } => {
             let ctx = client.random_trade_ctx()?;
