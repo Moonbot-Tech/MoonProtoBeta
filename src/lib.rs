@@ -107,7 +107,8 @@
 //! - [`state`] — Active Lib read models: Orders / OrderBooks / Trades /
 //!   Balances / Strats / Settings / Markets.
 //! - [`key_import`] — parser for base64 MoonBot exported keys.
-//! - [`ntp`] — SNTP client and Delphi-style process-level syncer.
+//! - [`time`] — `MoonTime` and timestamp helpers. The Delphi-style NTP syncer
+//!   is owned by the runtime and is not a normal application module.
 //!
 //! The low-level wire layers (compression, crypto, framing, and transport modes
 //! V0/V1/V2) are crate-internal implementation details; the high-level API above

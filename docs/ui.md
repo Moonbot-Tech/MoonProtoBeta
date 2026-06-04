@@ -310,6 +310,10 @@ Common settings controls:
 | Arbitrage display options | platform checklist + display toggles | `arb_config.is_wanted(...)`, `set_wanted(...)`, `wanted_platforms()`, plus display flags |
 | AutoStart pages | settings sub-panels | `auto_start_config()`, `auto_start_config2()` typed views |
 
+The arb platform mask is deliberately exposed through `ArbPlatformCode`
+helpers, not as a public `[bool; 256]` table. UI code should label and edit
+platform rows by code/metadata instead of indexing a raw protocol byte.
+
 `fixed_sell_price` is not the best source for drawing the selected fixed-sell
 button: MoonBot derives the active fixed price from the selected fixed-sell
 preset after applying settings. Use the fixed-sell helpers for UI display and

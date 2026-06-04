@@ -338,7 +338,11 @@ pub struct AutoStartConfig2 {
 #[derive(Debug, Clone)]
 pub struct ArbConfigCompact {
     /// 256-bit "wanted platform" mask, matching Delphi `set of byte`.
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub wanted: [bool; 256],
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) wanted: [bool; 256],
     pub show_absolute: bool,
     pub show_numbers: bool,
     pub show_lines: bool,
