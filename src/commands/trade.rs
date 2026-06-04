@@ -60,6 +60,58 @@ pub use trace::{BulkReplaceNotify, CorridorUpdate, OrderTracePoint};
 
 const MAX_ALL_STATUSES_ORDERS: usize = u16::MAX as usize + 1;
 
+/// Long/short filter for bulk order actions.
+///
+/// This is the user-facing form of Delphi `TFixedPosition`: terminal code picks
+/// which visible position side the button applies to, while the wire byte stays
+/// inside the serializer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PositionFilter {
+    Both,
+    Long,
+    Short,
+}
+
+impl PositionFilter {
+    pub(crate) const fn to_fixed_position(self) -> FixedPosition {
+        match self {
+            Self::Both => FixedPosition::Both,
+            Self::Long => FixedPosition::Long,
+            Self::Short => FixedPosition::Short,
+        }
+    }
+}
+
+/// Trader-visible bulk replace mode.
+///
+/// This is the user-facing form of Delphi `TReplaceMultiKind`. It describes
+/// how MoonBot chooses target orders for the bulk move; the numeric command
+/// mode remains an internal wire detail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BulkMoveKind {
+    Shift,
+    TopVolume,
+    LowVolume,
+    TopProfit,
+    All,
+    LastSet,
+    LastMoved,
+}
+
+impl BulkMoveKind {
+    pub(crate) const fn to_replace_multi_kind(self) -> ReplaceMultiKind {
+        match self {
+            Self::Shift => ReplaceMultiKind::Shift,
+            Self::TopVolume => ReplaceMultiKind::TopVol,
+            Self::LowVolume => ReplaceMultiKind::LowVol,
+            Self::TopProfit => ReplaceMultiKind::TopProfit,
+            Self::All => ReplaceMultiKind::All,
+            Self::LastSet => ReplaceMultiKind::LastSet,
+            Self::LastMoved => ReplaceMultiKind::LastMoved,
+        }
+    }
+}
+
 /// Parameters for `TMoveAllSellsCommand`.
 ///
 /// Applications should create this with the named constructors below. The raw
@@ -76,18 +128,18 @@ pub struct MoveAllSellsParams {
 
 impl MoveAllSellsParams {
     /// Move all matching sell orders with a Delphi bulk-replace mode.
-    pub fn replace_kind(move_kind: ReplaceMultiKind, price: f64, side: FixedPosition) -> Self {
+    pub fn replace_kind(move_kind: BulkMoveKind, price: f64, side: PositionFilter) -> Self {
         Self {
             cmd_type: MoveAllCmdType::MoveKind,
-            move_kind,
+            move_kind: move_kind.to_replace_multi_kind(),
             price,
             price_zone: PriceZone::default(),
-            side,
+            side: side.to_fixed_position(),
         }
     }
 
     /// Move sell orders whose current price is inside `[min_price, max_price]`.
-    pub fn price_zone(min_price: f64, max_price: f64, side: FixedPosition) -> Self {
+    pub fn price_zone(min_price: f64, max_price: f64, side: PositionFilter) -> Self {
         Self {
             cmd_type: MoveAllCmdType::PriceZone,
             move_kind: ReplaceMultiKind::None,
@@ -96,18 +148,18 @@ impl MoveAllSellsParams {
                 min_p: min_price,
                 max_p: max_price,
             },
-            side,
+            side: side.to_fixed_position(),
         }
     }
 
     /// Delphi `%`/personal mode for sell-side bulk move.
-    pub fn percent(price: f64, side: FixedPosition) -> Self {
+    pub fn percent(price: f64, side: PositionFilter) -> Self {
         Self {
             cmd_type: MoveAllCmdType::Pers,
             move_kind: ReplaceMultiKind::None,
             price,
             price_zone: PriceZone::default(),
-            side,
+            side: side.to_fixed_position(),
         }
     }
 }
@@ -127,22 +179,22 @@ pub struct MoveAllBuysParams {
 
 impl MoveAllBuysParams {
     /// Move all matching buy orders with a Delphi bulk-replace mode.
-    pub fn replace_kind(move_kind: ReplaceMultiKind, price: f64, side: FixedPosition) -> Self {
+    pub fn replace_kind(move_kind: BulkMoveKind, price: f64, side: PositionFilter) -> Self {
         Self {
             cmd_type: MoveAllBuysCmdType::MoveKind,
-            move_kind,
+            move_kind: move_kind.to_replace_multi_kind(),
             price,
-            side,
+            side: side.to_fixed_position(),
         }
     }
 
     /// Delphi `%`/personal mode for buy-side bulk move.
-    pub fn percent(price: f64, side: FixedPosition) -> Self {
+    pub fn percent(price: f64, side: PositionFilter) -> Self {
         Self {
             cmd_type: MoveAllBuysCmdType::Pers,
             move_kind: ReplaceMultiKind::None,
             price,
-            side,
+            side: side.to_fixed_position(),
         }
     }
 }

@@ -1,7 +1,7 @@
 //! Read-only accessors for the orders read-model.
 
 use super::{MarketPositionProtection, Order, Orders, PositionProtectionSide};
-use crate::commands::trade::{FixedPosition, OrderWorkerStatus};
+use crate::commands::trade::{OrderWorkerStatus, PositionFilter};
 
 impl Orders {
     /// Get one order by UID.
@@ -32,7 +32,7 @@ impl Orders {
     ///
     /// Counts active non-emulator `OS_SellSet` workers for the requested market
     /// and side, summing `pSellOrder.QuantityRemaining`.
-    pub fn total_sell_quantity(&self, market_name: &str, side: FixedPosition) -> f64 {
+    pub fn total_sell_quantity(&self, market_name: &str, side: PositionFilter) -> f64 {
         self.map
             .values()
             .map(AsRef::as_ref)
@@ -53,16 +53,20 @@ impl Orders {
         short_pos_size: f64,
     ) -> MarketPositionProtection {
         MarketPositionProtection {
-            both: self.position_protection_side(market_name, FixedPosition::Both, both_pos_size),
-            long: self.position_protection_side(market_name, FixedPosition::Long, long_pos_size),
-            short: self.position_protection_side(market_name, FixedPosition::Short, short_pos_size),
+            both: self.position_protection_side(market_name, PositionFilter::Both, both_pos_size),
+            long: self.position_protection_side(market_name, PositionFilter::Long, long_pos_size),
+            short: self.position_protection_side(
+                market_name,
+                PositionFilter::Short,
+                short_pos_size,
+            ),
         }
     }
 
     fn position_protection_side(
         &self,
         market_name: &str,
-        side: FixedPosition,
+        side: PositionFilter,
         position_size: f64,
     ) -> PositionProtectionSide {
         let closing_sell_quantity = self.total_sell_quantity(market_name, side);
@@ -78,7 +82,7 @@ impl Orders {
         }
     }
 
-    fn is_proper_sell_for_position(order: &Order, market_name: &str, side: FixedPosition) -> bool {
+    fn is_proper_sell_for_position(order: &Order, market_name: &str, side: PositionFilter) -> bool {
         if order.market_name != market_name
             || order.emulator_mode
             || order.status != OrderWorkerStatus::SellSet
@@ -86,9 +90,9 @@ impl Orders {
             return false;
         }
         match side {
-            FixedPosition::Long => !order.is_short,
-            FixedPosition::Short => order.is_short,
-            _ => true,
+            PositionFilter::Long => !order.is_short,
+            PositionFilter::Short => order.is_short,
+            PositionFilter::Both => true,
         }
     }
 }

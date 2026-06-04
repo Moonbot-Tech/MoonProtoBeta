@@ -1,6 +1,6 @@
 //! Order read-model and action/event types.
 
-use crate::commands::trade::{FixedPosition, OrderType, OrderWorkerStatus, TradeCtx};
+use crate::commands::trade::{OrderType, OrderWorkerStatus, PositionFilter, TradeCtx};
 #[cfg(any(test, feature = "diagnostics"))]
 use crate::time::DelphiTime;
 use crate::MoonTime;
@@ -125,7 +125,7 @@ pub(crate) struct PanicSellSend {
 /// either mismatch.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PositionProtectionSide {
-    pub side: FixedPosition,
+    pub side: PositionFilter,
     pub position_size: f64,
     pub closing_sell_quantity: f64,
     pub difference: f64,
@@ -136,7 +136,7 @@ pub struct PositionProtectionSide {
 impl Default for PositionProtectionSide {
     fn default() -> Self {
         Self {
-            side: FixedPosition::Both,
+            side: PositionFilter::Both,
             position_size: 0.0,
             closing_sell_quantity: 0.0,
             difference: 0.0,

@@ -167,15 +167,15 @@ fn position_protection_counts_active_non_emulator_sell_workers_by_side() {
     orders.apply(order_status_cmd(buy_set));
 
     assert_eq!(
-        orders.total_sell_quantity("BTCUSDT", FixedPosition::Both),
+        orders.total_sell_quantity("BTCUSDT", PositionFilter::Both),
         3.5
     );
     assert_eq!(
-        orders.total_sell_quantity("BTCUSDT", FixedPosition::Long),
+        orders.total_sell_quantity("BTCUSDT", PositionFilter::Long),
         1.5
     );
     assert_eq!(
-        orders.total_sell_quantity("BTCUSDT", FixedPosition::Short),
+        orders.total_sell_quantity("BTCUSDT", PositionFilter::Short),
         2.0
     );
 

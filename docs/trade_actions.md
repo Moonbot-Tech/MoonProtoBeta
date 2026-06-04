@@ -83,11 +83,11 @@ Bulk buy/sell moves use named constructors for the trader-visible mode. The
 runtime still serializes the exact Delphi packet mode internally:
 
 ```rust
-use moonproto::{FixedPosition, MoveAllBuysParams, ReplaceMultiKind};
+use moonproto::{BulkMoveKind, MoveAllBuysParams, PositionFilter};
 
 client.trade().move_all_buys_for_market(
     &market,
-    MoveAllBuysParams::replace_kind(ReplaceMultiKind::TopVol, 50_100.0, FixedPosition::Long),
+    MoveAllBuysParams::replace_kind(BulkMoveKind::TopVolume, 50_100.0, PositionFilter::Long),
 )?;
 ```
 

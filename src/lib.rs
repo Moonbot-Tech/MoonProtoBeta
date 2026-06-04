@@ -194,7 +194,7 @@ pub use commands::strategy_serializer::{
     field_names, FieldValue, StrategyActiveMode, StrategyFields, StrategyKind, StrategySnapshot,
 };
 pub use commands::trade::{
-    ExchangeOrder, FixedPosition, OrderSubType, OrderType, OrderWorkerStatus, ReplaceMultiKind,
+    BulkMoveKind, ExchangeOrder, OrderSubType, OrderType, OrderWorkerStatus, PositionFilter,
     StopSettings,
 };
 #[cfg(feature = "diagnostics")]
