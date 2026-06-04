@@ -115,11 +115,32 @@ impl WatcherFillEvent {
 pub struct WatcherFillsEvent {
     pub(crate) market_index: u16,
     pub market_name: Arc<str>,
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
     pub user: [u8; 20],
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) user: [u8; 20],
     pub fills: Vec<WatcherFillEvent>,
 }
 
 impl WatcherFillsEvent {
+    /// HyperDex user address bytes from Delphi `THLAddress`.
+    pub fn user(&self) -> &[u8; 20] {
+        &self.user
+    }
+
+    /// HyperDex user address formatted like Delphi `HLAddressToHex(..., true)`.
+    pub fn user_hex(&self) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut out = String::with_capacity(42);
+        out.push_str("0x");
+        for b in self.user {
+            out.push(HEX[(b >> 4) as usize] as char);
+            out.push(HEX[(b & 0x0f) as usize] as char);
+        }
+        out
+    }
+
     /// Server-local market index retained for protocol diagnostics.
     ///
     /// Normal UI code should use [`Self::market_name`] and market handles from
