@@ -7,12 +7,13 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-pub const SECONDS_PER_DAY: f64 = 86_400.0;
-pub const MILLISECONDS_PER_DAY: f64 = 86_400_000.0;
-pub const MILLIS_PER_SECOND: i64 = 1_000;
-pub const MILLIS_PER_MINUTE: i64 = 60 * MILLIS_PER_SECOND;
-pub const MILLIS_PER_HOUR: i64 = 60 * MILLIS_PER_MINUTE;
-pub const UNIX_EPOCH_AS_DELPHI_DAYS: f64 = 25_569.0;
+#[cfg(any(test, feature = "diagnostics"))]
+pub(crate) const SECONDS_PER_DAY: f64 = 86_400.0;
+pub(crate) const MILLISECONDS_PER_DAY: f64 = 86_400_000.0;
+pub(crate) const MILLIS_PER_SECOND: i64 = 1_000;
+pub(crate) const MILLIS_PER_MINUTE: i64 = 60 * MILLIS_PER_SECOND;
+pub(crate) const MILLIS_PER_HOUR: i64 = 60 * MILLIS_PER_MINUTE;
+pub(crate) const UNIX_EPOCH_AS_DELPHI_DAYS: f64 = 25_569.0;
 
 /// Public MoonProto timestamp.
 ///
