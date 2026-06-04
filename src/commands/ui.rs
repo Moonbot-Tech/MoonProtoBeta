@@ -392,10 +392,8 @@ impl ArbConfigCompact {
 /// Source: MoonProtoUIStruct.pas:115-118.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EmuTradePoint {
-    /// Delta from `BaseTime` in milliseconds.
-    pub time_delta_ms: u16,
-    /// Trade price. Negative sign means sell side.
-    pub price: f32,
+    time_delta_ms: u16,
+    price: f32,
 }
 
 /// One drawn chart-pencil point for the MoonBot trade emulator.
@@ -451,6 +449,11 @@ impl EmuTradePoint {
     /// Whether this point represents a sell-side tick.
     pub fn is_sell(self) -> bool {
         self.price.is_sign_negative()
+    }
+
+    /// Delta from the command base time in milliseconds.
+    pub fn time_delta_ms(self) -> u16 {
+        self.time_delta_ms
     }
 
     /// Absolute trade price independent of side.

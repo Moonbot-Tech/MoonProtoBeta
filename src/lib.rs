@@ -197,9 +197,12 @@ pub use commands::trade::{
     ExchangeOrder, FixedPosition, OrderSubType, OrderType, OrderWorkerStatus, ReplaceMultiKind,
     StopSettings,
 };
+#[cfg(feature = "diagnostics")]
+#[doc(hidden)]
+pub use commands::ui::TriggerAction;
 pub use commands::ui::{
     ArbConfigCompact, AutoStartConfig, AutoStartConfig2, ClientSettingsCommand, JoinSellKind,
-    LevManage, ResetProfitKind, SpotMarketKind, TempBlacklistEntry, TriggerAction,
+    LevManage, ResetProfitKind, SpotMarketKind, TempBlacklistEntry,
 };
 // Parameter types named by public high-level handle methods but defined in
 // command submodules (`MoonTrade::move_all_sells`/`move_all_buys`,

@@ -666,13 +666,7 @@ impl MoonSettings<'_> {
         self.client.manage_leverage(cmd.clone())
     }
 
-    /// Send a trigger-management command (`TTriggerManageCommand`, CmdId 10).
-    ///
-    /// `market_names` are regular terminal market names. The runtime resolves
-    /// them to the current server indexes when the command is queued, matching
-    /// Delphi UI code: users select `TMarket` objects, and `mIndex` is only the
-    /// final wire detail.
-    pub fn manage_triggers_for_markets<I, S>(
+    fn manage_triggers_for_markets_inner<I, S>(
         &self,
         action: crate::commands::ui::TriggerAction,
         market_names: I,
@@ -697,7 +691,7 @@ impl MoonSettings<'_> {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        self.manage_triggers_for_markets(
+        self.manage_triggers_for_markets_inner(
             crate::commands::ui::TriggerAction::Set,
             market_names,
             keys,
@@ -714,7 +708,7 @@ impl MoonSettings<'_> {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        self.manage_triggers_for_markets(
+        self.manage_triggers_for_markets_inner(
             crate::commands::ui::TriggerAction::Clear,
             market_names,
             keys,
@@ -892,15 +886,14 @@ where
                 usize::from(u16::MAX) + 1,
             ));
         }
-        let mut price = point.price;
-        if price < prev_price {
-            price = -price;
-        }
-        prev_price = price.abs();
-        out.push(crate::EmuTradePoint {
-            time_delta_ms: delta_ms as u16,
-            price,
-        });
+        let price = point.price;
+        let emu_point = if price < prev_price {
+            crate::EmuTradePoint::sell(delta_ms as u16, price)
+        } else {
+            crate::EmuTradePoint::buy(delta_ms as u16, price)
+        };
+        prev_price = emu_point.abs_price();
+        out.push(emu_point);
     }
     Ok(out)
 }
@@ -1059,18 +1052,9 @@ mod tests {
         assert_eq!(
             out,
             vec![
-                crate::EmuTradePoint {
-                    time_delta_ms: 0,
-                    price: 101.0,
-                },
-                crate::EmuTradePoint {
-                    time_delta_ms: 500,
-                    price: -99.0,
-                },
-                crate::EmuTradePoint {
-                    time_delta_ms: 1000,
-                    price: 100.0,
-                },
+                crate::EmuTradePoint::buy(0, 101.0),
+                crate::EmuTradePoint::sell(500, 99.0),
+                crate::EmuTradePoint::buy(1000, 100.0),
             ]
         );
     }

@@ -81,10 +81,7 @@ fn emu_trade_point_uses_private_wire_struct() {
     assert_eq!(std::mem::size_of::<WireEmuTradePoint>(), 6);
     assert_eq!(EMU_TRADE_POINT_SIZE, 6);
 
-    let point = EmuTradePoint {
-        time_delta_ms: 65535,
-        price: -0.0,
-    };
+    let point = EmuTradePoint::sell(65535, 0.0);
     let mut bytes = Vec::new();
     point.write_to(&mut bytes);
 
@@ -94,19 +91,19 @@ fn emu_trade_point_uses_private_wire_struct() {
     assert_eq!(bytes, expected);
 
     let parsed = EmuTradePoint::from_bytes(&bytes).expect("valid TEmuTradePoint");
-    assert_eq!(parsed.time_delta_ms, 65535);
+    assert_eq!(parsed.time_delta_ms(), 65535);
     assert_eq!(parsed.price.to_bits(), (-0.0f32).to_bits());
 }
 
 #[test]
 fn emu_trade_point_public_constructors_encode_side() {
     let buy = EmuTradePoint::buy(10, -100.5);
-    assert_eq!(buy.time_delta_ms, 10);
+    assert_eq!(buy.time_delta_ms(), 10);
     assert_eq!(buy.abs_price(), 100.5);
     assert!(!buy.is_sell());
 
     let sell = EmuTradePoint::sell(20, 101.25);
-    assert_eq!(sell.time_delta_ms, 20);
+    assert_eq!(sell.time_delta_ms(), 20);
     assert_eq!(sell.abs_price(), 101.25);
     assert!(sell.is_sell());
 }
@@ -114,18 +111,9 @@ fn emu_trade_point_public_constructors_encode_side() {
 #[test]
 fn emu_trades_roundtrip() {
     let points = vec![
-        EmuTradePoint {
-            time_delta_ms: 0,
-            price: 100.5,
-        },
-        EmuTradePoint {
-            time_delta_ms: 1500,
-            price: -101.2,
-        }, // sell
-        EmuTradePoint {
-            time_delta_ms: 3000,
-            price: 99.8,
-        },
+        EmuTradePoint::buy(0, 100.5),
+        EmuTradePoint::sell(1500, 101.2),
+        EmuTradePoint::buy(3000, 99.8),
     ];
     let raw = build_emu_trades(3, 42, 45123.5, &points);
     match UICommand::parse(&raw).unwrap() {
@@ -230,16 +218,7 @@ fn ui_word_count_parsers_keep_declared_count_with_zero_tail() {
         UICommand::EmuTrades(e) => {
             assert_eq!(
                 e.points,
-                vec![
-                    EmuTradePoint {
-                        time_delta_ms: 123,
-                        price: -77.5,
-                    },
-                    EmuTradePoint {
-                        time_delta_ms: 0,
-                        price: 0.0,
-                    },
-                ]
+                vec![EmuTradePoint::sell(123, 77.5), EmuTradePoint::buy(0, 0.0),]
             );
         }
         _ => panic!("wrong variant"),
