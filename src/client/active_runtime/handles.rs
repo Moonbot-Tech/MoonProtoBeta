@@ -527,6 +527,18 @@ impl MoonAccount<'_> {
         self.client.set_leverage(market, new_leverage)
     }
 
+    /// Set leverage for a retained selected market through Engine API.
+    ///
+    /// This is the normal terminal path: the UI finds a `MarketHandle` once and
+    /// reuses it for chart/actions instead of resolving a market name again.
+    pub fn set_leverage_for(
+        &self,
+        market: &crate::state::MarketHandle,
+        new_leverage: i32,
+    ) -> Result<EngineActionTicket, MoonClientError> {
+        self.set_leverage(market.name(), new_leverage)
+    }
+
     /// Set account hedge mode through Engine API.
     pub fn set_hedge_mode(&self, hedge_mode: bool) -> Result<EngineActionTicket, MoonClientError> {
         self.client.set_hedge_mode(hedge_mode)
@@ -546,12 +558,29 @@ impl MoonAccount<'_> {
         self.client.change_position_type(market, position_type)
     }
 
+    /// Change position type for a retained selected market through Engine API.
+    pub fn change_position_type_for(
+        &self,
+        market: &crate::state::MarketHandle,
+        position_type: crate::commands::market::PositionType,
+    ) -> Result<EngineActionTicket, MoonClientError> {
+        self.change_position_type(market.name(), position_type)
+    }
+
     /// Confirm risk limit for a market through Engine API.
     pub fn confirm_risk_limit(
         &self,
         market: impl AsRef<str>,
     ) -> Result<EngineActionTicket, MoonClientError> {
         self.client.confirm_risk_limit(market)
+    }
+
+    /// Confirm risk limit for a retained selected market through Engine API.
+    pub fn confirm_risk_limit_for(
+        &self,
+        market: &crate::state::MarketHandle,
+    ) -> Result<EngineActionTicket, MoonClientError> {
+        self.confirm_risk_limit(market.name())
     }
 
     /// Set MA mode through Engine API.

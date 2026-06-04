@@ -203,7 +203,11 @@ through the matching domain snapshots/events.
 
 ```rust
 client.account().refresh_hedge_mode()?;
-let ticket = client.account().set_leverage("BTCUSDT", 20)?;
+if let Some(snapshot) = client.snapshot() {
+    if let Some(market) = snapshot.markets().find("BTC") {
+        let _ticket = client.account().set_leverage_for(&market, 20)?;
+    }
+}
 client.account().set_hedge_mode(true)?;
 client.account().cancel_all_orders()?;
 ```
@@ -463,12 +467,12 @@ if let Some(snapshot) = client.snapshot() {
         let _coin_card_ticket = client
             .candles()
             .request_coin_card_for(&market, moonproto::DeepHistoryKind::Hour4)?;
+        client.account().set_leverage_for(&market, 20)?;
+        client.account().confirm_risk_limit_for(&market)?;
     }
 }
 client.settings().refresh()?; // async; read Event::Settings + snapshot().settings()
-client.account().set_leverage("BTCUSDT", 20)?;
 client.account().set_hedge_mode(true)?;
-client.account().confirm_risk_limit("BTCUSDT")?;
 ```
 
 `candles().request_coin_card_for(&market, kind)` is intentionally non-blocking
@@ -478,6 +482,10 @@ fills `TMarket.CoinCardCandles`. In Rust, completion arrives as
 `Event::CoinCardCandles` and the rows are readable through
 `snapshot().coin_card_candles_for(&market, kind)`. The string-keyed
 `request_coin_card(market, kind)` variant is a convenience for scripts/tools.
+The same selected-market rule applies to account actions such as
+`set_leverage_for`, `change_position_type_for`, and `confirm_risk_limit_for`;
+string-keyed variants remain for scripts/tools that do not keep
+`MarketHandle`s.
 
 Chunked candles use a dedicated aggregator rather than the normal one-response
 pending slot. Active Lib sends the full 5m snapshot request automatically after

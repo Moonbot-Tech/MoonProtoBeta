@@ -18,7 +18,7 @@ Use these non-blocking calls from UI/application code:
 | Orders snapshot | `orders().request_snapshot()` | order events, `snapshot().orders()` |
 | UI settings | `settings().refresh()` | `Event::Settings`, `snapshot().settings()` |
 | CoinCard candles | `candles().request_coin_card_for(&market, kind)` | `Event::CoinCardCandles`, `snapshot().coin_card_candles_for(&market, kind)` |
-| Account mutations | `account().set_leverage`, `account().set_hedge_mode`, `account().cancel_all_orders`, `account().change_position_type(market, position_type)`, `balances().convert_dust_bnb`, `account().confirm_risk_limit`, `account().set_ma_mode`, `balances().transfer_asset`, `streams().reload_order_book` | `Event::EngineAction` and normal retained state updates |
+| Account mutations | `account().set_leverage_for(&market, ...)`, `account().set_hedge_mode`, `account().cancel_all_orders`, `account().change_position_type_for(&market, position_type)`, `balances().convert_dust_bnb`, `account().confirm_risk_limit_for(&market)`, `account().set_ma_mode`, `balances().transfer_asset`, `streams().reload_order_book` | `Event::EngineAction` and normal retained state updates |
 
 Example:
 
