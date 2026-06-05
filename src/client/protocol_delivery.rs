@@ -1,5 +1,17 @@
 use super::protocol_core::ProtocolCore;
 use super::*;
+use std::any::Any;
+use std::panic::{catch_unwind, AssertUnwindSafe};
+
+fn panic_payload_message(payload: &(dyn Any + Send)) -> String {
+    if let Some(msg) = payload.downcast_ref::<&'static str>() {
+        (*msg).to_owned()
+    } else if let Some(msg) = payload.downcast_ref::<String>() {
+        msg.clone()
+    } else {
+        "non-string panic payload".to_owned()
+    }
+}
 
 impl ProtocolCore<'_> {
     pub(crate) fn apply_recv_side_effects(&mut self, recv_bytes: u64, timestamp_ms: i64) {
@@ -20,29 +32,10 @@ impl ProtocolCore<'_> {
         cur_tm: i64,
         mode: &mut RunMode<'_>,
     ) {
-        match mode {
-            RunMode::Dispatcher {
-                dispatcher,
-                on_event,
-                event_buf,
-                ..
-            } => {
-                event_buf.clear();
-                dispatcher.drain_deferred_order_removals_due(cur_tm, event_buf);
-                on_event.drain_events(
-                    event_buf,
-                    dispatcher,
-                    &self.client.metrics.protocol_metrics,
-                    None,
-                    u8::MAX,
-                    0,
-                );
-            }
-            #[cfg(test)]
-            RunMode::Callback { .. } | RunMode::CallbackQueue { .. } => {}
-            #[cfg(not(test))]
-            RunMode::_Lifetime(_) => {}
-        }
+        mode.event_buf.clear();
+        mode.dispatcher
+            .drain_deferred_order_removals_due(cur_tm, &mut mode.event_buf);
+        mode.drain_events(&self.client.metrics.protocol_metrics, None, u8::MAX, 0);
     }
 
     pub(crate) fn client_new_data(
@@ -73,30 +66,6 @@ impl ProtocolCore<'_> {
                 "domain command {:?} skipped before InitDone/domain_ready", command);
             return;
         }
-        let pre_init_latched_domain = is_domain_push_command(command)
-            && !self.client.subscriptions.domain_ready
-            && incoming_allowed_before_domain_ready(command, &payload);
-        if pre_init_latched_domain {
-            match mode {
-                #[cfg(test)]
-                RunMode::Callback { .. } | RunMode::CallbackQueue { .. } => {
-                    if trace_io_enabled() {
-                        eprintln!(
-                            "[mp-dispatch-latch-skip] t={} cmd={:?} raw={} payload_len={} payload_hash={:016X} mode=callback",
-                            trace_elapsed_ms(),
-                            command,
-                            cmd,
-                            payload.len(),
-                            fnv1a64(&payload)
-                        );
-                    }
-                    return;
-                }
-                #[cfg(not(test))]
-                RunMode::_Lifetime(_) => {}
-                RunMode::Dispatcher { .. } => {}
-            }
-        }
         if is_trades_stream_command(command) && !self.client.has_trades_subscription_intent() {
             if trace_io_enabled() {
                 eprintln!(
@@ -113,96 +82,82 @@ impl ProtocolCore<'_> {
             return;
         }
 
-        match mode {
-            #[cfg(test)]
-            RunMode::Callback { on_data } => {
-                let mut sink = DispatchSink::Callback(on_data);
-                self.client.client_new_data_decoded(
-                    cmd,
-                    payload,
-                    api_pending_consumed_by_reader,
-                    candles_chunk_consumed_by_reader,
-                    &mut sink,
+        mode.payload_buf.clear();
+        let authorized_before = self.client.authorized;
+        let decode_result = catch_unwind(AssertUnwindSafe(|| {
+            self.client.client_new_data_decoded(
+                cmd,
+                payload,
+                api_pending_consumed_by_reader,
+                candles_chunk_consumed_by_reader,
+                &mut mode.payload_buf,
+            );
+        }));
+        if let Err(panic_payload) = decode_result {
+            mode.payload_buf.clear();
+            mode.event_buf.clear();
+            mode.active_actions_buf.clear();
+            log::error!(target: "moonproto::runtime",
+                "moonproto active decode panicked; dropping {:?} payload and continuing: {}",
+                command,
+                panic_payload_message(panic_payload.as_ref()));
+            return;
+        }
+        if !authorized_before && !self.client.authorized {
+            mode.payload_buf.clear();
+            return;
+        }
+        let mut decoded_payloads = std::mem::take(&mut mode.payload_buf);
+        for (c, p) in decoded_payloads.drain(..) {
+            let dispatch_result = catch_unwind(AssertUnwindSafe(|| {
+                mode.event_buf.clear();
+                mode.active_actions_buf.clear();
+                let ctx = crate::events::ActiveDispatchContext::from_client(self.client);
+                #[cfg(any(test, feature = "diagnostics"))]
+                let active_dispatch_start = Instant::now();
+                mode.dispatcher.dispatch_into_active_actions(
+                    c,
+                    &p,
+                    cur_tm,
+                    &mut mode.event_buf,
+                    &ctx,
+                    &mut mode.active_actions_buf,
                 );
-            }
-            #[cfg(test)]
-            RunMode::CallbackQueue { app_tx } => {
-                let mut sink = DispatchSink::CallbackQueue(app_tx);
-                self.client.client_new_data_decoded(
-                    cmd,
-                    payload,
-                    api_pending_consumed_by_reader,
-                    candles_chunk_consumed_by_reader,
-                    &mut sink,
-                );
-            }
-            RunMode::Dispatcher {
-                dispatcher,
-                on_event,
-                event_buf,
-                payload_buf,
-                active_actions_buf,
-            } => {
-                payload_buf.clear();
-                let authorized_before = self.client.authorized;
-                {
-                    let mut sink = DispatchSink::Buffer(payload_buf);
-                    self.client.client_new_data_decoded(
-                        cmd,
-                        payload,
-                        api_pending_consumed_by_reader,
-                        candles_chunk_consumed_by_reader,
-                        &mut sink,
-                    );
-                }
-                if !authorized_before && !self.client.authorized {
-                    payload_buf.clear();
-                    return;
-                }
-                for (c, p) in payload_buf.drain(..) {
-                    event_buf.clear();
-                    active_actions_buf.clear();
-                    let ctx = crate::events::ActiveDispatchContext::from_client(self.client);
-                    #[cfg(any(test, feature = "diagnostics"))]
-                    let active_dispatch_start = Instant::now();
-                    dispatcher.dispatch_into_active_actions(
-                        c,
-                        &p,
-                        cur_tm,
-                        event_buf,
-                        &ctx,
-                        active_actions_buf,
-                    );
-                    #[cfg(any(test, feature = "diagnostics"))]
-                    let event_count = event_buf.len();
-                    #[cfg(any(test, feature = "diagnostics"))]
-                    let action_count = active_actions_buf.len();
-                    self.client
-                        .apply_active_actions(active_actions_buf.drain(..));
-                    #[cfg(any(test, feature = "diagnostics"))]
-                    self.client
-                        .metrics
-                        .protocol_metrics
-                        .record_active_dispatch_labeled(
-                            active_dispatch_start.elapsed(),
-                            c.to_byte(),
-                            metric_api_method(c, &p),
-                            p.len(),
-                            event_count,
-                            action_count,
-                        );
-                    on_event.drain_events(
-                        event_buf,
-                        dispatcher,
-                        &self.client.metrics.protocol_metrics,
-                        Some(c),
+                #[cfg(any(test, feature = "diagnostics"))]
+                let event_count = mode.event_buf.len();
+                #[cfg(any(test, feature = "diagnostics"))]
+                let action_count = mode.active_actions_buf.len();
+                self.client
+                    .apply_active_actions(mode.active_actions_buf.drain(..));
+                #[cfg(any(test, feature = "diagnostics"))]
+                self.client
+                    .metrics
+                    .protocol_metrics
+                    .record_active_dispatch_labeled(
+                        active_dispatch_start.elapsed(),
+                        c.to_byte(),
                         metric_api_method(c, &p),
                         p.len(),
+                        event_count,
+                        action_count,
                     );
-                }
+                mode.drain_events(
+                    &self.client.metrics.protocol_metrics,
+                    Some(c),
+                    metric_api_method(c, &p),
+                    p.len(),
+                );
+            }));
+            if let Err(panic_payload) = dispatch_result {
+                mode.event_buf.clear();
+                mode.active_actions_buf.clear();
+                log::error!(target: "moonproto::runtime",
+                    "moonproto active dispatch panicked; dropping {:?} payload_len={} and continuing: {}",
+                    c,
+                    p.len(),
+                    panic_payload_message(panic_payload.as_ref()));
             }
-            #[cfg(not(test))]
-            RunMode::_Lifetime(_) => {}
         }
+        mode.payload_buf = decoded_payloads;
     }
 }

@@ -580,10 +580,12 @@ impl NewOrderParams {
 
 /// Client-side ticket returned when a new-order intent is queued.
 ///
-/// `client_order_id` is the client-generated correlation id for this user
-/// intent. The server can echo it in "request -> order uid" logs/events, so UI
-/// code can connect an optimistic click/pending row with the later
-/// server-created order without guessing by market name.
+/// `client_order_id` is only the client-generated outbound label written into
+/// the new-order command. The server does not echo it in the typed order
+/// stream, and the created order is identified only by its server `uid`.
+/// Applications must not attach fills/cancels/PnL to an optimistic row by this
+/// value; once the server creates an order, read it from `snapshot().orders()`
+/// and use the server `uid`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NewOrderTicket {
     pub client_order_id: u64,

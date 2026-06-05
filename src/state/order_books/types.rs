@@ -2,6 +2,9 @@
 
 use std::sync::Arc;
 
+pub type OrderBookReadGuard =
+    parking_lot::ArcRwLockReadGuard<parking_lot::RawRwLock, OrderBookSnapshot>;
+
 /// Orderbook kind: futures or spot. Wire format is one byte.
 ///
 /// Matches Delphi `TBookKind` (MoonProtoOrderBook.pas:5): 0=`bk_Futures`,

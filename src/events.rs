@@ -221,6 +221,8 @@ pub(crate) struct EventDispatcher {
     eps_profile: EpsProfile,
     last_market_history_scope: Option<TradeStorageScope>,
     last_market_history_markets_version: Option<u64>,
+    #[cfg(test)]
+    panic_next_active_dispatch: bool,
 }
 
 impl Default for EventDispatcher {
@@ -258,6 +260,8 @@ impl Default for EventDispatcher {
             eps_profile: EpsProfile::default(),
             last_market_history_scope: None,
             last_market_history_markets_version: None,
+            #[cfg(test)]
+            panic_next_active_dispatch: false,
         }
     }
 }
@@ -265,6 +269,11 @@ impl Default for EventDispatcher {
 impl EventDispatcher {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn panic_next_active_dispatch_for_test(&mut self) {
+        self.panic_next_active_dispatch = true;
     }
 
     #[cfg(any(test, feature = "diagnostics"))]

@@ -52,7 +52,9 @@ for event in client.drain_events() {
 `Apply` is emitted after the retained current book has already been updated.
 For UI code, use the resolved `market_name`, typed `kind`, and `top` fields.
 For the full book of the selected chart, keep `MarketHandle` and read the
-retained `OrderBookSnapshot` through the handle-based snapshot helper.
+retained `OrderBookSnapshot` through the handle-based snapshot helper. The
+returned value is a short-lived read guard over the current per-book object; copy
+or draw the needed levels inside that scope.
 
 Recovery control and ignored-packet notifications are hidden diagnostic
 telemetry. `MoonClient` consumes them internally and requests fresh full books

@@ -348,6 +348,15 @@ categories with `0`.
 trades subscription scope becomes active. Regular applications use
 `MoonClient` snapshots and readers; they do not create workers manually.
 
+The retained-history worker queue is intentionally unbounded. It must not
+backpressure the protocol reader or silently drop trade/order/LastPrice rows
+because of a Rust-only internal cap. Under normal load the worker owns the
+dense rings and applies batches quickly; if an application enables very large
+retained scopes and the worker is kept overloaded for longer than the incoming
+stream can be processed, memory can grow. Keep event callbacks light, use sane
+history capacities/scopes, and use FireTest/diagnostics CPU summaries to catch
+worker overload during integration.
+
 ## Recovery Policy
 
 MoonClient's trades recovery state maintains up to 50 gap buckets. Missing

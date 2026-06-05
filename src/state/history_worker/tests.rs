@@ -257,30 +257,33 @@ fn worker_applies_candles_snapshot_only_for_configured_scope() {
         vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()],
         Some(TradeStorageScope::from_markets(["BTCUSDT"]))
     ));
-    assert!(worker.apply_candles_snapshot(vec![
-        MarketHistoryCandlesSnapshot {
-            market_name: "BTCUSDT".to_string(),
-            candles_5m: vec![Candle5mRow {
-                open: 100.0,
-                close: 101.0,
-                high: 102.0,
-                low: 99.0,
-                volume: 10.0,
-                time: mt(45_000.0),
-            }],
-        },
-        MarketHistoryCandlesSnapshot {
-            market_name: "ETHUSDT".to_string(),
-            candles_5m: vec![Candle5mRow {
-                open: 10.0,
-                close: 11.0,
-                high: 12.0,
-                low: 9.0,
-                volume: 1.0,
-                time: mt(45_000.0),
-            }],
-        },
-    ]));
+    assert!(worker.apply_candles_snapshot(
+        mt(45_000.0),
+        vec![
+            MarketHistoryCandlesSnapshot {
+                market_name: "BTCUSDT".to_string(),
+                candles_5m: vec![Candle5mRow {
+                    open: 100.0,
+                    close: 101.0,
+                    high: 102.0,
+                    low: 99.0,
+                    volume: 10.0,
+                    time: mt(45_000.0),
+                }],
+            },
+            MarketHistoryCandlesSnapshot {
+                market_name: "ETHUSDT".to_string(),
+                candles_5m: vec![Candle5mRow {
+                    open: 10.0,
+                    close: 11.0,
+                    high: 12.0,
+                    low: 9.0,
+                    volume: 1.0,
+                    time: mt(45_000.0),
+                }],
+            },
+        ]
+    ));
     assert!(worker.flush(mt(45_000.0)));
 
     let btc = worker.readers("BTCUSDT").unwrap().candles_5m.unwrap();

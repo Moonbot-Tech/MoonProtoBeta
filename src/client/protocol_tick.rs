@@ -190,13 +190,7 @@ impl ProtocolCore<'_> {
             return;
         }
         self.client.reconnect.last_trades_tick_ms = cur_tm;
-        let trades_server_token = match mode {
-            RunMode::Dispatcher { dispatcher, .. } => dispatcher.trades_server_token(),
-            #[cfg(test)]
-            RunMode::Callback { .. } | RunMode::CallbackQueue { .. } => return,
-            #[cfg(not(test))]
-            RunMode::_Lifetime(_) => return,
-        };
+        let trades_server_token = mode.dispatcher.trades_server_token();
         self.client
             .tick_trades_reconnect_sequence(cur_tm, trades_server_token);
     }
@@ -206,47 +200,22 @@ impl ProtocolCore<'_> {
         cur_tm: i64,
         mode: &mut RunMode<'_>,
     ) {
-        match mode {
-            RunMode::Dispatcher { dispatcher, .. } => {
-                if self.client.tick_orderbook_reconnect_sequence(cur_tm) {
-                    dispatcher.reset_orderbook_caches_keep_books();
-                }
-            }
-            #[cfg(test)]
-            RunMode::Callback { .. } | RunMode::CallbackQueue { .. } => {}
-            #[cfg(not(test))]
-            RunMode::_Lifetime(_) => {}
+        if self.client.tick_orderbook_reconnect_sequence(cur_tm) {
+            mode.dispatcher.reset_orderbook_caches_keep_books();
         }
     }
 
     pub(crate) fn periodic_orders_tick(&mut self, cur_tm: i64, mode: &mut RunMode<'_>) {
-        match mode {
-            RunMode::Dispatcher {
-                dispatcher,
-                on_event,
-                event_buf,
-                active_actions_buf,
-                ..
-            } => {
-                event_buf.clear();
-                active_actions_buf.clear();
-                dispatcher.tick_orders_active_actions(cur_tm, event_buf, active_actions_buf);
-                self.client
-                    .apply_active_actions(active_actions_buf.drain(..));
-                on_event.drain_events(
-                    event_buf,
-                    dispatcher,
-                    &self.client.metrics.protocol_metrics,
-                    None,
-                    u8::MAX,
-                    0,
-                );
-            }
-            #[cfg(test)]
-            RunMode::Callback { .. } | RunMode::CallbackQueue { .. } => {}
-            #[cfg(not(test))]
-            RunMode::_Lifetime(_) => {}
-        }
+        mode.event_buf.clear();
+        mode.active_actions_buf.clear();
+        mode.dispatcher.tick_orders_active_actions(
+            cur_tm,
+            &mut mode.event_buf,
+            &mut mode.active_actions_buf,
+        );
+        self.client
+            .apply_active_actions(mode.active_actions_buf.drain(..));
+        mode.drain_events(&self.client.metrics.protocol_metrics, None, u8::MAX, 0);
     }
 
     pub(crate) fn transport_reconnect_tail_tick(&mut self, cur_tm: i64) {

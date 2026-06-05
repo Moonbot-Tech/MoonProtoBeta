@@ -1,6 +1,5 @@
 use super::*;
 use crate::commands::order_book::OrderLevel;
-use std::sync::Arc;
 
 fn level(rate: f32, quantity: f32) -> OrderLevel {
     OrderLevel { rate, quantity }
@@ -93,27 +92,34 @@ fn full_then_inorder_diffs() {
 }
 
 #[test]
-fn snapshot_cow_mutating_one_book_does_not_deep_clone_other_books() {
+fn snapshot_handle_mutating_one_book_does_not_deep_clone_books_domain() {
     let mut ob = OrderBooks::new();
     let _ = ob.on_packet(make_pkt(1, 0, 10, true), 1000);
     let _ = ob.on_packet(make_pkt(2, 0, 10, true), 1000);
 
     let snapshot = ob.clone();
-    let other_before = ob.books.get(&(2, 0)).unwrap().clone();
+    let root_before = ob.arc_ptr();
+    let book_before = ob.book_slot_ptr((1, 0)).unwrap();
+    let other_before = ob.book_slot_ptr((2, 0)).unwrap();
 
     let _ = ob.on_packet(make_pkt(1, 0, 11, false), 1010);
 
-    assert!(
-        !Arc::ptr_eq(
-            snapshot.books.get(&(1, 0)).unwrap(),
-            ob.books.get(&(1, 0)).unwrap()
-        ),
-        "mutated book must detach from the held snapshot"
+    assert_eq!(
+        ob.arc_ptr(),
+        root_before,
+        "orderbook packet must not copy-on-write detach the whole domain while a snapshot is held"
     );
-    assert!(
-        Arc::ptr_eq(snapshot.books.get(&(2, 0)).unwrap(), &other_before)
-            && Arc::ptr_eq(&other_before, ob.books.get(&(2, 0)).unwrap()),
-        "unmodified books must stay shared; otherwise snapshot COW still clones all book levels"
+    assert_eq!(snapshot.arc_ptr(), root_before);
+    assert_eq!(
+        ob.book_slot_ptr((1, 0)),
+        Some(book_before),
+        "mutating a book updates the shared per-book slot, not a cloned HashMap"
+    );
+    assert_eq!(ob.book_slot_ptr((2, 0)), Some(other_before));
+    assert_eq!(
+        snapshot.book_by_kind(1, 0).unwrap().seq,
+        11,
+        "held snapshot handle sees the same live book object, matching Delphi shared-state semantics"
     );
 }
 
@@ -356,9 +362,8 @@ fn duplicate_gap_packets_are_cached() {
     let _ = ob.on_packet(make_pkt(10, 0, 3, false), 1010);
     let _ = ob.on_packet(make_pkt(10, 0, 3, false), 1020);
 
-    let cache = ob.caches.get(&(10, 0)).unwrap();
     assert_eq!(
-        cache.packets.len(),
+        ob.cache_packet_len((10, 0)).unwrap(),
         2,
         "TOrderBookCache.Add inserts duplicate seq packets; stale cleanup happens during drain"
     );
@@ -377,9 +382,8 @@ fn normal_gap_overflow_enters_corrupted_without_clearing_cache() {
             .any(|e| matches!(e, OrderBookEvent::RequestFullNeeded { .. }));
     }
 
-    let cache = ob.caches.get(&(11, 0)).unwrap();
     assert!(
-        cache.corrupted,
+        ob.cache_corrupted((11, 0)).unwrap(),
         "Count > BOOK_CACHE_MAX_PACKETS moves the cache into corrupted"
     );
     assert!(
@@ -387,7 +391,7 @@ fn normal_gap_overflow_enters_corrupted_without_clearing_cache() {
         "TryRequestFull must fire when entering corrupted"
     );
     assert_eq!(
-        cache.packets.len(),
+        ob.cache_packet_len((11, 0)).unwrap(),
         65,
         "Delphi normal-mode does not clear the cache on overflow; the 65th gap packet stays in the list"
     );
@@ -402,10 +406,9 @@ fn corrupted_mode_drops_oldest_before_add() {
     }
 
     let _ = ob.on_packet(make_pkt(12, 0, 68, false), 2000);
-    let cache = ob.caches.get(&(12, 0)).unwrap();
-    assert_eq!(cache.packets.len(), 65);
+    assert_eq!(ob.cache_packet_len((12, 0)).unwrap(), 65);
     assert_eq!(
-        cache.packets.front().map(|p| p.seq),
+        ob.cache_front_seq((12, 0)),
         Some(4),
         "in corrupted mode Delphi DropOldest runs before adding the new diff"
     );

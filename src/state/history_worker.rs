@@ -136,7 +136,10 @@ enum MarketHistoryCommand {
     },
     StreamBatch(MarketHistoryStreamBatch),
     LastPriceBatch(MarketHistoryLastPriceBatch),
-    CandlesSnapshot(Vec<MarketHistoryCandlesSnapshot>),
+    CandlesSnapshot {
+        now_time: MoonTime,
+        markets: Vec<MarketHistoryCandlesSnapshot>,
+    },
     Barrier {
         reply: mpsc::SyncSender<()>,
     },
@@ -202,9 +205,10 @@ impl MarketHistoryWorker {
     #[cfg(test)]
     pub(crate) fn apply_candles_snapshot(
         &self,
+        now_time: MoonTime,
         markets: Vec<MarketHistoryCandlesSnapshot>,
     ) -> bool {
-        self.handle.apply_candles_snapshot(markets)
+        self.handle.apply_candles_snapshot(now_time, markets)
     }
 
     #[cfg(test)]
@@ -332,7 +336,8 @@ impl MarketHistoryHandle {
     /// Queue one decoded trades packet for retained-history storage.
     ///
     /// The channel is intentionally unbounded: retained history must not drop
-    /// packets because of an internal Rust-only capacity cap.
+    /// packets because of an internal Rust-only capacity cap. Sustained worker
+    /// overload is a memory-pressure condition, not a silent data-loss policy.
     pub(crate) fn send_stream_batch(&self, batch: MarketHistoryStreamBatch) -> bool {
         self.tx
             .send(MarketHistoryCommand::StreamBatch(batch))
@@ -343,7 +348,8 @@ impl MarketHistoryHandle {
     ///
     /// The channel is intentionally unbounded for the same reason as stream
     /// batches: retained history must not drop rows because of a hidden
-    /// Rust-only capacity cap.
+    /// Rust-only capacity cap. If this queue grows, the fix is reducing worker
+    /// cost/scope, not dropping LastPrice rows behind the user's back.
     pub(crate) fn send_last_price_batch(&self, batch: MarketHistoryLastPriceBatch) -> bool {
         self.tx
             .send(MarketHistoryCommand::LastPriceBatch(batch))
@@ -352,10 +358,11 @@ impl MarketHistoryHandle {
 
     pub(crate) fn apply_candles_snapshot(
         &self,
+        now_time: MoonTime,
         markets: Vec<MarketHistoryCandlesSnapshot>,
     ) -> bool {
         self.tx
-            .send(MarketHistoryCommand::CandlesSnapshot(markets))
+            .send(MarketHistoryCommand::CandlesSnapshot { now_time, markets })
             .is_ok()
     }
 
@@ -486,8 +493,8 @@ fn handle_worker_command(
             *last_now_time = moon_time_from_delphi_days(batch.now_time);
             process_last_price_batch(registry, batch);
         }
-        Ok(MarketHistoryCommand::CandlesSnapshot(markets)) => {
-            process_candles_snapshot(registry, markets);
+        Ok(MarketHistoryCommand::CandlesSnapshot { now_time, markets }) => {
+            process_candles_snapshot(registry, now_time, markets);
         }
         Ok(MarketHistoryCommand::Barrier { reply }) => {
             let _ = reply.send(());
@@ -621,13 +628,14 @@ fn process_stream_batch(registry: &mut MarketHistoryRegistry, batch: MarketHisto
 
 fn process_candles_snapshot(
     registry: &mut MarketHistoryRegistry,
+    now_time: MoonTime,
     markets: Vec<MarketHistoryCandlesSnapshot>,
 ) {
     for market in markets {
         let Some(store) = registry.get_mut(&market.market_name) else {
             continue;
         };
-        store.replace_candles_5m_from_snapshot(&market.candles_5m);
+        store.replace_candles_5m_from_snapshot(&market.candles_5m, now_time);
     }
 }
 

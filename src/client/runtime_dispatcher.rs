@@ -14,23 +14,14 @@ impl OwnedRuntimeStepper {
         client: &mut Client,
         dispatcher: &mut crate::events::EventDispatcher,
     ) -> bool {
-        let mut mode = RunMode::Dispatcher {
+        let mut mode = RunMode::with_buffers(
             dispatcher,
-            on_event: DispatcherEventFn::Queue,
-            event_buf: std::mem::take(&mut self.event_buf),
-            payload_buf: std::mem::take(&mut self.payload_buf),
-            active_actions_buf: std::mem::take(&mut self.active_actions_buf),
-        };
+            std::mem::take(&mut self.event_buf),
+            std::mem::take(&mut self.payload_buf),
+            std::mem::take(&mut self.active_actions_buf),
+        );
         let keep_running = (ProtocolCore { client }).run_step(&mut mode);
-        let RunMode::Dispatcher {
-            event_buf,
-            payload_buf,
-            active_actions_buf,
-            ..
-        } = mode
-        else {
-            unreachable!("dispatcher pump must use RunMode::Dispatcher");
-        };
+        let (event_buf, payload_buf, active_actions_buf) = mode.into_buffers();
         self.event_buf = event_buf;
         self.payload_buf = payload_buf;
         self.active_actions_buf = active_actions_buf;

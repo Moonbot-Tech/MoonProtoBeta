@@ -104,6 +104,12 @@ impl EventDispatcher {
         ctx: &ActiveDispatchContext,
         actions: &mut Vec<ActiveAction>,
     ) {
+        #[cfg(test)]
+        if self.panic_next_active_dispatch {
+            self.panic_next_active_dispatch = false;
+            panic!("synthetic active dispatch panic");
+        }
+
         // Multi-Client safety: lazy-link `server_time_delta_source` to this Client.
         // After the first `dispatch_into_active` call, all subsequent dispatches
         // use the Client-specific delta (not the global). This is critical for multi-Client:

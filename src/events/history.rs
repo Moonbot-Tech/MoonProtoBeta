@@ -93,7 +93,7 @@ impl EventDispatcher {
             retained_markets,
             retained_candles,
         };
-        if rows.is_empty() || handle.apply_candles_snapshot(rows) {
+        if rows.is_empty() || handle.apply_candles_snapshot(now_time, rows) {
             Some(summary)
         } else {
             None

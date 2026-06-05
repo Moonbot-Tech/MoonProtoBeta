@@ -1,5 +1,5 @@
 use super::*;
-use crate::state::history::DerivedDeltaSnapshot;
+use crate::state::history::{CandleVolumeSnapshot, DerivedDeltaSnapshot};
 use crate::time::SECONDS_PER_DAY;
 
 fn trade(time: f64, price: f32, qty: f32) -> TradeHistoryRow {
@@ -436,24 +436,35 @@ fn candles_snapshot_replaces_retained_5m_rows_and_feeds_deltas() {
         candles_5m_capacity: 8,
     });
     let now = 45_000.0;
-    store.replace_candles_5m_from_snapshot(&[
-        Candle5mRow {
-            time: mt(now - 10.0 / 1440.0),
-            low: 90.0,
-            high: 110.0,
-            close: 100.0,
-            open: 95.0,
-            volume: 1_000.0,
-        },
-        Candle5mRow {
-            time: mt(now),
-            low: 100.0,
-            high: 120.0,
-            close: 115.0,
-            open: 105.0,
-            volume: 2_000.0,
-        },
-    ]);
+    store.replace_candles_5m_from_snapshot(
+        &[
+            Candle5mRow {
+                time: mt(now - 10.0 / 1440.0),
+                low: 90.0,
+                high: 110.0,
+                close: 100.0,
+                open: 95.0,
+                volume: 1_000.0,
+            },
+            Candle5mRow {
+                time: mt(now - 4.0 / 1440.0),
+                low: 95.0,
+                high: 118.0,
+                close: 112.0,
+                open: 100.0,
+                volume: 1_500.0,
+            },
+            Candle5mRow {
+                time: mt(now),
+                low: 100.0,
+                high: 120.0,
+                close: 115.0,
+                open: 105.0,
+                volume: 2_000.0,
+            },
+        ],
+        mt(now),
+    );
 
     let mut candles = Vec::new();
     store
@@ -461,7 +472,7 @@ fn candles_snapshot_replaces_retained_5m_rows_and_feeds_deltas() {
         .candles_5m
         .unwrap()
         .copy_last(8, &mut candles);
-    assert_eq!(candles.len(), 2);
+    assert_eq!(candles.len(), 3);
 
     store.append_futures_trade(trade(now + 1.0 / 86_400.0, 125.0, 2.0));
     candles.clear();
@@ -470,11 +481,11 @@ fn candles_snapshot_replaces_retained_5m_rows_and_feeds_deltas() {
         .candles_5m
         .unwrap()
         .copy_last(8, &mut candles);
-    assert_eq!(candles.len(), 2);
+    assert_eq!(candles.len(), 3);
     // Snapshot candles are sealed — a trade does NOT touch them (reference: the live candle is separate from the ring).
-    assert_eq!(candles[1].close, 115.0);
-    assert_eq!(candles[1].high, 120.0);
-    assert_eq!(candles[1].volume, 2_000.0);
+    assert_eq!(candles[2].close, 115.0);
+    assert_eq!(candles[2].high, 120.0);
+    assert_eq!(candles[2].volume, 2_000.0);
 
     // refresh with a time >= the trade (in prod `now` is always >= the time of the last trade),
     // otherwise the live candle (now+1s) would fall outside the delta window.
@@ -486,10 +497,107 @@ fn candles_snapshot_replaces_retained_5m_rows_and_feeds_deltas() {
     assert_eq!(live.high, 125.0);
     assert_eq!(live.volume, 250.0);
     assert!((derived.candle_deltas.fifteen_minutes - 38.8888888889).abs() < 1e-6);
-    assert_eq!(derived.candle_volumes.fifteen_minutes, 3_250.0);
-    assert_eq!(derived.candle_volumes.one_hour, 3_250.0);
+    assert_eq!(derived.candle_volumes.fifteen_minutes, 4_750.0);
+    assert_eq!(derived.candle_volumes.one_hour, 4_750.0);
     assert_eq!(derived.trade_deltas.fifteen_minutes, 0.0);
     assert!((derived.deltas.fifteen_minutes - 38.8888888889).abs() < 1e-6);
+}
+
+#[test]
+// parity: MoonBot MarketsU.pas:TMarket.RecalcPumpQ guard `High(Deep5m) < 2`
+fn candle_derived_requires_three_sealed_candles() {
+    let mut store = MarketHistoryStore::new(MarketHistoryConfig {
+        futures_trades_capacity: 8,
+        spot_trades_capacity: 0,
+        liquidation_capacity: 0,
+        mm_orders_capacity: 0,
+        last_price_capacity: 0,
+        mini_candles_capacity: 0,
+        candles_5m_capacity: 8,
+    });
+    let now = 45_000.0;
+    store.replace_candles_5m_from_snapshot(
+        &[
+            Candle5mRow {
+                time: mt(now - 5.0 / 1440.0),
+                low: 90.0,
+                high: 110.0,
+                close: 100.0,
+                open: 95.0,
+                volume: 1_000.0,
+            },
+            Candle5mRow {
+                time: mt(now),
+                low: 100.0,
+                high: 120.0,
+                close: 115.0,
+                open: 105.0,
+                volume: 2_000.0,
+            },
+        ],
+        mt(now),
+    );
+
+    store.append_futures_trade(trade(now + 1.0 / 86_400.0, 125.0, 2.0));
+    store.refresh_derived_analytics(mt(now + 1.0 / 86_400.0));
+    let derived = store.derived_snapshot();
+    assert!(
+        derived.current_candle.is_some(),
+        "live FCandle stays visible"
+    );
+    assert_eq!(derived.candle_deltas, DerivedDeltaSnapshot::default());
+    assert_eq!(derived.candle_volumes, CandleVolumeSnapshot::default());
+}
+
+#[test]
+// parity: MoonBot MarketsU.pas:TMarkets.ApplyRecvdStream clears old Deep5m holes
+fn candles_snapshot_older_than_eleven_minutes_clears_ring() {
+    let mut store = MarketHistoryStore::new(MarketHistoryConfig {
+        futures_trades_capacity: 0,
+        spot_trades_capacity: 0,
+        liquidation_capacity: 0,
+        mm_orders_capacity: 0,
+        last_price_capacity: 0,
+        mini_candles_capacity: 0,
+        candles_5m_capacity: 8,
+    });
+    let now = 45_000.0;
+    store.replace_candles_5m_from_snapshot(
+        &[
+            Candle5mRow {
+                time: mt(now - 20.0 / 1440.0),
+                low: 90.0,
+                high: 110.0,
+                close: 100.0,
+                open: 95.0,
+                volume: 1_000.0,
+            },
+            Candle5mRow {
+                time: mt(now - 12.0 / 1440.0),
+                low: 100.0,
+                high: 120.0,
+                close: 115.0,
+                open: 105.0,
+                volume: 2_000.0,
+            },
+        ],
+        mt(now),
+    );
+
+    let mut candles = Vec::new();
+    store
+        .readers()
+        .candles_5m
+        .unwrap()
+        .copy_last(8, &mut candles);
+    assert!(
+        candles.is_empty(),
+        "stale snapshot is a hole, not partial history to keep"
+    );
+    assert_eq!(
+        store.derived_snapshot().candle_deltas,
+        DerivedDeltaSnapshot::default()
+    );
 }
 
 #[test]
@@ -504,14 +612,17 @@ fn futures_trades_roll_current_candle_after_five_minutes() {
         candles_5m_capacity: 8,
     });
     let now = 45_000.0;
-    store.replace_candles_5m_from_snapshot(&[Candle5mRow {
-        time: mt(now),
-        low: 100.0,
-        high: 110.0,
-        close: 105.0,
-        open: 101.0,
-        volume: 1_000.0,
-    }]);
+    store.replace_candles_5m_from_snapshot(
+        &[Candle5mRow {
+            time: mt(now),
+            low: 100.0,
+            high: 110.0,
+            close: 105.0,
+            open: 101.0,
+            volume: 1_000.0,
+        }],
+        mt(now),
+    );
 
     // The first trade of the next period — accumulates into a separate live
     // accumulator (Delphi `FCandle`), is NOT pushed into the sealed ring.
@@ -594,7 +705,10 @@ fn retained_trades_update_current_candle_and_derived_volumes() {
     assert_eq!(derived.trade_volumes.one_minute.max_price, 110.0);
     assert!((derived.trade_deltas.one_minute - 10.0).abs() < 1e-9);
     assert_eq!(derived.candle_deltas.one_minute, 0.0);
-    assert_eq!(derived.candle_volumes.five_minutes, 310.0);
+    assert_eq!(
+        derived.candle_volumes.five_minutes, 0.0,
+        "Delphi RecalcPumpQ exits before candle-derived values while Deep5m has fewer than 3 sealed candles"
+    );
     assert!((derived.deltas.one_minute - 10.0).abs() < 1e-9);
 }
 
@@ -643,48 +757,51 @@ fn candle_long_delta_windows_match_delphi_trunc_hour_buckets() {
         mini_candles_capacity: 0,
         candles_5m_capacity: 8,
     });
-    store.replace_candles_5m_from_snapshot(&[
-        Candle5mRow {
-            time: mt(now - 2.5 / 24.0),
-            low: 100.0,
-            high: 130.0,
-            close: 100.0,
-            open: 100.0,
-            volume: 1.0,
-        },
-        Candle5mRow {
-            time: mt(now - 3.0 / 24.0),
-            low: 100.0,
-            high: 190.0,
-            close: 100.0,
-            open: 100.0,
-            volume: 8.0,
-        },
-        Candle5mRow {
-            time: mt(now - 3.5 / 24.0),
-            low: 100.0,
-            high: 140.0,
-            close: 100.0,
-            open: 100.0,
-            volume: 2.0,
-        },
-        Candle5mRow {
-            time: mt(now - 24.5 / 24.0),
-            low: 100.0,
-            high: 150.0,
-            close: 100.0,
-            open: 100.0,
-            volume: 4.0,
-        },
-        Candle5mRow {
-            time: mt(now - 25.0 / 24.0),
-            low: 100.0,
-            high: 220.0,
-            close: 100.0,
-            open: 100.0,
-            volume: 16.0,
-        },
-    ]);
+    store.replace_candles_5m_from_snapshot(
+        &[
+            Candle5mRow {
+                time: mt(now - 25.0 / 24.0),
+                low: 100.0,
+                high: 220.0,
+                close: 100.0,
+                open: 100.0,
+                volume: 16.0,
+            },
+            Candle5mRow {
+                time: mt(now - 24.5 / 24.0),
+                low: 100.0,
+                high: 150.0,
+                close: 100.0,
+                open: 100.0,
+                volume: 4.0,
+            },
+            Candle5mRow {
+                time: mt(now - 3.5 / 24.0),
+                low: 100.0,
+                high: 140.0,
+                close: 100.0,
+                open: 100.0,
+                volume: 2.0,
+            },
+            Candle5mRow {
+                time: mt(now - 3.0 / 24.0),
+                low: 100.0,
+                high: 190.0,
+                close: 100.0,
+                open: 100.0,
+                volume: 8.0,
+            },
+            Candle5mRow {
+                time: mt(now - 2.5 / 24.0),
+                low: 100.0,
+                high: 130.0,
+                close: 100.0,
+                open: 100.0,
+                volume: 1.0,
+            },
+        ],
+        mt(now - 2.5 / 24.0),
+    );
 
     store.refresh_derived_analytics(mt(now));
     let derived = store.derived_snapshot();
@@ -711,24 +828,35 @@ fn candle_windows_exclude_exact_old_boundary() {
         mini_candles_capacity: 0,
         candles_5m_capacity: 8,
     });
-    store.replace_candles_5m_from_snapshot(&[
-        Candle5mRow {
-            time: mt(now - 15.0 / 1440.0),
-            low: 100.0,
-            high: 200.0,
-            close: 100.0,
-            open: 100.0,
-            volume: 5.0,
-        },
-        Candle5mRow {
-            time: mt(now - (15.0 * 60.0 - 1.0) / SECONDS_PER_DAY),
-            low: 100.0,
-            high: 150.0,
-            close: 100.0,
-            open: 100.0,
-            volume: 3.0,
-        },
-    ]);
+    store.replace_candles_5m_from_snapshot(
+        &[
+            Candle5mRow {
+                time: mt(now - 15.0 / 1440.0),
+                low: 100.0,
+                high: 200.0,
+                close: 100.0,
+                open: 100.0,
+                volume: 5.0,
+            },
+            Candle5mRow {
+                time: mt(now - (15.0 * 60.0 - 1.0) / SECONDS_PER_DAY),
+                low: 100.0,
+                high: 150.0,
+                close: 100.0,
+                open: 100.0,
+                volume: 3.0,
+            },
+            Candle5mRow {
+                time: mt(now),
+                low: 100.0,
+                high: 100.0,
+                close: 100.0,
+                open: 100.0,
+                volume: 0.0,
+            },
+        ],
+        mt(now),
+    );
 
     store.refresh_derived_analytics(mt(now));
     let derived = store.derived_snapshot();

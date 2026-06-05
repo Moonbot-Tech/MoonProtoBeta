@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use crate::commands::order_book::{compare_seq, OrderBookUpdate};
 use crate::state::eps::EpsProfile;
+use parking_lot::RwLock;
 
 mod apply;
 mod cache;
@@ -32,7 +33,7 @@ use self::apply::{apply_cached_packet, apply_diff_book, apply_full_book};
 use self::cache::OrderBookCache;
 pub(crate) use self::types::{ApplyResult, BookKey, OrderBookControl};
 pub use self::types::{
-    OrderBookEvent, OrderBookKind, OrderBookLevel, OrderBookSnapshot, TopOfBook,
+    OrderBookEvent, OrderBookKind, OrderBookLevel, OrderBookReadGuard, OrderBookSnapshot, TopOfBook,
 };
 
 /// Cache becomes corrupted if it stays non-empty longer than this threshold.
@@ -46,28 +47,87 @@ const BOOK_FULL_REQUEST_THROTTLE: i64 = 5000;
 /// Cache size limit. Matches `MoonProtoOrderBook.pas:11 BOOK_CACHE_MAX_PACKETS = 64`.
 const BOOK_CACHE_MAX_PACKETS: usize = 64;
 
-/// Orderbook sync state with one cache per `(market_index, book_kind)`.
-#[derive(Debug, Clone, Default)]
-pub struct OrderBooks {
+type OrderBookSlot = Arc<RwLock<OrderBookSnapshot>>;
+type OrderBookMap = HashMap<BookKey, OrderBookSlot>;
+
+#[derive(Debug, Default)]
+struct OrderBooksInner {
     caches: HashMap<BookKey, OrderBookCache>,
-    books: HashMap<BookKey, Arc<OrderBookSnapshot>>,
+    books: OrderBookMap,
     diff_scratch: Vec<OrderBookLevel>,
+}
+
+/// Orderbook sync state with one cache per `(market_index, book_kind)`.
+///
+/// The public value is a cheap handle. A published `MoonStateSnapshot` keeps a
+/// clone of this handle while the runtime keeps applying packets through the
+/// same inner state. That matches Delphi's shared `TOrderBook`/`TMarket` shape:
+/// a packet mutates only the affected book/cache and does not copy the whole
+/// orderbook domain because a UI snapshot is alive.
+#[derive(Debug, Clone)]
+pub struct OrderBooks {
+    inner: Arc<RwLock<OrderBooksInner>>,
     eps_profile: EpsProfile,
+}
+
+impl Default for OrderBooks {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(OrderBooksInner::default())),
+            eps_profile: EpsProfile::default(),
+        }
+    }
 }
 
 impl OrderBooks {
     #[cfg(test)]
     pub(crate) fn new() -> Self {
-        Self {
-            caches: HashMap::new(),
-            books: HashMap::new(),
-            diff_scratch: Vec::new(),
-            eps_profile: EpsProfile::default(),
-        }
+        Self::default()
     }
 
     pub(crate) fn set_eps_profile(&mut self, eps_profile: EpsProfile) {
         self.eps_profile = eps_profile;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn arc_ptr(&self) -> usize {
+        Arc::as_ptr(&self.inner) as usize
+    }
+
+    #[cfg(test)]
+    fn book_slot_ptr(&self, key: BookKey) -> Option<usize> {
+        self.inner
+            .read()
+            .books
+            .get(&key)
+            .map(|book| Arc::as_ptr(book) as usize)
+    }
+
+    #[cfg(test)]
+    fn cache_packet_len(&self, key: BookKey) -> Option<usize> {
+        self.inner
+            .read()
+            .caches
+            .get(&key)
+            .map(|cache| cache.packets.len())
+    }
+
+    #[cfg(test)]
+    fn cache_corrupted(&self, key: BookKey) -> Option<bool> {
+        self.inner
+            .read()
+            .caches
+            .get(&key)
+            .map(|cache| cache.corrupted)
+    }
+
+    #[cfg(test)]
+    fn cache_front_seq(&self, key: BookKey) -> Option<u16> {
+        self.inner
+            .read()
+            .caches
+            .get(&key)
+            .and_then(|cache| cache.packets.front().map(|packet| packet.seq))
     }
 
     /// Process one decoded `MPC_OrderBook` packet and return generated events.
@@ -82,20 +142,26 @@ impl OrderBooks {
 
     /// Process one packet into a caller-owned event buffer.
     pub(crate) fn on_packet_into(
-        &mut self,
+        &self,
         pkt: OrderBookUpdate,
         now_ms: i64,
         events: &mut Vec<OrderBookEvent>,
         controls: &mut Vec<OrderBookControl>,
     ) {
+        let mut inner = self.inner.write();
+        let OrderBooksInner {
+            caches,
+            books,
+            diff_scratch,
+        } = &mut *inner;
         let key: BookKey = (pkt.market_index, pkt.book_kind);
         let kind = OrderBookKind::from_u8(pkt.book_kind).unwrap_or(OrderBookKind::Futures);
 
-        let cache = self.caches.entry(key).or_default();
+        let cache = caches.entry(key).or_default();
 
         // === 1. Full snapshot — always applied (this is a cache reset) ===
         if pkt.is_full {
-            let top = apply_full_book(&mut self.books, key, pkt.seq, &pkt.buys, &pkt.sells);
+            let top = apply_full_book(books, key, pkt.seq, &pkt.buys, &pkt.sells);
             cache.corrupted = false;
             cache.last_applied_seq = pkt.seq;
             cache.expected_seq = pkt.seq.wrapping_add(1);
@@ -115,7 +181,7 @@ impl OrderBooks {
                 top,
             });
             // Try to apply the accumulated diffs from the cache.
-            self.drain_cache(key, events);
+            Self::drain_cache(&mut inner, key, events, self.eps_profile);
             return;
         }
 
@@ -127,8 +193,8 @@ impl OrderBooks {
             let seq = pkt.seq;
             let cached_pkt = pkt.clone();
             let top = apply_diff_book(
-                &mut self.books,
-                &mut self.diff_scratch,
+                books,
+                diff_scratch,
                 key,
                 seq,
                 &pkt.buys,
@@ -164,8 +230,8 @@ impl OrderBooks {
         // Full. Previously we dropped it → an extra RequestFullNeeded request.
         if cmp == 0 || cache.last_applied_seq == 0 {
             let top = apply_diff_book(
-                &mut self.books,
-                &mut self.diff_scratch,
+                books,
+                diff_scratch,
                 key,
                 pkt.seq,
                 &pkt.buys,
@@ -185,7 +251,7 @@ impl OrderBooks {
                 top,
             });
             // The cache may hold the following seq values — drain.
-            self.drain_cache(key, events);
+            Self::drain_cache(&mut inner, key, events, self.eps_profile);
             return;
         }
 
@@ -209,8 +275,13 @@ impl OrderBooks {
 
     /// Drain cache by applying consecutive packets starting at `expected_seq`.
     /// Matches `MoonProto_TryApplyCached` in `MoonProtoOrderBook.pas:682-720`.
-    fn drain_cache(&mut self, key: BookKey, events: &mut Vec<OrderBookEvent>) {
-        let cache = match self.caches.get_mut(&key) {
+    fn drain_cache(
+        inner: &mut OrderBooksInner,
+        key: BookKey,
+        events: &mut Vec<OrderBookEvent>,
+        eps_profile: EpsProfile,
+    ) {
+        let cache = match inner.caches.get_mut(&key) {
             Some(c) => c,
             None => return,
         };
@@ -229,11 +300,11 @@ impl OrderBooks {
             // O(1) pop_front instead of O(N) remove(0).
             let entry = cache.packets.pop_front().unwrap();
             let top = apply_cached_packet(
-                &mut self.books,
-                &mut self.diff_scratch,
+                &mut inner.books,
+                &mut inner.diff_scratch,
                 key,
                 &entry.pkt,
-                self.eps_profile,
+                eps_profile,
             );
             cache.expected_seq = entry.seq.wrapping_add(1);
             cache.last_applied_seq = entry.seq;
@@ -256,23 +327,24 @@ impl OrderBooks {
     /// levels. `BookSubbed` lives in `Client`'s subscription registry, so the
     /// Rust analogue resets all local cache entries; absent entries will be
     /// recreated with seq=0 on the next packet.
-    pub(crate) fn reset_caches_keep_books(&mut self) {
-        for (_, c) in self.caches.iter_mut() {
+    pub(crate) fn reset_caches_keep_books(&self) {
+        let mut inner = self.inner.write();
+        for (_, c) in inner.caches.iter_mut() {
             c.clear();
             c.corrupted = false;
             c.expected_seq = 0;
             c.last_applied_seq = 0;
         }
-        self.caches.clear();
+        inner.caches.clear();
     }
 
     /// Number of active caches.
     pub fn len(&self) -> usize {
-        self.caches.len()
+        self.inner.read().caches.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.caches.is_empty()
+        self.inner.read().caches.is_empty()
     }
 
     /// Get the applied current book by raw wire kind (`0 = futures`, `1 = spot`).
@@ -280,8 +352,14 @@ impl OrderBooks {
         &self,
         market_index: u16,
         book_kind: u8,
-    ) -> Option<&OrderBookSnapshot> {
-        self.books.get(&(market_index, book_kind)).map(Arc::as_ref)
+    ) -> Option<OrderBookReadGuard> {
+        let book = self
+            .inner
+            .read()
+            .books
+            .get(&(market_index, book_kind))
+            .cloned()?;
+        Some(book.read_arc())
     }
 
     /// Get the applied current book.
@@ -289,7 +367,7 @@ impl OrderBooks {
         &self,
         market_index: u16,
         book_kind: OrderBookKind,
-    ) -> Option<&OrderBookSnapshot> {
+    ) -> Option<OrderBookReadGuard> {
         self.book_by_kind(market_index, book_kind.as_u8())
     }
 }

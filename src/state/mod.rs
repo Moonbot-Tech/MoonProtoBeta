@@ -57,7 +57,8 @@ pub use markets::{
 };
 pub(crate) use order_books::OrderBookControl;
 pub use order_books::{
-    OrderBookEvent, OrderBookKind, OrderBookLevel, OrderBookSnapshot, OrderBooks, TopOfBook,
+    OrderBookEvent, OrderBookKind, OrderBookLevel, OrderBookReadGuard, OrderBookSnapshot,
+    OrderBooks, TopOfBook,
 };
 #[cfg(any(test, feature = "diagnostics"))]
 #[doc(hidden)]

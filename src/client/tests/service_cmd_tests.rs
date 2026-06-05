@@ -1,4 +1,5 @@
 use super::*;
+use crate::events::{Event, EventDispatcher};
 use crate::transport::{
     outer_light_crypt, ClientMsgHeader, MacContext, ServerMsgHeader, TRANSPORT_VER,
 };
@@ -74,7 +75,7 @@ fn recv_client_packet(server_sock: &UdpSocket, client: &mut Client) -> (ClientMs
 fn recv_client_packet_with_events(
     server_sock: &UdpSocket,
     client: &mut Client,
-) -> ((ClientMsgHeader, Vec<u8>), Vec<(Command, Vec<u8>)>) {
+) -> ((ClientMsgHeader, Vec<u8>), Vec<Event>) {
     let events = pump_inline_reader_collect(client);
     let mut ack_buf = [0u8; 2048];
     let (n, _from) = server_sock.recv_from(&mut ack_buf).unwrap();
@@ -103,21 +104,27 @@ fn pump_inline_reader(client: &mut Client) {
     let _events = pump_inline_reader_collect(client);
 }
 
-fn pump_inline_reader_collect(client: &mut Client) -> Vec<(Command, Vec<u8>)> {
-    let events = Arc::new(Mutex::new(Vec::new()));
-    let events_cb = Arc::clone(&events);
-    let mut mode = RunMode::Callback {
-        on_data: Box::new(move |cmd, payload| {
-            events_cb.lock().push((cmd, payload.to_vec()));
-        }),
-    };
+fn pump_inline_reader_collect(client: &mut Client) -> Vec<Event> {
+    let mut dispatcher = EventDispatcher::new();
+    let mut mode = RunMode::new(&mut dispatcher);
     ProtocolCore { client }.recv_drain_phase(
         0,
         Instant::now() + Duration::from_millis(30),
         &mut mode,
     );
     drop(mode);
-    Arc::try_unwrap(events).unwrap().into_inner()
+    dispatcher.take_queued_events()
+}
+
+fn assert_raw_events(events: &[Event], expected: &[(Command, &[u8])]) {
+    assert_eq!(events.len(), expected.len());
+    for (event, (expected_cmd, expected_payload)) in events.iter().zip(expected.iter()) {
+        assert!(matches!(
+            event,
+            Event::Raw { cmd, payload }
+                if cmd == expected_cmd && payload.as_slice() == *expected_payload
+        ));
+    }
 }
 
 fn assert_no_inline_reader_events(client: &mut Client, why: &str) {
@@ -343,6 +350,7 @@ fn run_drains_udp_data_without_wake_fifo() {
     let server_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
     let mut client = Client::new(dummy_cfg_for_server(server_sock.local_addr().unwrap()));
     client.testing_set_domain_ready(true);
+    client.authorized = true;
     client.transport.socket = Some(UdpSocket::bind("127.0.0.1:0").unwrap());
     client.need_connect = false;
     client.start_inline_reader_session();
@@ -353,26 +361,37 @@ fn run_drains_udp_data_without_wake_fifo() {
         .unwrap()
         .local_addr()
         .unwrap();
-    // OrderBook stands in for "a non-sensitive data command": S1 drops plaintext
+    // Data stands in for "a non-sensitive data command": S1 drops plaintext
     // sensitive cmds (Order/Strat/UI/Balance) at decode, so reader-delivery tests
     // use a non-sensitive command (these go through the same generic path).
-    let packet = pack_server_packet(&client.cfg.mac_key, Command::OrderBook, &[0xAA, 0xBB]);
+    let packet = pack_server_packet(&client.cfg.mac_key, Command::Data, &[0xAA, 0xBB]);
     server_sock.send_to(&packet, client_addr).unwrap();
 
-    let delivered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let delivered_cb = Arc::clone(&delivered);
-    client.run(
-        Duration::from_millis(DEFAULT_SLEEP_MS + 5),
-        Box::new(move |cmd, payload| {
-            assert_eq!(cmd, Command::OrderBook);
-            assert_eq!(payload, &[0xAA, 0xBB]);
-            delivered_cb.fetch_add(1, Ordering::Relaxed);
-        }),
-    );
-
-    assert_eq!(
-        delivered.load(Ordering::Relaxed),
-        1,
+    let mut dispatcher = EventDispatcher::new();
+    let mut mode = RunMode::new(&mut dispatcher);
+    let mut core = ProtocolCore {
+        client: &mut client,
+    };
+    let deadline = Instant::now() + Duration::from_millis(30);
+    let mut seen = false;
+    while Instant::now() < deadline {
+        let _ = core.run_step(&mut mode);
+        seen = mode.dispatcher.take_queued_events().iter().any(|event| {
+            matches!(
+                event,
+                Event::Raw {
+                    cmd: Command::Data,
+                    payload
+                } if payload == &[0xAA, 0xBB]
+            )
+        });
+        if seen {
+            break;
+        }
+    }
+    drop(mode);
+    assert!(
+        seen,
         "run loop must drain UDP data directly, without a wake FIFO"
     );
 }
@@ -394,6 +413,7 @@ fn reader_sends_sliced_ack_without_main_loop_tick() {
 
     let mut client = Client::new(dummy_cfg_for_server(server_addr));
     client.testing_set_domain_ready(true);
+    client.authorized = true;
     client.transport.socket = Some(client_sock);
     client.start_inline_reader_session();
 
@@ -402,7 +422,7 @@ fn reader_sends_sliced_ack_without_main_loop_tick() {
         0x00, // DatagramNum = 42
         0x00, // BlockNum = 0
         0x00, // MaxBlockNum = 0
-        Command::OrderBook.to_byte(),
+        Command::Data.to_byte(),
         0xDE,
         0xAD,
     ];
@@ -415,7 +435,7 @@ fn reader_sends_sliced_ack_without_main_loop_tick() {
     assert_eq!(ack_payload.len(), slicing::ACK256_WIRE_SIZE);
     assert_eq!(ack_payload[0] & 0x01, 0x01);
     assert_eq!(&ack_payload[32..34], &42u16.to_le_bytes());
-    assert_eq!(events, vec![(Command::OrderBook, vec![0xDE, 0xAD])]);
+    assert_raw_events(&events, &[(Command::Data, &[0xDE, 0xAD])]);
     assert_no_inline_reader_events(
         &mut client,
         "single-owner receive drains decoded payload in the same datagram step",
@@ -440,6 +460,7 @@ fn reader_handles_sliced_ack_without_recv_event_backlog() {
 
     let mut client = Client::new(dummy_cfg_for_server(server_addr));
     client.testing_set_domain_ready(true);
+    client.authorized = true;
     client.transport.socket = Some(client_sock);
     client.start_inline_reader_session();
 
@@ -483,6 +504,7 @@ fn reader_handles_partial_sliced_without_recv_event_backlog() {
 
     let mut client = Client::new(dummy_cfg_for_server(server_addr));
     client.testing_set_domain_ready(true);
+    client.authorized = true;
     client.transport.socket = Some(client_sock);
     client.start_inline_reader_session();
 
@@ -492,7 +514,7 @@ fn reader_handles_partial_sliced_without_recv_event_backlog() {
         (datagram_num >> 8) as u8,
         0x00, // BlockNum = 0
         0x01, // MaxBlockNum = 1, so this packet is only a partial datagram
-        Command::OrderBook.to_byte(),
+        Command::Data.to_byte(),
         0xCA,
         0xFE,
     ];
@@ -529,9 +551,9 @@ fn reader_handles_partial_sliced_without_recv_event_backlog() {
     assert_eq!(hdr2.cmd, Command::SlicedACK.to_byte());
     assert_eq!(ack_payload2[0] & 0x03, 0x03);
     assert_eq!(&ack_payload2[32..34], &datagram_num.to_le_bytes());
-    assert_eq!(
-        second_events,
-        vec![(Command::OrderBook, vec![0xCA, 0xFE, 0xBE, 0xEF])]
+    assert_raw_events(
+        &second_events,
+        &[(Command::Data, &[0xCA, 0xFE, 0xBE, 0xEF])],
     );
     assert_eq!(
         client.metrics.total_recv,
@@ -677,7 +699,7 @@ fn reader_handles_ping_response_without_main_loop_tick() {
         u32::from_le_bytes(response[50..54].try_into().unwrap()),
         client.ack_session32_value,
     );
-    assert_eq!(events, vec![(Command::Ping, ping.clone())]);
+    assert_raw_events(&events, &[(Command::Ping, &ping)]);
     assert_no_inline_reader_events(
         &mut client,
         "single-owner receive applies Ping update and drains callback in the same datagram step",
@@ -1292,17 +1314,25 @@ fn data_read_decodes_regular_data_without_recv_event_backlog() {
 
     let mut client = Client::new(dummy_cfg_for_server(server_addr));
     client.testing_set_domain_ready(true);
+    client.authorized = true;
     client.transport.socket = Some(client_sock);
     client.start_inline_reader_session();
 
-    // OrderBook stands in for "a non-sensitive data command": S1 drops plaintext
+    // Data stands in for "a non-sensitive data command": S1 drops plaintext
     // sensitive cmds (Order/Strat/UI/Balance) at decode, so reader-delivery tests
     // use a non-sensitive command (these go through the same generic path).
-    let packet = pack_server_packet(&client.cfg.mac_key, Command::OrderBook, &[0xAA, 0xBB]);
+    let packet = pack_server_packet(&client.cfg.mac_key, Command::Data, &[0xAA, 0xBB]);
     server_sock.send_to(&packet, client_addr).unwrap();
 
     let events = pump_inline_reader_collect(&mut client);
-    assert_eq!(events, vec![(Command::OrderBook, vec![0xAA, 0xBB])]);
+    assert_eq!(events.len(), 1);
+    assert!(matches!(
+        &events[0],
+        Event::Raw {
+            cmd: Command::Data,
+            payload
+        } if payload == &[0xAA, 0xBB]
+    ));
     assert_no_inline_reader_events(
         &mut client,
         "regular data must be delivered immediately, not left in decoded queue",

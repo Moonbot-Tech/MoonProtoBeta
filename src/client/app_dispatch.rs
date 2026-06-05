@@ -1,127 +1,85 @@
 use super::metrics::ProtocolMetrics;
 use crate::protocol::Command;
-#[cfg(test)]
-use std::sync::mpsc;
 #[cfg(any(test, feature = "diagnostics"))]
 use std::time::Instant;
-/// Raw callback used by [`crate::client::Client::run`].
-///
-/// This callback receives decoded MoonProto command payloads after transport
-/// decrypt/decompress/group handling, but before `EventDispatcher` state
-/// application. Regular applications should use [`crate::MoonClient`] instead.
-/// The callback runs from the application callback queue, not inside the
-/// protocol writer tick.
-#[cfg(test)]
-pub(crate) type OnDataFn = Box<dyn FnMut(Command, &[u8]) + Send>;
-#[cfg(test)]
-pub(crate) type RawAppEvent = (Command, Vec<u8>);
 
-/// Where to deliver `Command + payload` after internal handling (decrypt,
-/// decompress, Grouped split, API pending dispatch). Two variants:
+/// Single active receive delivery path.
 ///
-/// * `Callback` — raw payload callback via `OnDataFn` (used by `Client::run`).
-/// * `Buffer` — a (Command, Vec<u8>) buffer for post-processing via
-///   `EventDispatcher` (used by the low-level active pump).
-///
-/// This enum lets a single delivery pipeline (`ProtocolCore` drain +
-/// `client_new_data_decoded`) serve both scenarios without
-/// `Arc<Mutex>` workarounds for the borrow checker.
-pub(crate) enum DispatchSink<'a> {
-    #[cfg(test)]
-    Callback(&'a mut OnDataFn),
-    #[cfg(test)]
-    CallbackQueue(&'a mpsc::Sender<RawAppEvent>),
-    Buffer(&'a mut Vec<(Command, Vec<u8>)>),
+/// The runtime owns one [`EventDispatcher`](crate::events::EventDispatcher) and
+/// reusable buffers for decoded payloads, typed events, and active side effects.
+/// Older raw callback modes were test-only leftovers; keeping the hot receive
+/// path as one concrete shape makes the machine effect easier to audit and
+/// avoids carrying dead polymorphism through every datagram.
+pub(crate) struct RunMode<'a> {
+    pub(crate) dispatcher: &'a mut crate::events::EventDispatcher,
+    /// Reusable event buffer (avoids alloc per packet).
+    pub(crate) event_buf: Vec<crate::events::Event>,
+    /// Reusable buffer of decoded payloads before the dispatcher.
+    pub(crate) payload_buf: Vec<(Command, Vec<u8>)>,
+    /// Reusable buffer of active-library side effects.
+    pub(crate) active_actions_buf: Vec<crate::events::ActiveAction>,
 }
 
-impl<'a> DispatchSink<'a> {
-    #[inline]
-    pub(crate) fn is_buffer(&self) -> bool {
-        matches!(self, Self::Buffer(_))
+impl<'a> RunMode<'a> {
+    #[cfg(test)]
+    pub(crate) fn new(dispatcher: &'a mut crate::events::EventDispatcher) -> Self {
+        Self::with_buffers(dispatcher, Vec::new(), Vec::new(), Vec::new())
     }
 
-    /// Delivery with an already-owned Vec (avoids a redundant `to_vec` when the
-    /// payload originated from decrypt/decompress and is already owned).
-    #[inline]
-    pub(crate) fn deliver_owned(&mut self, cmd: Command, payload: Vec<u8>) {
-        match self {
-            #[cfg(test)]
-            Self::Callback(cb) => cb(cmd, &payload),
-            #[cfg(test)]
-            Self::CallbackQueue(tx) => {
-                let _ = tx.send((cmd, payload));
-            }
-            Self::Buffer(buf) => buf.push((cmd, payload)),
+    pub(crate) fn with_buffers(
+        dispatcher: &'a mut crate::events::EventDispatcher,
+        event_buf: Vec<crate::events::Event>,
+        payload_buf: Vec<(Command, Vec<u8>)>,
+        active_actions_buf: Vec<crate::events::ActiveAction>,
+    ) -> Self {
+        Self {
+            dispatcher,
+            event_buf,
+            payload_buf,
+            active_actions_buf,
         }
     }
-}
 
-/// Main-loop run mode — defines how incoming data packets are delivered
-/// and whether active-library auto-actions are needed.
-///
-/// `CallbackQueue` — low-level raw path for `Client::run`. The consumer receives
-/// raw `(Command, &[u8])` and decides what to do with them (usually its own
-/// `dispatcher.dispatch_into(...)`). Production delivery goes through the app
-/// queue.
-///
-/// `Dispatcher` — active-library path. Runtime owns `EventDispatcher` directly,
-/// applies packets to Active Lib state, runs auto-actions (RequestOrderBookFull,
-/// trades resend tail-check, indexes sync gate), and queues typed `Event`
-/// values after the state mutation.
-pub(crate) enum RunMode<'a> {
-    #[cfg(test)]
-    Callback { on_data: OnDataFn },
-    #[cfg(test)]
-    CallbackQueue { app_tx: mpsc::Sender<RawAppEvent> },
-    Dispatcher {
-        dispatcher: &'a mut crate::events::EventDispatcher,
-        on_event: DispatcherEventFn,
-        /// Reusable event buffer (avoids alloc per packet).
-        event_buf: Vec<crate::events::Event>,
-        /// Reusable buffer of decoded payloads before the dispatcher.
-        payload_buf: Vec<(Command, Vec<u8>)>,
-        /// Reusable buffer of active-library side effects.
-        active_actions_buf: Vec<crate::events::ActiveAction>,
-    },
-    #[cfg(not(test))]
-    _Lifetime(std::marker::PhantomData<&'a ()>),
-}
+    pub(crate) fn into_buffers(
+        self,
+    ) -> (
+        Vec<crate::events::Event>,
+        Vec<(Command, Vec<u8>)>,
+        Vec<crate::events::ActiveAction>,
+    ) {
+        (self.event_buf, self.payload_buf, self.active_actions_buf)
+    }
 
-/// Event delivery target for the low-level active pump and production runtime.
-pub(crate) enum DispatcherEventFn {
-    Queue,
-}
-
-impl DispatcherEventFn {
     pub(crate) fn drain_events(
         &mut self,
-        events: &mut Vec<crate::events::Event>,
-        dispatcher: &mut crate::events::EventDispatcher,
-        _protocol_metrics: &ProtocolMetrics,
-        _source_cmd: Option<Command>,
-        _source_api_method: u8,
-        _source_payload_len: usize,
+        protocol_metrics: &ProtocolMetrics,
+        source_cmd: Option<Command>,
+        source_api_method: u8,
+        source_payload_len: usize,
     ) {
-        if events.is_empty() {
+        if self.event_buf.is_empty() {
             return;
         }
+        #[cfg(not(any(test, feature = "diagnostics")))]
+        let _ = (
+            protocol_metrics,
+            source_cmd,
+            source_api_method,
+            source_payload_len,
+        );
         #[cfg(any(test, feature = "diagnostics"))]
         let enqueue_start = Instant::now();
         #[cfg(any(test, feature = "diagnostics"))]
-        let event_count = events.len();
+        let event_count = self.event_buf.len();
         #[cfg(any(test, feature = "diagnostics"))]
         let mode = 3;
-        match self {
-            Self::Queue => {
-                dispatcher.queue_events(events.drain(..));
-            }
-        }
+        self.dispatcher.queue_events(self.event_buf.drain(..));
         #[cfg(any(test, feature = "diagnostics"))]
-        _protocol_metrics.record_app_enqueue_labeled(
+        protocol_metrics.record_app_enqueue_labeled(
             enqueue_start.elapsed(),
-            _source_cmd.map_or(u8::MAX, Command::to_byte),
-            _source_api_method,
-            _source_payload_len,
+            source_cmd.map_or(u8::MAX, Command::to_byte),
+            source_api_method,
+            source_payload_len,
             event_count,
             mode,
         );

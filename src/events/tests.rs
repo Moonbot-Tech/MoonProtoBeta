@@ -2113,6 +2113,7 @@ fn candles_snapshot_ready_after_worker_barrier_exposes_reader_rows() {
     d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
     d.set_trade_storage_scope(Some(&crate::state::TradeStorageScope::All), 0.0);
 
+    let now_days = crate::MoonTime::now().to_delphi_days();
     let markets = vec![crate::commands::candles::RequestCandlesMarket {
         market_name: "BTCUSDT".to_string(),
         candles_5m: vec![crate::commands::candles::DeepPrice {
@@ -2121,7 +2122,7 @@ fn candles_snapshot_ready_after_worker_barrier_exposes_reader_rows() {
             high: 12.0,
             low: 9.0,
             volume: 123.0,
-            time: 45_000.0,
+            time: now_days,
         }],
         buy_wall: [crate::commands::candles::WallItem::default(); 4],
         sell_wall: [crate::commands::candles::WallItem::default(); 4],
@@ -2935,6 +2936,52 @@ fn orderbook_datagram_does_not_clone_markets_state_while_snapshot_held() {
     );
 
     drop(held);
+}
+
+#[test]
+fn orderbook_datagram_does_not_clone_orderbooks_state_while_snapshot_held() {
+    // Regression guard for the orderbook COW trap: a published snapshot holds
+    // the `OrderBooks` domain at refcount >= 2. Incoming book packets must
+    // mutate the per-book object/cache in place, not clone both HashMaps and
+    // scratch space through `CowState::make_mut`.
+    let mut d = EventDispatcher::new();
+    seed_event_markets(&mut d, &["BTCUSDT"]);
+    let mut out = Vec::new();
+
+    d.dispatch_into(
+        Command::OrderBook,
+        &order_book_payload_full_with_levels(0, 1, &[(100.0, 1.0)], &[(125.0, 2.0)]),
+        10_000,
+        &mut out,
+    );
+    out.clear();
+
+    let held = d.order_books.clone();
+    let ptr_before = d.order_books.arc_ptr();
+    assert_eq!(
+        ptr_before,
+        held.arc_ptr(),
+        "snapshot shares the orderbooks allocation"
+    );
+
+    d.dispatch_into(
+        Command::OrderBook,
+        &order_book_payload_full_with_levels(0, 1, &[(110.0, 1.0)], &[(150.0, 2.0)]),
+        11_000,
+        &mut out,
+    );
+
+    assert_eq!(
+        d.order_books.arc_ptr(),
+        ptr_before,
+        "order-book datagram must not copy-on-write clone the whole OrderBooks domain"
+    );
+    let held_book = held.book(0, OrderBookKind::Futures).unwrap();
+    assert_eq!(
+        held_book.top().ask.unwrap().rate,
+        150.0,
+        "held snapshot sees the same live per-book object, matching Delphi shared object semantics"
+    );
 }
 
 #[test]

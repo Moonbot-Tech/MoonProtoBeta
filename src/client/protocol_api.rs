@@ -138,26 +138,26 @@ impl Client {
         payload: Vec<u8>,
         api_pending_consumed_by_reader: bool,
         candles_chunk_consumed_by_reader: bool,
-        sink: &mut DispatchSink<'_>,
+        payload_buf: &mut Vec<(Command, Vec<u8>)>,
     ) {
         if cmd == Command::API.to_byte() {
             match self.process_api_command_decoded(
                 payload,
                 api_pending_consumed_by_reader,
                 candles_chunk_consumed_by_reader,
-                sink,
+                payload_buf,
             ) {
                 Ok(()) => {
                     return;
                 }
                 Err(payload) => {
-                    sink.deliver_owned(Command::from_byte(cmd), payload);
+                    payload_buf.push((Command::from_byte(cmd), payload));
                     return;
                 }
             }
         }
 
-        sink.deliver_owned(Command::from_byte(cmd), payload);
+        payload_buf.push((Command::from_byte(cmd), payload));
     }
 
     pub(crate) fn process_api_command_decoded(
@@ -165,7 +165,7 @@ impl Client {
         payload: Vec<u8>,
         api_pending_consumed_by_reader: bool,
         candles_chunk_consumed_by_reader: bool,
-        sink: &mut DispatchSink<'_>,
+        payload_buf: &mut Vec<(Command, Vec<u8>)>,
     ) -> Result<(), Vec<u8>> {
         // Engine API responses: try to deliver to the pending registry / chunked
         // candles aggregator / internal recovery flags. If the UID is not
@@ -181,12 +181,9 @@ impl Client {
             if meta.method == EngineMethod::RequestCandlesData {
                 if let Some(resp) = parse_engine_response(&payload) {
                     if Self::handle_candles_chunk_in_pending(&mut self.pending_api, &resp, now_ms) {
-                        // The chunk was consumed by the aggregator. Forward to
-                        // on_data only if the consumer does NOT use the async API
-                        // (in that case the merged result is not ready yet — let
-                        // the application see raw chunks). However: to avoid
-                        // confusion we skip the on_data callback. An async consumer
-                        // gets the result via Receiver<MergedCandles>.
+                        // Async consumers get the merged result via
+                        // Receiver<MergedCandles>. The active dispatcher only
+                        // sees completed/ordinary API payloads.
                         return Ok(());
                     }
                 }
@@ -194,9 +191,8 @@ impl Client {
             // If the slot is not registered — fall back to the pending registry /
             // on_data for fire-and-forget API users.
 
-            let pending_side_effect_owner = api_pending_consumed_by_reader
-                && sink.is_buffer()
-                && method_applies_after_pending(meta.method);
+            let pending_side_effect_owner =
+                api_pending_consumed_by_reader && method_applies_after_pending(meta.method);
             if pending_side_effect_owner {
                 // Delphi `ProcessApiCommand` only stores the response into
                 // `PendingRequests`; `TMoonProtoEngine.GetMarketsList` /
@@ -214,18 +210,12 @@ impl Client {
             self.apply_engine_response_client_bookkeeping(&resp);
 
             // 2. Pending registry (ordinary async API).
-            let pending_consumed = api_pending_consumed_by_reader
-                || self.pending_api.api_pending.dispatch(resp).is_none();
-            if !pending_consumed || sink.is_buffer() {
-                // If no specific receiver was waiting for the response — it is an
-                // ordinary API event. If one was waiting but we are in Dispatcher
-                // mode, we still hand the raw payload to the dispatcher: active
-                // state (markets/indexes/tags) must update regardless of whether
-                // user code is also waiting for this response via a Receiver.
-                // Callback mode preserves the semantics: a pending response is not
-                // duplicated into the on_data callback.
-                sink.deliver_owned(Command::API, payload);
+            if !api_pending_consumed_by_reader {
+                let _ = self.pending_api.api_pending.dispatch(resp);
             }
+            // Active state must update regardless of whether user code also
+            // awaited this response via a Receiver.
+            payload_buf.push((Command::API, payload));
             return Ok(());
         }
         // Failed to parse — fall back to the raw sink.

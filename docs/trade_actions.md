@@ -103,9 +103,11 @@ management; it is not the same as "manual order under the selected strategy".
 If the manual strategy sell-percent control changes, send the retained strategy
 update through `client.strategies().sell_price_update(...)`.
 
-`new_order` returns a client-side ticket for optional click-to-order
-correlation. Normal order tables should treat the order snapshot as the source
-of truth and redraw from `snapshot().orders()`.
+`new_order` returns a client-side ticket with an outbound/local
+`client_order_id`. The typed order stream does not echo this value, so it is not
+a reliable click-to-order UID mapping. Normal order tables should treat the
+order snapshot as the source of truth, key real orders by server `uid`, and
+redraw from `snapshot().orders()`.
 
 Order intent handles also accept a raw UID for CLI tools and scripts that only
 have an identifier. Desktop UI should prefer the visible `&Order` it already

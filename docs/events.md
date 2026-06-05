@@ -59,6 +59,14 @@ queue adapter internally and exposes `client.drain_lifecycle_events()` /
 `client.drain_events()` for simple apps and tests. Hot UI loops can use
 `drain_lifecycle_events_into` / `drain_events_into` to reuse buffers.
 
+The queue adapter is intentionally unbounded. It mirrors the Delphi active
+client shape: the runtime must not drop already-produced domain events because
+of a hidden Rust-only capacity cap. The application side must therefore drain
+it from its UI tick/event bridge. If a queue adapter is never drained, pending
+events keep memory until the process hits memory pressure. Callback sinks have
+the same practical rule: keep the callback quick and post into the framework
+loop; blocking there only moves the backlog to the delivery worker.
+
 Timeout waits exist only as hidden diagnostic/script helpers.
 
 ## Domain Events
@@ -210,13 +218,11 @@ When all-trades storage is enabled, trade stream packets are queued to the
 retained history worker. UI code reads per-market rings from snapshots:
 
 ```rust
-if let Some(readers) = client
-    .snapshot()
-    .and_then(|state| {
-        let market = state.markets().get("BTCUSDT")?;
-        state.market_history_readers_for(&market)
-    })
-{
+// Keep `market`, `readers`, and per-panel cursors in UI state after the user
+// selects a symbol. Do not repeat string lookup on every paint tick.
+let Some(state) = client.snapshot() else { return; };
+let Some(market) = selected_market.as_ref() else { return; };
+if let Some(readers) = state.market_history_readers_for(market) {
     if let Some(reader) = readers.futures_trades {
         let mut rows = Vec::new();
         reader.copy_last(1000, &mut rows);

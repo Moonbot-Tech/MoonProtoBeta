@@ -137,75 +137,6 @@ fn pre_init_async_api_does_not_register_pending_for_gated_methods() {
 }
 
 #[test]
-fn raw_run_delivers_callback_on_app_thread() {
-    let mut client = Client::new(dummy_cfg());
-    client.testing_set_domain_ready(true);
-    client.authorized = true;
-    client.auth_status = AuthStatus::AuthDone;
-    client.prev_auth_status = AuthStatus::AuthDone;
-    client.need_connect = false;
-    install_send_session(&mut client);
-    client.transport.socket = Some(UdpSocket::bind("127.0.0.1:0").unwrap());
-    send_server_packet_to_client_socket(&client, Command::OrderBook, &[0xAA]);
-
-    let caller_thread = thread::current().id();
-    let (tx, rx) = mpsc::channel();
-    client.run(
-        Duration::from_millis(5),
-        Box::new(move |cmd, payload| {
-            assert_eq!(cmd, Command::OrderBook);
-            assert_eq!(payload, &[0xAA]);
-            tx.send(thread::current().id()).unwrap();
-        }),
-    );
-
-    let writer_thread = rx
-        .recv_timeout(Duration::from_secs(1))
-        .expect("writer callback thread id");
-    assert_ne!(
-        writer_thread, caller_thread,
-        "app callback must not run on the caller thread"
-    );
-}
-
-#[test]
-fn raw_run_callback_block_does_not_extend_protocol_writer_tick() {
-    let mut client = Client::new(dummy_cfg());
-    client.testing_set_domain_ready(true);
-    client.transport.socket = Some(UdpSocket::bind("127.0.0.1:0").unwrap());
-    send_server_packet_to_client_socket(&client, Command::OrderBook, &[0xAA]);
-
-    let (started_tx, started_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel();
-    let handle = thread::spawn(move || {
-        client.run(
-            Duration::from_millis(20),
-            Box::new(move |cmd, payload| {
-                assert_eq!(cmd, Command::OrderBook);
-                assert_eq!(payload, &[0xAA]);
-                started_tx.send(()).unwrap();
-                release_rx.recv().unwrap();
-            }),
-        );
-        client
-    });
-
-    started_rx
-        .recv_timeout(Duration::from_secs(1))
-        .expect("raw callback started");
-    thread::sleep(Duration::from_millis(80));
-    release_tx.send(()).unwrap();
-
-    let client = handle.join().expect("client run thread");
-    let snapshot = client.protocol_metrics_snapshot();
-    assert!(
-        snapshot.writer_tick_max_ns < 50_000_000,
-        "blocking raw app callback leaked into protocol tick: max={}ns",
-        snapshot.writer_tick_max_ns
-    );
-}
-
-#[test]
 fn lifecycle_callback_block_does_not_extend_protocol_writer_tick() {
     let mut client = Client::new(dummy_cfg());
     client.transport.socket = Some(UdpSocket::bind("127.0.0.1:0").unwrap());
@@ -277,13 +208,11 @@ fn production_protocol_step_does_not_drain_udp_until_empty() {
     send_server_packet_to_client_socket(&client, Command::OrderBook, &[0xAA]);
     send_server_packet_to_client_socket(&client, Command::OrderBook, &[0xBB]);
 
-    let events = Arc::new(Mutex::new(Vec::new()));
-    let events_cb = Arc::clone(&events);
-    let mut mode = RunMode::Callback {
-        on_data: Box::new(move |cmd, payload| {
-            events_cb.lock().push((cmd, payload.to_vec()));
-        }),
-    };
+    client.server_token = 1;
+    client.reconnect.subscribed_book_server_token = 1;
+    let mut dispatcher = EventDispatcher::new();
+    dispatcher.markets.indexes_synchronized = true;
+    let mut mode = RunMode::new(&mut dispatcher);
 
     assert!((ProtocolCore {
         client: &mut client
@@ -291,25 +220,26 @@ fn production_protocol_step_does_not_drain_udp_until_empty() {
     .run_step(&mut mode));
     drop(mode);
 
-    let events = Arc::try_unwrap(events).unwrap().into_inner();
+    let events = dispatcher.take_queued_events();
     assert_eq!(
         events.len(),
         1,
         "production run_step must process a bounded receive unit before returning to runtime publish/command work"
     );
-    assert_eq!(events[0], (Command::OrderBook, vec![0xAA]));
+    assert!(matches!(
+        events[0],
+        crate::events::Event::ParseFailed {
+            cmd: Command::OrderBook,
+            ..
+        }
+    ));
 }
 
 #[test]
 fn err_emu_drop_updates_valid_packet_stats_before_protocol_drop() {
     let mut client = Client::new(dummy_cfg());
-    let delivered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let delivered_cb = Arc::clone(&delivered);
-    let mut mode = RunMode::Callback {
-        on_data: Box::new(move |_, _| {
-            delivered_cb.fetch_add(1, Ordering::Relaxed);
-        }),
-    };
+    let mut dispatcher = EventDispatcher::new();
+    let mut mode = RunMode::new(&mut dispatcher);
     ProtocolCore {
         client: &mut client,
     }
@@ -328,7 +258,7 @@ fn err_emu_drop_updates_valid_packet_stats_before_protocol_drop() {
     assert_eq!(client.metrics.total_recv, 1234);
     assert_eq!(client.last_online, 777);
     assert_eq!(
-        delivered.load(Ordering::Relaxed),
+        dispatcher.take_queued_events().len(),
         0,
         "ErrEmu drop must happen after Delphi stats side effects but before protocol delivery"
     );
@@ -337,13 +267,8 @@ fn err_emu_drop_updates_valid_packet_stats_before_protocol_drop() {
 #[test]
 fn pre_init_domain_pushes_are_dropped_before_callback_delivery() {
     let mut client = Client::new(dummy_cfg());
-    let delivered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let delivered_cb = Arc::clone(&delivered);
-    let mut mode = RunMode::Callback {
-        on_data: Box::new(move |_, _| {
-            delivered_cb.fetch_add(1, Ordering::Relaxed);
-        }),
-    };
+    let mut dispatcher = EventDispatcher::new();
+    let mut mode = RunMode::new(&mut dispatcher);
 
     for (idx, cmd) in [
         Command::Order,
@@ -372,7 +297,7 @@ fn pre_init_domain_pushes_are_dropped_before_callback_delivery() {
     }
 
     assert_eq!(
-        delivered.load(Ordering::Relaxed),
+        dispatcher.take_queued_events().len(),
         0,
         "Delphi ClientNewData drops domain pushes before InitDone/domain_ready"
     );
@@ -386,15 +311,9 @@ fn pre_init_domain_pushes_are_dropped_before_callback_delivery() {
 fn post_init_trades_stream_requires_explicit_subscription_intent() {
     let mut client = Client::new(dummy_cfg());
     client.testing_set_domain_ready(true);
-    let delivered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let delivered_cb = Arc::clone(&delivered);
-    let mut mode = RunMode::Callback {
-        on_data: Box::new(move |cmd, payload| {
-            assert_eq!(cmd, Command::TradesStream);
-            assert_eq!(payload, &[0xAA]);
-            delivered_cb.fetch_add(1, Ordering::Relaxed);
-        }),
-    };
+    client.authorized = true;
+    let mut dispatcher = EventDispatcher::new();
+    let mut mode = RunMode::new(&mut dispatcher);
     ProtocolCore {
         client: &mut client,
     }
@@ -408,13 +327,14 @@ fn post_init_trades_stream_requires_explicit_subscription_intent() {
         &mut mode,
     );
     assert_eq!(
-        delivered.load(Ordering::Relaxed),
+        mode.dispatcher.take_queued_events().len(),
         0,
         "optional-trades deviation: no API subscription means incoming trades are dropped"
     );
 
     client.subscribe_all_trades(false);
     let _ = client.take_send_queues_for_test();
+    mode.dispatcher.markets.indexes_synchronized = true;
     ProtocolCore {
         client: &mut client,
     }
@@ -428,28 +348,32 @@ fn post_init_trades_stream_requires_explicit_subscription_intent() {
         &mut mode,
     );
 
-    assert_eq!(delivered.load(Ordering::Relaxed), 1);
+    assert!(mode
+        .dispatcher
+        .take_queued_events()
+        .iter()
+        .any(|event| matches!(
+            event,
+            crate::events::Event::ParseFailed {
+                cmd: Command::TradesStream,
+                ..
+            }
+        )));
 }
 
 #[test]
 fn data_read_sliced_payload_bypasses_recv_event_backlog() {
     let mut client = Client::new(dummy_cfg());
     client.testing_set_domain_ready(true);
+    client.authorized = true;
 
-    let delivered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let delivered_cb = Arc::clone(&delivered);
-    let mut mode = RunMode::Callback {
-        on_data: Box::new(move |cmd, payload| {
-            assert_eq!(cmd, Command::OrderBook);
-            assert_eq!(payload, &[0xAA, 0xBB]);
-            delivered_cb.fetch_add(1, Ordering::Relaxed);
-        }),
-    };
+    let mut dispatcher = EventDispatcher::new();
+    let mut mode = RunMode::new(&mut dispatcher);
     ProtocolCore {
         client: &mut client,
     }
     .dispatch_command(
-        Command::OrderBook.to_byte(),
+        Command::Data.to_byte(),
         &[0xAA, 0xBB],
         321,
         123,
@@ -462,7 +386,14 @@ fn data_read_sliced_payload_bypasses_recv_event_backlog() {
         &mut mode,
     );
 
-    assert_eq!(delivered.load(Ordering::Relaxed), 1);
+    drop(mode);
+    assert!(dispatcher.take_queued_events().iter().any(|event| matches!(
+        event,
+        crate::events::Event::Raw {
+            cmd: Command::Data,
+            payload
+        } if payload == &[0xAA, 0xBB]
+    )));
     assert_eq!(client.avg_dup_count, 25.0);
     assert_eq!(client.metrics.total_recv, 321);
     assert_eq!(client.last_online, 123);
@@ -472,34 +403,19 @@ fn data_read_sliced_payload_bypasses_recv_event_backlog() {
 fn data_read_grouped_payload_applies_recv_effects_once() {
     let mut client = Client::new(dummy_cfg());
     client.testing_set_domain_ready(true);
+    client.authorized = true;
     let mut grouped = Vec::new();
     // Non-sensitive sub-commands: S1 drops plaintext sensitive cmds even inside a
     // group, so the grouped-delivery test uses non-sensitive commands.
-    grouped.push(Command::OrderBook.to_byte());
+    grouped.push(Command::Data.to_byte());
     grouped.extend_from_slice(&1u16.to_le_bytes());
     grouped.push(0xAA);
-    grouped.push(Command::Data.to_byte());
+    grouped.push(Command::Ping.to_byte());
     grouped.extend_from_slice(&1u16.to_le_bytes());
     grouped.push(0xBB);
 
-    let delivered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let delivered_cb = Arc::clone(&delivered);
-    let mut mode = RunMode::Callback {
-        on_data: Box::new(move |cmd, payload| {
-            match delivered_cb.load(Ordering::Relaxed) {
-                0 => {
-                    assert_eq!(cmd, Command::OrderBook);
-                    assert_eq!(payload, &[0xAA]);
-                }
-                1 => {
-                    assert_eq!(cmd, Command::Data);
-                    assert_eq!(payload, &[0xBB]);
-                }
-                _ => panic!("unexpected extra grouped payload"),
-            }
-            delivered_cb.fetch_add(1, Ordering::Relaxed);
-        }),
-    };
+    let mut dispatcher = EventDispatcher::new();
+    let mut mode = RunMode::new(&mut dispatcher);
 
     ProtocolCore {
         client: &mut client,
@@ -513,9 +429,86 @@ fn data_read_grouped_payload_applies_recv_effects_once() {
         &mut mode,
     );
 
-    assert_eq!(delivered.load(Ordering::Relaxed), 2);
+    drop(mode);
+    let events = dispatcher.take_queued_events();
+    assert_eq!(events.len(), 2);
+    assert!(matches!(
+        &events[0],
+        crate::events::Event::Raw {
+            cmd: Command::Data,
+            payload
+        } if payload == &[0xAA]
+    ));
+    assert!(matches!(
+        &events[1],
+        crate::events::Event::Raw {
+            cmd: Command::Ping,
+            payload
+        } if payload == &[0xBB]
+    ));
     assert_eq!(client.metrics.total_recv, 77);
     assert_eq!(client.last_online, 456);
+}
+
+#[test]
+fn active_dispatch_panic_drops_payload_without_rebuilding_dispatcher() {
+    let mut client = Client::new(dummy_cfg());
+    client.testing_set_domain_ready(true);
+    client.authorized = true;
+    let mut dispatcher = EventDispatcher::new();
+    dispatcher.panic_next_active_dispatch_for_test();
+
+    let result = {
+        let mut mode = RunMode::new(&mut dispatcher);
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ProtocolCore {
+                client: &mut client,
+            }
+            .client_new_data(
+                Command::Balance.to_byte(),
+                vec![1, 2],
+                false,
+                false,
+                1,
+                &mut mode,
+            );
+        }))
+    };
+
+    assert!(
+        result.is_ok(),
+        "active dispatch panic must be isolated per payload, not unwind into runtime supervisor"
+    );
+    assert!(
+        dispatcher.take_queued_events().is_empty(),
+        "the panicking payload is dropped instead of publishing partial events"
+    );
+
+    {
+        let mut mode = RunMode::new(&mut dispatcher);
+        ProtocolCore {
+            client: &mut client,
+        }
+        .client_new_data(
+            Command::Balance.to_byte(),
+            vec![1, 2],
+            false,
+            false,
+            2,
+            &mut mode,
+        );
+    }
+
+    assert!(
+        dispatcher.take_queued_events().iter().any(|event| matches!(
+            event,
+            crate::events::Event::ParseFailed {
+                cmd: Command::Balance,
+                ..
+            }
+        )),
+        "the same dispatcher must keep running after one dropped payload"
+    );
 }
 
 #[test]
@@ -529,18 +522,10 @@ fn s1_drops_plaintext_sensitive_commands_but_delivers_non_sensitive() {
     // commands arriving Crypted are delivered (handshake/crypted paths cover that).
     let mut client = Client::new(dummy_cfg());
     client.testing_set_domain_ready(true);
+    client.authorized = true;
 
-    let delivered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let delivered_cb = Arc::clone(&delivered);
-    let mut mode = RunMode::Callback {
-        on_data: Box::new(move |cmd, payload| {
-            // Only the non-sensitive OrderBook fed below may ever reach the sink;
-            // every plaintext sensitive command must have been dropped earlier.
-            assert_eq!(cmd, Command::OrderBook);
-            assert_eq!(payload, &[0xAA]);
-            delivered_cb.fetch_add(1, Ordering::Relaxed);
-        }),
-    };
+    let mut dispatcher = EventDispatcher::new();
+    let mut mode = RunMode::new(&mut dispatcher);
 
     for sensitive in [
         Command::Order,
@@ -562,7 +547,7 @@ fn s1_drops_plaintext_sensitive_commands_but_delivers_non_sensitive() {
         );
     }
     assert_eq!(
-        delivered.load(Ordering::Relaxed),
+        mode.dispatcher.take_queued_events().len(),
         0,
         "plaintext sensitive commands must be dropped by the S1 gate"
     );
@@ -572,7 +557,7 @@ fn s1_drops_plaintext_sensitive_commands_but_delivers_non_sensitive() {
         client: &mut client,
     }
     .dispatch_command(
-        Command::OrderBook.to_byte(),
+        Command::Data.to_byte(),
         &[0xAA],
         0,
         0,
@@ -580,5 +565,15 @@ fn s1_drops_plaintext_sensitive_commands_but_delivers_non_sensitive() {
         None,
         &mut mode,
     );
-    assert_eq!(delivered.load(Ordering::Relaxed), 1);
+    assert!(mode
+        .dispatcher
+        .take_queued_events()
+        .iter()
+        .any(|event| matches!(
+            event,
+            crate::events::Event::Raw {
+                cmd: Command::Data,
+                payload
+            } if payload == &[0xAA]
+        )));
 }

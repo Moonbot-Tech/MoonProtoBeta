@@ -18,6 +18,7 @@ use crate::MoonTime;
 use parking_lot::RwLock;
 
 const FIVE_MINUTES_MS: i64 = 5 * 60 * 1_000;
+const STALE_CANDLES_SNAPSHOT_MS: i64 = 11 * 60 * 1_000;
 
 mod config;
 mod derived;
@@ -202,7 +203,11 @@ impl MarketHistoryStore {
         self.derived
     }
 
-    pub(crate) fn replace_candles_5m_from_snapshot(&mut self, candles: &[Candle5mRow]) {
+    pub(crate) fn replace_candles_5m_from_snapshot(
+        &mut self,
+        candles: &[Candle5mRow],
+        now_time: MoonTime,
+    ) {
         // Snapshot = sealed candles only (Delphi `Deep5m`; `StoreCandlesToZip`
         // serializes Deep5m, and Recalc5mCandle writes there only on seal — the
         // server does not send the in-progress `FCandle`). Push them all into
@@ -211,13 +216,22 @@ impl MarketHistoryStore {
         // period itself from the trade stream into a separate `current_candle`
         // (Delphi FCandle).
         let last_time = candles.last().map(|candle| candle.time).unwrap_or_default();
+        let candles = if candles_snapshot_is_stale(last_time, now_time) {
+            &[][..]
+        } else {
+            candles
+        };
         self.current_candle = None;
         self.candle_deltas_dirty = true;
         if let Some(writer) = self.candles_5m.as_mut() {
             writer.clear();
             writer.push_batch(candles);
         }
-        self.refresh_derived_analytics(last_time);
+        self.refresh_derived_analytics(if now_time != MoonTime::ZERO {
+            now_time
+        } else {
+            last_time
+        });
     }
 
     /// Delphi `TMarket.AddFrom` retained LastPrice row.
@@ -418,6 +432,13 @@ impl MarketHistoryStore {
             None
         }
     }
+}
+
+fn candles_snapshot_is_stale(last_time: MoonTime, now_time: MoonTime) -> bool {
+    if last_time == MoonTime::ZERO || now_time == MoonTime::ZERO {
+        return false;
+    }
+    (now_time.unix_millis() - last_time.unix_millis()).abs() > STALE_CANDLES_SNAPSHOT_MS
 }
 
 fn optional_ring<T>(capacity: usize) -> (Option<SeqRingWriter<T>>, Option<SeqRingReader<T>>)

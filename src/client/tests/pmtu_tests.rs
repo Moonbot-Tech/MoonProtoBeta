@@ -1,4 +1,5 @@
 use super::*;
+use crate::events::EventDispatcher;
 
 fn dummy_cfg() -> ClientConfig {
     ClientConfig {
@@ -132,15 +133,10 @@ fn process_ping_reader_msg(
     payload: &[u8],
     raw_now_dt: f64,
     corrected_now_dt: f64,
-) -> Vec<(Command, Vec<u8>)> {
+) -> Vec<crate::events::Event> {
     let recv_bytes = payload.len() as u64;
-    let delivered = Arc::new(Mutex::new(Vec::new()));
-    let delivered_for_cb = Arc::clone(&delivered);
-    let mut mode = RunMode::Callback {
-        on_data: Box::new(move |cmd, payload| {
-            delivered_for_cb.lock().push((cmd, payload.to_vec()));
-        }),
-    };
+    let mut dispatcher = EventDispatcher::new();
+    let mut mode = RunMode::new(&mut dispatcher);
     let mut writer = writer(client);
     writer.apply_recv_side_effects(recv_bytes, 123);
     let total_sent = writer.client.metrics.total_sent.load(Ordering::Relaxed);
@@ -163,18 +159,16 @@ fn process_ping_reader_msg(
         &mut mode,
     );
     drop(mode);
-    Arc::try_unwrap(delivered).unwrap().into_inner()
+    dispatcher.take_queued_events()
 }
 
 #[test]
 fn ping_pmtu_above_8192_is_preserved() {
     let mut client = Client::new(dummy_cfg());
 
-    let delivered = process_ping_reader_msg(&mut client, &ping_payload_with_pmtu(8_224), 0.0, 0.0);
+    let _events = process_ping_reader_msg(&mut client, &ping_payload_with_pmtu(8_224), 0.0, 0.0);
 
     assert_eq!(client.actual_pmtu(), 8_224);
-    assert_eq!(delivered.len(), 1);
-    assert_eq!(delivered[0].0, Command::Ping);
 }
 
 #[test]
@@ -231,15 +225,13 @@ fn ping_server_time_delta_uses_raw_now_not_ntp_corrected_now() {
     payload[0..8].copy_from_slice(&server_time.to_le_bytes());
     payload[8..16].copy_from_slice(&initial_time.to_le_bytes());
 
-    let delivered = process_ping_reader_msg(&mut client, &payload, raw_now, corrected_now);
+    let _events = process_ping_reader_msg(&mut client, &payload, raw_now, corrected_now);
 
     assert!(
         ((client.server_time_delta_days() * 86400.0) - 2.0).abs() < 0.001,
         "Delphi ClientNewData uses raw Now for ServerTimeDelta, not NTP-corrected SendPing time"
     );
     assert_eq!(client.net_lag_ping_ms(), 3000);
-    assert_eq!(delivered.len(), 1);
-    assert_eq!(delivered[0].0, Command::Ping);
 }
 
 #[test]
@@ -309,13 +301,8 @@ fn ping_ack_reader_core_is_not_reapplied_by_main_ping_branch() {
     assert!(!client.send_lock.lock().tmp_slider.has_new_data);
     assert!(client.recv.recvd_slider.has_new_data);
 
-    let delivered = Arc::new(Mutex::new(Vec::new()));
-    let delivered_for_cb = Arc::clone(&delivered);
-    let mut mode = RunMode::Callback {
-        on_data: Box::new(move |cmd, payload| {
-            delivered_for_cb.lock().push((cmd, payload.to_vec()));
-        }),
-    };
+    let mut dispatcher = EventDispatcher::new();
+    let mut mode = RunMode::new(&mut dispatcher);
     ProtocolCore {
         client: &mut client,
     }
@@ -328,13 +315,13 @@ fn ping_ack_reader_core_is_not_reapplied_by_main_ping_branch() {
         &mut mode,
     );
     drop(mode);
-    let delivered = Arc::try_unwrap(delivered).unwrap().into_inner();
+    let delivered = dispatcher.take_queued_events();
 
     assert!(
         !client.send_lock.lock().tmp_slider.has_new_data,
         "main Ping branch must not write TmpSlider again after reader DataReadInt core"
     );
-    assert_eq!(delivered.len(), 1);
+    assert!(delivered.is_empty());
 }
 
 #[test]

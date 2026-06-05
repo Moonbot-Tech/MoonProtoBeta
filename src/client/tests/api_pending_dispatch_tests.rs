@@ -293,10 +293,7 @@ fn pending_api_response_still_reaches_dispatcher_state() {
         build_engine_response_payload(request_uid, EngineMethod::GetMarketsIndexes, &response_data);
 
     let mut payloads = Vec::new();
-    {
-        let mut sink = DispatchSink::Buffer(&mut payloads);
-        client.client_new_data_decoded(Command::API.to_byte(), payload, false, false, &mut sink);
-    }
+    client.client_new_data_decoded(Command::API.to_byte(), payload, false, false, &mut payloads);
 
     let resp = rx.try_recv().expect("pending receiver must get response");
     assert_eq!(resp.request_uid, request_uid);
@@ -343,10 +340,7 @@ fn pending_heavy_markets_response_is_applied_by_pending_owner_not_inline_dispatc
     assert!(consumed);
 
     let mut payloads = Vec::new();
-    {
-        let mut sink = DispatchSink::Buffer(&mut payloads);
-        client.client_new_data_decoded(Command::API.to_byte(), payload, true, false, &mut sink);
-    }
+    client.client_new_data_decoded(Command::API.to_byte(), payload, true, false, &mut payloads);
 
     let resp = rx.try_recv().expect("pending receiver must own response");
     assert_eq!(resp.request_uid, request_uid);
@@ -370,9 +364,8 @@ fn data_read_api_response_reaches_pending_receiver_before_run_loop() {
     // the crypted command path (S1 part 2 drops a plaintext AuthCheck as a spoof).
     let encrypted_response =
         build_server_crypted_payload(&decode_key, 1, Command::API, &response_payload);
-    let mut mode = RunMode::Callback {
-        on_data: Box::new(|_, _| panic!("pending response must not be duplicated")),
-    };
+    let mut dispatcher = EventDispatcher::new();
+    let mut mode = RunMode::new(&mut dispatcher);
 
     ProtocolCore {
         client: &mut client,
@@ -406,9 +399,8 @@ fn crypted_app_packets_before_auth_do_not_advance_slider_or_pending_api() {
     let response_payload = build_engine_response_payload(request_uid, EngineMethod::BaseCheck, &[]);
     let encrypted_response =
         build_server_crypted_payload(&decode_key, 1, Command::API, &response_payload);
-    let mut mode = RunMode::Callback {
-        on_data: Box::new(|_, _| panic!("pre-auth encrypted app data must be dropped")),
-    };
+    let mut dispatcher = EventDispatcher::new();
+    let mut mode = RunMode::new(&mut dispatcher);
 
     ProtocolCore {
         client: &mut client,
@@ -490,39 +482,13 @@ fn primary_hello_resets_transport_receive_state_before_new_session() {
 }
 
 #[test]
-fn reader_consumed_api_response_is_not_duplicated_to_callback_sink() {
-    let mut client = Client::new(dummy_cfg());
-    let payload = build_engine_response_payload(0x55, EngineMethod::BaseCheck, &[]);
-    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let calls_for_cb = calls.clone();
-    let mut mode = RunMode::Callback {
-        on_data: Box::new(move |_cmd, _payload| {
-            calls_for_cb.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }),
-    };
-
-    ProtocolCore {
-        client: &mut client,
-    }
-    .client_new_data(Command::API.to_byte(), payload, true, false, 123, &mut mode);
-
-    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
-}
-
-#[test]
 fn reader_consumed_api_response_still_reaches_dispatcher_state() {
     let mut client = Client::new(dummy_cfg());
     client.authorized = true;
     client.auth_status = AuthStatus::AuthDone;
     let payload = build_engine_response_payload(0x66, EngineMethod::AuthCheck, &[]);
     let mut dispatcher = EventDispatcher::new();
-    let mut mode = RunMode::Dispatcher {
-        dispatcher: &mut dispatcher,
-        on_event: DispatcherEventFn::Queue,
-        event_buf: Vec::new(),
-        payload_buf: Vec::new(),
-        active_actions_buf: Vec::new(),
-    };
+    let mut mode = RunMode::new(&mut dispatcher);
 
     ProtocolCore {
         client: &mut client,
@@ -645,13 +611,7 @@ fn decoded_batch_uses_receive_timestamp_for_active_timers() {
         ];
 
         {
-            let mut mode = RunMode::Dispatcher {
-                dispatcher: &mut dispatcher,
-                on_event: DispatcherEventFn::Queue,
-                event_buf: Vec::new(),
-                payload_buf: Vec::new(),
-                active_actions_buf: Vec::new(),
-            };
+            let mut mode = RunMode::new(&mut dispatcher);
             if batch {
                 for (payload, timestamp_ms) in messages.iter() {
                     ProtocolCore {
@@ -764,9 +724,8 @@ fn data_read_candles_chunks_complete_receiver_from_background_parse_worker() {
     let payload0 = build_engine_response_payload(uid, EngineMethod::RequestCandlesData, &chunk0);
     let payload1 = build_engine_response_payload(uid, EngineMethod::RequestCandlesData, &chunk1);
 
-    let mut mode = RunMode::Callback {
-        on_data: Box::new(|_, _| panic!("candles chunks must be consumed")),
-    };
+    let mut dispatcher = EventDispatcher::new();
+    let mut mode = RunMode::new(&mut dispatcher);
 
     ProtocolCore {
         client: &mut client,
@@ -816,34 +775,9 @@ fn reader_consumed_candles_chunk_is_not_delivered_to_callback_or_dispatcher() {
         EngineMethod::RequestCandlesData,
         &[0u8, 0, 1, 0, 1, 2],
     );
-    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let calls_for_cb = calls.clone();
-    let mut callback_mode = RunMode::Callback {
-        on_data: Box::new(move |_cmd, _payload| {
-            calls_for_cb.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }),
-    };
-    ProtocolCore {
-        client: &mut client,
-    }
-    .client_new_data(
-        Command::API.to_byte(),
-        payload.clone(),
-        false,
-        true,
-        123,
-        &mut callback_mode,
-    );
-    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
 
     let mut dispatcher = EventDispatcher::new();
-    let mut dispatcher_mode = RunMode::Dispatcher {
-        dispatcher: &mut dispatcher,
-        on_event: DispatcherEventFn::Queue,
-        event_buf: Vec::new(),
-        payload_buf: Vec::new(),
-        active_actions_buf: Vec::new(),
-    };
+    let mut dispatcher_mode = RunMode::new(&mut dispatcher);
     ProtocolCore {
         client: &mut client,
     }
@@ -865,18 +799,15 @@ fn pending_api_response_is_not_duplicated_to_callback_sink() {
     let rx = client.pending_api.api_pending.register(request_uid);
     let payload = build_engine_response_payload(request_uid, EngineMethod::BaseCheck, &[]);
 
-    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let calls_for_cb = calls.clone();
-    let mut cb: OnDataFn = Box::new(move |_cmd, _payload| {
-        calls_for_cb.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    });
-    {
-        let mut sink = DispatchSink::Callback(&mut cb);
-        client.client_new_data_decoded(Command::API.to_byte(), payload, false, false, &mut sink);
-    }
+    let mut payloads = Vec::new();
+    client.client_new_data_decoded(Command::API.to_byte(), payload, false, false, &mut payloads);
 
     assert!(rx.try_recv().is_ok(), "pending receiver must get response");
-    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(
+        payloads.len(),
+        1,
+        "the active dispatcher still receives pending API payloads for state updates"
+    );
 }
 
 #[test]

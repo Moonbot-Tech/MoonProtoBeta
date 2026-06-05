@@ -165,23 +165,14 @@ fn run_protocol_step(
     dispatcher: &mut crate::events::EventDispatcher,
     buffers: &mut InlineDispatchBuffers,
 ) -> bool {
-    let mut mode = RunMode::Dispatcher {
+    let mut mode = RunMode::with_buffers(
         dispatcher,
-        on_event: DispatcherEventFn::Queue,
-        event_buf: std::mem::take(&mut buffers.event_buf),
-        payload_buf: std::mem::take(&mut buffers.payload_buf),
-        active_actions_buf: std::mem::take(&mut buffers.active_actions_buf),
-    };
+        std::mem::take(&mut buffers.event_buf),
+        std::mem::take(&mut buffers.payload_buf),
+        std::mem::take(&mut buffers.active_actions_buf),
+    );
     let keep_running = (ProtocolCore { client }).run_step(&mut mode);
-    let RunMode::Dispatcher {
-        event_buf,
-        payload_buf,
-        active_actions_buf,
-        ..
-    } = mode
-    else {
-        unreachable!("inline runtime must use RunMode::Dispatcher");
-    };
+    let (event_buf, payload_buf, active_actions_buf) = mode.into_buffers();
     buffers.event_buf = event_buf;
     buffers.payload_buf = payload_buf;
     buffers.active_actions_buf = active_actions_buf;

@@ -90,10 +90,22 @@ impl MarketHistoryStore {
         now_time: MoonTime,
     ) -> (DerivedDeltaSnapshot, CandleVolumeSnapshot) {
         let mut acc = CandleDerivedAccumulator::new(now_time, self.eps_profile.eps);
+        let mut sealed_count = 0usize;
+        let mut newest_sealed_valid = false;
         if let Some(reader) = self.readers.candles_5m.as_ref() {
             reader.with_last(reader.capacity(), |view| {
-                view.for_each(|row| acc.add(*row));
+                view.for_each(|row| {
+                    sealed_count += 1;
+                    newest_sealed_valid = row.time != MoonTime::ZERO;
+                    acc.add(*row);
+                });
             });
+        }
+        if sealed_count < 3 || !newest_sealed_valid {
+            return (
+                DerivedDeltaSnapshot::default(),
+                CandleVolumeSnapshot::default(),
+            );
         }
         // The in-progress candle no longer lives in the ring — always add it to the derived values.
         if let Some(candle) = self.current_candle {

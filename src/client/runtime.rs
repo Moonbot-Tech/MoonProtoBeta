@@ -101,67 +101,6 @@ impl Client {
         }
     }
 
-    /// Low-level finite protocol pump for crate tests.
-    ///
-    /// Regular applications should use [`MoonClient`](crate::MoonClient): it
-    /// owns the runtime thread and has no user-selected loop duration.
-    #[cfg(test)]
-    pub(crate) fn run(&mut self, duration: Duration, on_data: OnDataFn) {
-        // Test-only raw pump. It keeps the old callback queue shape available
-        // for protocol unit tests without exposing a finite-duration runtime
-        // choice to terminal applications.
-        let (app_tx, app_rx) = mpsc::channel::<RawAppEvent>();
-        let lifecycle_pair = if self.lifecycle_event_sender_installed() {
-            None
-        } else {
-            self.lifecycle.lifecycle_cb.take().map(|cb| {
-                let (tx, rx) = mpsc::channel::<LifecycleEvent>();
-                *self.lifecycle.lifecycle_app_tx.lock() = Some(tx);
-                (rx, cb)
-            })
-        };
-        let clear_lifecycle_app_tx = lifecycle_pair.is_some();
-        let lifecycle_app_tx = Arc::clone(&self.lifecycle.lifecycle_app_tx);
-        let mut restored_lifecycle_cb: Option<LifecycleFn> = None;
-        thread::scope(|scope| {
-            let lifecycle_handle = lifecycle_pair.map(|(rx, cb)| {
-                scope.spawn(move || {
-                    let mut cb = cb;
-                    while let Ok(event) = rx.recv() {
-                        cb(event);
-                    }
-                    cb
-                })
-            });
-            let app_handle = scope.spawn(move || {
-                let mut on_data = on_data;
-                while let Ok((cmd, payload)) = app_rx.recv() {
-                    on_data(cmd, &payload);
-                }
-            });
-            {
-                let mut mode = RunMode::CallbackQueue { app_tx };
-                ProtocolCore { client: self }.run(duration, &mut mode);
-            }
-            if clear_lifecycle_app_tx {
-                *lifecycle_app_tx.lock() = None;
-            }
-            app_handle
-                .join()
-                .expect("moonproto app callback thread panicked");
-            if let Some(handle) = lifecycle_handle {
-                restored_lifecycle_cb = Some(
-                    handle
-                        .join()
-                        .expect("moonproto lifecycle callback thread panicked"),
-                );
-            }
-        });
-        if restored_lifecycle_cb.is_some() {
-            self.lifecycle.lifecycle_cb = restored_lifecycle_cb;
-        }
-    }
-
     /// Send LogOff and close socket. Call when done.
     /// Matches TMoonProtoBaseClient.Disconnect (Common.pas:290-298)
     pub(crate) fn disconnect(&mut self) {

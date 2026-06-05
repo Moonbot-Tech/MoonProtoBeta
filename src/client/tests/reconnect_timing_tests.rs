@@ -517,13 +517,12 @@ fn post_init_reconnect_restores_domain_without_second_init_and_reopens_stream_ga
         build_engine_response_payload(unsubscribe_uid, EngineMethod::UnsubscribeAllTrades, &[]);
     {
         let mut ignored = Vec::new();
-        let mut sink = DispatchSink::Buffer(&mut ignored);
         client.client_new_data_decoded(
             Command::API.to_byte(),
             unsubscribe_response,
             false,
             false,
-            &mut sink,
+            &mut ignored,
         );
     }
     let subscribe_due = client
@@ -556,13 +555,12 @@ fn post_init_reconnect_restores_domain_without_second_init_and_reopens_stream_ga
         build_engine_response_payload(0x7777, EngineMethod::GetMarketsIndexes, &response_data);
     let mut buffered = Vec::new();
     {
-        let mut sink = DispatchSink::Buffer(&mut buffered);
         client.client_new_data_decoded(
             Command::API.to_byte(),
             response_payload,
             false,
             false,
-            &mut sink,
+            &mut buffered,
         );
     }
     assert!(!client.reconnect.indexes_fetch_in_flight);
@@ -626,13 +624,12 @@ fn post_init_reconnect_restores_domain_without_second_init_and_reopens_stream_ga
         build_engine_response_payload(subscribe_uid, EngineMethod::SubscribeOrderBook, &[]);
     {
         let mut ignored = Vec::new();
-        let mut sink = DispatchSink::Buffer(&mut ignored);
         client.client_new_data_decoded(
             Command::API.to_byte(),
             response_payload,
             false,
             false,
-            &mut sink,
+            &mut ignored,
         );
     }
     assert_eq!(
@@ -737,13 +734,12 @@ fn trades_reconnect_restores_distinct_mm_orders_override_after_delayed_subscribe
         build_engine_response_payload(unsubscribe_uid, EngineMethod::UnsubscribeAllTrades, &[]);
     {
         let mut ignored = Vec::new();
-        let mut sink = DispatchSink::Buffer(&mut ignored);
         client.client_new_data_decoded(
             Command::API.to_byte(),
             unsubscribe_response,
             false,
             false,
-            &mut sink,
+            &mut ignored,
         );
     }
     let subscribe_due = client
@@ -822,13 +818,12 @@ fn orderbook_reconnect_retries_until_full_batch_response_confirms_server_token()
         build_engine_response_payload(0xABCD, EngineMethod::SubscribeOrderBook, &[]);
     {
         let mut ignored = Vec::new();
-        let mut sink = DispatchSink::Buffer(&mut ignored);
         client.client_new_data_decoded(
             Command::API.to_byte(),
             normal_subscribe_response,
             false,
             false,
-            &mut sink,
+            &mut ignored,
         );
     }
     assert_eq!(
@@ -858,13 +853,12 @@ fn orderbook_reconnect_retries_until_full_batch_response_confirms_server_token()
         build_engine_response_payload(second_uid, EngineMethod::SubscribeOrderBook, &[]);
     {
         let mut ignored = Vec::new();
-        let mut sink = DispatchSink::Buffer(&mut ignored);
         client.client_new_data_decoded(
             Command::API.to_byte(),
             response_payload,
             false,
             false,
-            &mut sink,
+            &mut ignored,
         );
     }
     assert_eq!(
@@ -960,13 +954,12 @@ fn first_successful_orderbook_subscribe_sets_initial_book_server_token() {
         build_engine_response_payload(0xABCD, EngineMethod::SubscribeOrderBook, &[]);
     {
         let mut ignored = Vec::new();
-        let mut sink = DispatchSink::Buffer(&mut ignored);
         client.client_new_data_decoded(
             Command::API.to_byte(),
             response_payload,
             false,
             false,
-            &mut sink,
+            &mut ignored,
         );
     }
 
@@ -998,13 +991,12 @@ fn malformed_get_markets_indexes_response_does_not_reopen_stream_gate() {
 
     let mut buffered = Vec::new();
     {
-        let mut sink = DispatchSink::Buffer(&mut buffered);
         client.client_new_data_decoded(
             Command::API.to_byte(),
             response_payload,
             false,
             false,
-            &mut sink,
+            &mut buffered,
         );
     }
 
@@ -1214,13 +1206,12 @@ fn trades_reconnect_retries_every_five_seconds_until_stream_token_is_seen() {
     );
     {
         let mut ignored = Vec::new();
-        let mut sink = DispatchSink::Buffer(&mut ignored);
         client.client_new_data_decoded(
             Command::API.to_byte(),
             first_unsubscribe_response,
             false,
             false,
-            &mut sink,
+            &mut ignored,
         );
     }
     let first_subscribe_due = client
@@ -1239,13 +1230,12 @@ fn trades_reconnect_retries_every_five_seconds_until_stream_token_is_seen() {
         build_engine_response_payload(first_subscribe_uid, EngineMethod::SubscribeAllTrades, &[]);
     {
         let mut ignored = Vec::new();
-        let mut sink = DispatchSink::Buffer(&mut ignored);
         client.client_new_data_decoded(
             Command::API.to_byte(),
             first_subscribe_response,
             false,
             false,
-            &mut sink,
+            &mut ignored,
         );
     }
     let refreshed_at = client.reconnect.last_trades_reconnect_check_ms;
@@ -1304,13 +1294,12 @@ fn successful_subscribe_all_trades_response_refreshes_reconnect_gate() {
         build_engine_response_payload(0x7777, EngineMethod::SubscribeAllTrades, &[]);
     let mut buffered = Vec::new();
     {
-        let mut sink = DispatchSink::Buffer(&mut buffered);
         client.client_new_data_decoded(
             Command::API.to_byte(),
             response_payload,
             false,
             false,
-            &mut sink,
+            &mut buffered,
         );
     }
 
@@ -1512,13 +1501,8 @@ fn ping_before_fine_does_not_stop_connect_retry_after_lost_fine() {
     client.clear_hello_wait_state();
 
     let ping_payload = vec![0u8; control::PING_SIZE];
-    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let events_cb = std::sync::Arc::clone(&events);
-    let mut mode = RunMode::Callback {
-        on_data: Box::new(move |cmd, payload| {
-            events_cb.lock().unwrap().push((cmd, payload.to_vec()));
-        }),
-    };
+    let mut dispatcher = EventDispatcher::new();
+    let mut mode = RunMode::new(&mut dispatcher);
     let sent_before = client.take_send_queues_for_test();
     let sent_before_len = sent_before.0.len() + sent_before.1.len() + sent_before.2.len();
     let mut protocol_wait = Duration::ZERO;
@@ -1549,8 +1533,8 @@ fn ping_before_fine_does_not_stop_connect_retry_after_lost_fine() {
         "pre-AuthDone Ping must not update RTT/PMTU fields",
     );
     assert!(
-        events.lock().unwrap().is_empty(),
-        "pre-AuthDone Ping must not reach app/domain callback",
+        dispatcher.take_queued_events().is_empty(),
+        "pre-AuthDone Ping must not reach app/domain dispatcher"
     );
     assert_eq!(
         sent_before_len, sent_after_ping_len,

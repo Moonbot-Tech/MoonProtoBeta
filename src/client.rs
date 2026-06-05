@@ -106,11 +106,7 @@ pub(crate) use send_queue::{SendPriority, UniqueKey};
 pub(crate) use sender::{ClientSender, SubscribeError};
 pub use subscriptions::{ActiveSubscriptions, TradesSubscription};
 
-#[cfg(test)]
-pub(crate) use app_dispatch::OnDataFn;
-#[cfg(test)]
-use app_dispatch::RawAppEvent;
-use app_dispatch::{metric_api_method, DispatchSink, DispatcherEventFn, RunMode};
+use app_dispatch::{metric_api_method, RunMode};
 pub(crate) use candles::{EngineResponseMeta, PartialCandles};
 pub(crate) use clock::{
     current_utc_hour_slot, delphi_now, delphi_now_raw, get_server_time_delta_global,

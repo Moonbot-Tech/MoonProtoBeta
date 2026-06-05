@@ -3,13 +3,13 @@
 use super::*;
 use crate::commands::candles::{DeepHistoryKind, DeepPrice};
 use crate::commands::strategy_serializer::StrategySnapshot;
-use crate::state::{MarketHandle, OrderBookKind, OrderBookSnapshot, TopOfBook};
+use crate::state::{MarketHandle, OrderBookKind, OrderBookReadGuard, TopOfBook};
 
-/// Immutable read-model copy published by `MoonClient`.
+/// Read-only Active Lib view published by `MoonClient`.
 ///
-/// The runtime owns the live state and publishes immutable snapshots after
-/// applying server data. User code can keep a snapshot for rendering without
-/// blocking protocol ACK/retry/send progress.
+/// User code cannot mutate protocol state through this value. Internally, hot
+/// domains such as markets/orderbooks use shared read handles so packet apply
+/// does not deep-clone large maps while a UI view is alive.
 #[derive(Debug, Clone)]
 pub struct MoonStateSnapshot {
     orders: CowState<Orders>,
@@ -44,7 +44,7 @@ impl MoonStateSnapshot {
     /// through the maintained markets state and then reads the matching applied
     /// book. It returns `None` while market indexes are stale or the book has
     /// not arrived yet.
-    pub fn order_book(&self, market_name: &str, kind: OrderBookKind) -> Option<&OrderBookSnapshot> {
+    pub fn order_book(&self, market_name: &str, kind: OrderBookKind) -> Option<OrderBookReadGuard> {
         let market_index = self.markets.market_index_by_name(market_name)?;
         self.order_books.book(market_index, kind)
     }
@@ -58,14 +58,13 @@ impl MoonStateSnapshot {
         &self,
         market: &MarketHandle,
         kind: OrderBookKind,
-    ) -> Option<&OrderBookSnapshot> {
+    ) -> Option<OrderBookReadGuard> {
         self.order_book(market.name(), kind)
     }
 
     /// Best bid/ask from the current applied orderbook for a market name.
     pub fn top_of_book(&self, market_name: &str, kind: OrderBookKind) -> Option<TopOfBook> {
-        self.order_book(market_name, kind)
-            .map(OrderBookSnapshot::top)
+        self.order_book(market_name, kind).map(|book| book.top())
     }
 
     /// Best bid/ask from the current applied orderbook for a stable market handle.
