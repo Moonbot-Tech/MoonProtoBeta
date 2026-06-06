@@ -6,15 +6,40 @@
 
 # MoonProto
 
-Rust client library for the MoonProto UDP protocol used by MoonBot servers.
+Rust SDK / Active Lib for connecting external terminals and tools to a running
+MoonBot core.
 
-MoonProto is for building **thin clients** over a MoonBot execution core: the
-core owns all trading mechanics (orders, stops, strategies, risk); this library
-renders the core's state and relays the user's intent to it.
+In plain terms, this repository is the client-side library layer between your
+application and the MoonBot core:
+
+```text
+your terminal / bot UI / tool
+        |
+        v
+MoonProto Rust library
+        |
+        v
+MoonBot core with MoonProto enabled
+        |
+        v
+exchange accounts, orders, strategies, balances
+```
+
+MoonProto is not a standalone trading terminal, not a UI template, and not the
+server-side API implementation inside MoonBot. The MoonBot core already owns the
+trading mechanics (orders, stops, strategies, risk, exchange access). This
+library connects to that core, keeps a live read model, and exposes a Rust API
+for application code.
 
 The crate contains the transport layer, handshake, reconnect, reliable sliced
-datagrams, typed command parsers/builders, read-model state, and the active
-session API.
+datagrams, typed command parsers/builders, read-model state, and the owned
+runtime session API. Application code usually works with:
+
+- `MoonClient` as the connection/runtime owner;
+- snapshots and events for current markets, balances, orders, trades,
+  orderbooks, candles, strategies, settings, and UI/chart facts;
+- typed intents such as subscribe, place/cancel/move order, refresh assets, and
+  update settings.
 
 MoonProto supports built-in transport modes V0, V1, and V2. The selected mode
 must match the server-side connection setting. Unsupported mode values normalize
