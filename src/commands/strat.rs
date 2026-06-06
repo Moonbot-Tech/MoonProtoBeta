@@ -1,4 +1,4 @@
-//! MPC_Strat channel — TBaseStratCommand subcommands.
+//! MPC_Strat channel — TBaseStratCommand payloads.
 //!
 //! Delphi source: `MoonProto/MoonProtoStratStruct.pas` (~408 lines).
 //!
@@ -12,7 +12,7 @@
 //! - 6 — TStratCheckedEcho (S→C ACK for the Checked delta)
 //! - 7 — TStratSchemaRequest (C→S, empty)
 //! - 8 — TStratSchema (S→C, Sliced, raw-deflate schema blob)
-//! - 9 — TDetectSignalCommand (S→C, High, thin-terminal detect fact)
+//! - 9 — TDetectSignalCommand (S→C, High, chart detect/alert fact)
 //!
 //! ## Note on TStratSnapshot.Data
 //! `Data: bytes(Size)` is the serialized `TStrategySerializer` bin format (RTTI-driven,
@@ -175,7 +175,7 @@ pub struct StratSchema {
     pub data: Vec<u8>,
 }
 
-/// `TDetectSignalCommand` (CmdId=9). Server → client thin-terminal UI fact.
+/// `TDetectSignalCommand` (CmdId=9). Server → client chart detect/alert fact.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DetectSignalCommand {
     pub market_name: String,
@@ -224,7 +224,7 @@ impl DetectSignalCommand {
     }
 }
 
-/// All parseable incoming MPC_Strat subcommands.
+/// All parseable incoming MPC_Strat payloads.
 #[cfg_attr(feature = "diagnostics", allow(dead_code))]
 #[derive(Debug, Clone)]
 pub enum StratCommand {

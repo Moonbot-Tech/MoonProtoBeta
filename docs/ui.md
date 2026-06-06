@@ -423,7 +423,7 @@ Inside the owned `MoonClient` runtime, UI payloads are parsed and applied to
 normally read the resulting snapshot/events and do not instantiate protocol
 state machinery themselves.
 
-Unknown/future UI subcommands are diagnostic forward-compatibility cases. The
+Unknown/future UI payloads are diagnostic forward-compatibility cases. The
 active runtime ignores them: they do not mutate `SettingsState` and do not emit
 `Event::Settings`.
 

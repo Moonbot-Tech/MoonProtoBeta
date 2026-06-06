@@ -41,10 +41,10 @@ state.
   owned strategy state. If the request arrives before Init opens the domain
   gate, it is latched and answered during post-init resync after schema/state
   are ready.
-- Thin-terminal state from the kernel: detect facts, watcher rows, chart-alert
-  fires, accepted armed chart-alert objects, and ready chart text rows. The
-  terminal displays these facts; it does not run the kernel detect engine or
-  rebuild chart text locally.
+- Core-built UI/chart facts: detect messages, watcher rows, chart-alert fires,
+  accepted armed chart-alert objects, and ready chart text rows. The terminal
+  displays these facts; it does not run the detect engine or rebuild chart text
+  locally.
 - Settings, lifecycle events, Engine API responses, and server logs.
 
 ## Subscriptions
