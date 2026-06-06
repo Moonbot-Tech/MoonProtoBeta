@@ -218,7 +218,9 @@ pub(crate) struct VStopUpdateParams {
 /// This is not an order-state update. Delphi sends the exact expanded SQL that
 /// was written to the Orders database by `TDBSaver.BuildCommandSql`, so Rust
 /// keeps it as an event payload instead of trying to reconstruct a second
-/// Orders model from individual fields.
+/// Orders model from individual fields. `DBID` is the MoonBot Orders database
+/// row id used by external mirrors to apply later SQL updates to the same
+/// report record.
 #[derive(Debug, Clone)]
 pub struct ClosedSellOrderReport {
     pub header: BaseCommandHeader,

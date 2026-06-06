@@ -192,9 +192,11 @@ from `snapshot().chart_text().get(...)` when repainting the selected
 chart.
 
 `ClosedSellOrderReportEvent` carries the exact expanded Orders SQL that the
-core wrote for a closed sell order, plus the Orders DB row id. It is for
-external report/DB sync; it does not mutate the retained `Orders` model and is
-not a second order schema.
+core wrote for a closed sell order report, plus the MoonBot Orders DB row id.
+Use `db_id` as the mirror/update key: later SQL for price changes, partial
+fills, or final execution updates the same DB record. This event is for external
+report/DB sync; it does not mutate the retained `Orders` model and is not a
+second order schema.
 
 `ArbEvent` is only a change signal/summary. Delphi writes incoming arb data into
 `TMarket.ArbSlots` / `TMarket.ArbNow`; Active Lib does the same, so UI code reads

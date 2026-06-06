@@ -46,7 +46,7 @@ rate can also ignore individual events and read the latest snapshot each frame.
 
 ## Closed Sell Reports
 
-When the core closes a sell order and writes the report row, it can emit
+When the core closes a sell order or later updates that report row, it can emit
 `Event::ClosedSellOrderReport`. The payload is:
 
 ```rust
@@ -56,12 +56,18 @@ pub struct ClosedSellOrderReportEvent {
 }
 ```
 
-`db_id` is the Orders database row id, not an order worker UID. `sql` is the
-same expanded SQL text built by the core for its legacy report path. Active Lib
-does not parse this SQL back into `Order` fields and does not update retained
-orders from it; regular trading UI should keep using `snapshot().orders()`.
-The report event is for external report/DB sync tools that need the exact row
-operation the core wrote.
+`db_id` is the MoonBot Orders database row id, not an order worker UID and not
+the exchange order id. Use it as the stable key when mirroring the report DB:
+the same closed sell can receive more SQL after price changes, partial fills,
+or final execution, and those commands must update the same DB row.
+
+`sql` is the same expanded SQL text built by the core for the legacy MoonCMD
+report path from `TDBSaver.BuildCommandSql`. It is the exact insert/update that
+MoonBot wrote or would write for that Orders row. Active Lib does not parse this
+SQL back into `Order` fields and does not update retained orders from it;
+regular trading UI should keep using `snapshot().orders()`. The report event is
+for external report/DB sync tools that need the exact row operation the core
+wrote.
 
 ## Order Fields
 

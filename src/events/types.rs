@@ -317,10 +317,14 @@ impl EngineActionEvent {
 /// Delphi builds this from the same `TDBSaver.BuildCommandSql` payload that is
 /// sent to the legacy MoonCMD path. Active Lib does not parse it into a second
 /// order model; clients that need external DB/report sync receive the canonical
-/// SQL text and the Orders DB row id.
+/// SQL text and the MoonBot Orders DB row id. Use `db_id` as the stable mirror
+/// key: later SQL for price changes, partial fills, or final execution updates
+/// the same DB record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClosedSellOrderReportEvent {
+    /// MoonBot Orders database row id. This is not the order worker UID.
     pub db_id: i64,
+    /// Expanded SQL built by `TDBSaver.BuildCommandSql`.
     pub sql: String,
 }
 
