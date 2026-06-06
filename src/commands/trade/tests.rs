@@ -615,6 +615,24 @@ fn turn_panic_sell_builder_uses_delphi_client_epoch_header() {
 }
 
 #[test]
+// parity: MoonBot MoonProtoTradeStruct.pas:TClosedSellOrderReportCommand.
+fn closed_sell_order_report_parses_dbid_and_sql() {
+    let mut raw = Vec::new();
+    write_base_command_header(&mut raw, 31, 0x1112_1314_1516_1718);
+    raw.extend_from_slice(&123456789i64.to_le_bytes());
+    write_string(&mut raw, "UPDATE Orders SET Status=1 WHERE ID=123456789");
+
+    match TradeCommand::parse(&raw).expect("valid ClosedSellOrderReport") {
+        TradeCommand::ClosedSellOrderReport(report) => {
+            assert_eq!(report.header.uid, 0x1112_1314_1516_1718);
+            assert_eq!(report.db_id, 123456789);
+            assert_eq!(report.sql, "UPDATE Orders SET Status=1 WHERE ID=123456789");
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
+#[test]
 fn price_zone_uses_private_wire_struct_without_public_endian_wrappers() {
     assert_eq!(PRICE_ZONE_SIZE, 16);
 

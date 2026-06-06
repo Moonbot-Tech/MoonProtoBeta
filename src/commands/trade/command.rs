@@ -63,6 +63,8 @@ pub enum TradeCommand {
     VStopUpdate(VStopUpdate),
     /// CmdId=30: `TDoMarketSplitPositionCommand`, market-split position.
     DoMarketSplitPosition(JoinOrdersCommand),
+    /// CmdId=31: `TClosedSellOrderReportCommand`, exact DB Orders SQL report.
+    ClosedSellOrderReport(ClosedSellOrderReport),
 
     /// CmdId=1: raw `TBaseMarketCommand`, used as an ancestor type.
     BaseMarket(MarketCommandHeader),
@@ -164,6 +166,9 @@ impl TradeCommand {
             30 => Some(TradeCommand::DoMarketSplitPosition(
                 JoinOrdersCommand::read(&mut r)?,
             )),
+            31 => Some(TradeCommand::ClosedSellOrderReport(
+                ClosedSellOrderReport::read(&mut r)?,
+            )),
             _ => {
                 let uid = u64::from_le_bytes(r[3..11].try_into().unwrap());
                 Some(TradeCommand::Unknown {
@@ -204,6 +209,7 @@ impl TradeCommand {
             Self::BulkReplaceNotify(c) => c.market.base.uid,
             Self::VStopUpdate(c) => c.epoch_header.market.base.uid,
             Self::DoMarketSplitPosition(c) => c.market.base.uid,
+            Self::ClosedSellOrderReport(c) => c.header.uid,
             Self::BaseMarket(h) => h.base.uid,
             Self::TradeEpoch(h) => h.market.base.uid,
             Self::NewOrder(c) => c.market.base.uid,

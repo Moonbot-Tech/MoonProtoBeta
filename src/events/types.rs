@@ -312,6 +312,18 @@ impl EngineActionEvent {
     }
 }
 
+/// Exact SQL report for a closed sell order written by the MoonBot core.
+///
+/// Delphi builds this from the same `TDBSaver.BuildCommandSql` payload that is
+/// sent to the legacy MoonCMD path. Active Lib does not parse it into a second
+/// order model; clients that need external DB/report sync receive the canonical
+/// SQL text and the Orders DB row id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClosedSellOrderReportEvent {
+    pub db_id: i64,
+    pub sql: String,
+}
+
 /// Arbitrage relay was applied to retained market state.
 ///
 /// Delphi applies compact arb payloads directly to `TMarket.ArbSlots` /
@@ -376,6 +388,8 @@ pub enum Event {
     CandlesSnapshot(crate::state::CandlesSnapshotEvent),
     /// Completion of a non-blocking user-facing Engine API action.
     EngineAction(EngineActionEvent),
+    /// Closed sell order report: exact expanded Orders SQL from the core.
+    ClosedSellOrderReport(ClosedSellOrderReportEvent),
     /// Compact arbitrage relay applied to retained market state.
     Arb(ArbEvent),
     /// Strat channel: snapshot/delete/sell-price update.

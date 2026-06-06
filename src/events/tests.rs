@@ -800,6 +800,30 @@ fn dispatcher_all_statuses_uses_process_command_order_item_loop() {
 }
 
 #[test]
+// parity: RepEngine.TDBSaver.SendClosedSellReport sends canonical expanded SQL, not a new order model.
+fn dispatcher_emits_closed_sell_order_report_without_mutating_orders() {
+    let mut d = EventDispatcher::new();
+    let mut payload = Vec::new();
+    payload.push(31);
+    payload.extend_from_slice(&CURRENT_PROTO_CMD_VER.to_le_bytes());
+    payload.extend_from_slice(&0xAA55u64.to_le_bytes());
+    payload.extend_from_slice(&77i64.to_le_bytes());
+    write_string(&mut payload, "UPDATE Orders SET Status=1 WHERE ID=77");
+
+    let events = d.dispatch(Command::Order, &payload, 1000);
+
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        Event::ClosedSellOrderReport(report) => {
+            assert_eq!(report.db_id, 77);
+            assert_eq!(report.sql, "UPDATE Orders SET Status=1 WHERE ID=77");
+        }
+        other => panic!("wrong event: {other:?}"),
+    }
+    assert_eq!(d.orders.iter().count(), 0);
+}
+
+#[test]
 // parity: MoonBot MoonProtoBaseStruct.pas:TCommandRegistry.FromStream
 fn dispatcher_skips_future_version_order_command() {
     let mut d = EventDispatcher::new();

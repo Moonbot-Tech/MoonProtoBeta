@@ -212,8 +212,9 @@ pub use commands::candles::{DeepHistoryKind, DeepPrice};
 pub use commands::trade::{MoveAllBuysParams, MoveAllSellsParams};
 pub use commands::ui::{EmuPencilPoint, EmuTradePoint};
 pub use events::{
-    ArbEvent, DetectEvent, DetectWatcherRow, EngineActionEvent, EngineActionKind, Event,
-    MoonStateSnapshot, ServerLogEvent, WatcherFillEvent, WatcherFillsEvent,
+    ArbEvent, ClosedSellOrderReportEvent, DetectEvent, DetectWatcherRow, EngineActionEvent,
+    EngineActionKind, Event, MoonStateSnapshot, ServerLogEvent, WatcherFillEvent,
+    WatcherFillsEvent,
 };
 pub use key_import::{
     import_key, parse_key_info, ImportedIpVersion, ImportedKeyFormat, ImportedKeyInfo,

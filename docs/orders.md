@@ -44,6 +44,25 @@ for event in client.drain_events() {
 keeps the hot event path cheap. UI code that already redraws at its own frame
 rate can also ignore individual events and read the latest snapshot each frame.
 
+## Closed Sell Reports
+
+When the core closes a sell order and writes the report row, it can emit
+`Event::ClosedSellOrderReport`. The payload is:
+
+```rust
+pub struct ClosedSellOrderReportEvent {
+    pub db_id: i64,
+    pub sql: String,
+}
+```
+
+`db_id` is the Orders database row id, not an order worker UID. `sql` is the
+same expanded SQL text built by the core for its legacy report path. Active Lib
+does not parse this SQL back into `Order` fields and does not update retained
+orders from it; regular trading UI should keep using `snapshot().orders()`.
+The report event is for external report/DB sync tools that need the exact row
+operation the core wrote.
+
 ## Order Fields
 
 `Order` is the user-facing retained order object. The most common fields are:

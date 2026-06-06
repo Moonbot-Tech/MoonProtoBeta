@@ -1,4 +1,4 @@
-//! `MPC_Order` channel: the 30 Delphi `TBaseTradeCommand` subcommands.
+//! `MPC_Order` channel: Delphi `TBaseTradeCommand` subcommands.
 //!
 //! Delphi source: `MoonProto/MoonProtoTradeStruct.pas`.
 //!
@@ -19,7 +19,7 @@
 //! the private `Wire*` structs mirror the fixed wire layout with compile-time
 //! size checks.
 
-use super::registry::{write_string, CURRENT_PROTO_CMD_VER};
+use super::registry::{read_string, write_string, CURRENT_PROTO_CMD_VER};
 use std::convert::TryInto;
 
 mod builders;
@@ -211,6 +211,34 @@ pub(crate) struct VStopUpdateParams {
     pub vstop_fixed: bool,
     pub vstop_level: f64,
     pub vstop_vol: f64,
+}
+
+/// `TClosedSellOrderReportCommand` (TradeStruct.pas:302-313).
+///
+/// This is not an order-state update. Delphi sends the exact expanded SQL that
+/// was written to the Orders database by `TDBSaver.BuildCommandSql`, so Rust
+/// keeps it as an event payload instead of trying to reconstruct a second
+/// Orders model from individual fields.
+#[derive(Debug, Clone)]
+pub struct ClosedSellOrderReport {
+    pub header: BaseCommandHeader,
+    pub db_id: i64,
+    pub sql: String,
+}
+
+impl ClosedSellOrderReport {
+    fn read(r: &mut &[u8]) -> Option<Self> {
+        let header = BaseCommandHeader::read(r)?;
+        if r.len() < 8 {
+            return None;
+        }
+        let db_id = i64::from_le_bytes(r[..8].try_into().ok()?);
+        *r = &r[8..];
+        let mut pos = 0usize;
+        let sql = read_string(r, &mut pos)?;
+        *r = &r[pos..];
+        Some(Self { header, db_id, sql })
+    }
 }
 
 // ============================================================================

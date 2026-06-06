@@ -4,7 +4,7 @@
 //! together so order worker creation, snapshot apply, and follow-up requests are
 //! audited in one place.
 
-use super::{ActiveAction, Event, EventDispatcher};
+use super::{ActiveAction, ClosedSellOrderReportEvent, Event, EventDispatcher};
 use crate::commands::trade::{AllStatuses, TradeCommand};
 use crate::protocol::Command;
 use crate::state::{ApplyResult, OrderEvent};
@@ -18,6 +18,12 @@ impl EventDispatcher {
     ) {
         match TradeCommand::parse(payload) {
             Some(TradeCommand::AllStatuses(snap)) => self.process_all_statuses(snap, now_ms, out),
+            Some(TradeCommand::ClosedSellOrderReport(report)) => {
+                out.push(Event::ClosedSellOrderReport(ClosedSellOrderReportEvent {
+                    db_id: report.db_id,
+                    sql: report.sql,
+                }));
+            }
             Some(tc) => self.process_command_order(tc, now_ms, out),
             None => Self::push_parse_failed(out, Command::Order, payload),
         }

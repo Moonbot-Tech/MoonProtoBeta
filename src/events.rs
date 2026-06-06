@@ -68,8 +68,8 @@ mod ui;
 pub(crate) use active::{ActiveAction, ActiveDispatchContext};
 pub use snapshot::MoonStateSnapshot;
 pub use types::{
-    ArbEvent, DetectEvent, DetectWatcherRow, EngineActionEvent, EngineActionKind, Event,
-    ServerLogEvent, WatcherFillEvent, WatcherFillsEvent,
+    ArbEvent, ClosedSellOrderReportEvent, DetectEvent, DetectWatcherRow, EngineActionEvent,
+    EngineActionKind, Event, ServerLogEvent, WatcherFillEvent, WatcherFillsEvent,
 };
 pub(crate) use types::{MissingOrderStatusRequest, StrategySnapshotReply};
 

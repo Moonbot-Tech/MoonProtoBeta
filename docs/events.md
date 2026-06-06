@@ -87,6 +87,7 @@ fn handle_event(event: Event) {
         Event::Detect(detect_event) => handle_detect_fact(detect_event),
         Event::ChartAlert(alert_event) => handle_alert_object_state(alert_event),
         Event::ChartText(rows) => redraw_chart_text(rows),
+        Event::ClosedSellOrderReport(report) => sync_report_db(report.db_id, &report.sql),
         Event::Settings(settings_event) => handle_settings_event(settings_event),
         Event::EngineAction(action) => handle_engine_action(action),
         Event::ServerLog(log) => append_server_log(log.time(), &log.msg),
@@ -156,6 +157,7 @@ pub enum Event {
     Detect(DetectEvent),
     ChartAlert(ChartAlertEvent),
     ChartText(ChartTextSnapshot),
+    ClosedSellOrderReport(ClosedSellOrderReportEvent),
     Settings(SettingsEvent),
     Markets(MarketsEvent),
     EngineAction(EngineActionEvent),
@@ -188,6 +190,11 @@ currently requested chart-text market. Late snapshots for an older selected
 market are dropped like Delphi `ApplyChartTextSnapshot`. Read the latest rows
 from `snapshot().chart_text().get(...)` when repainting the selected
 chart.
+
+`ClosedSellOrderReportEvent` carries the exact expanded Orders SQL that the
+core wrote for a closed sell order, plus the Orders DB row id. It is for
+external report/DB sync; it does not mutate the retained `Orders` model and is
+not a second order schema.
 
 `ArbEvent` is only a change signal/summary. Delphi writes incoming arb data into
 `TMarket.ArbSlots` / `TMarket.ArbNow`; Active Lib does the same, so UI code reads
