@@ -6,14 +6,20 @@
 
 # MoonProto
 
-Rust SDK / Active Lib for connecting external terminals and tools to a running
-MoonBot core.
+MoonProto is the client-side Rust SDK for building MoonBot-compatible terminals,
+dashboards, and control tools.
 
-In plain terms, this repository is the client-side library layer between your
-application and the MoonBot core:
+A running MoonBot core remains the execution engine: it connects to exchanges,
+owns orders, strategies, risk logic, balances, and trading state. This crate
+implements the client runtime over the MoonProto protocol: connection,
+authorization, reconnect, subscriptions, retained state, events, and typed
+commands.
+
+Your application provides the UI and product logic. MoonProto provides the live
+client-side bridge to the MoonBot core:
 
 ```text
-your terminal / bot UI / tool
+your trading UI / dashboard / control tool
         |
         v
 MoonProto Rust library
@@ -24,12 +30,6 @@ MoonBot core with MoonProto enabled
         v
 exchange accounts, orders, strategies, balances
 ```
-
-MoonProto is not a standalone trading terminal, not a UI template, and not the
-server-side API implementation inside MoonBot. The MoonBot core already owns the
-trading mechanics (orders, stops, strategies, risk, exchange access). This
-library connects to that core, keeps a live read model, and exposes a Rust API
-for application code.
 
 The crate contains the transport layer, handshake, reconnect, reliable sliced
 datagrams, typed command parsers/builders, read-model state, and the owned
