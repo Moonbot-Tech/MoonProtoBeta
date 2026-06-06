@@ -388,7 +388,7 @@ fn handle_ui_command(
             false
         }
         UiRuntimeCommand::ChartTextState(cmd) => {
-            let changed = dispatcher.thin_terminal.set_chart_text_state(&cmd);
+            let changed = dispatcher.chart_text.set_visible_market(&cmd);
             client.ui_chart_text_state(&cmd);
             changed
         }

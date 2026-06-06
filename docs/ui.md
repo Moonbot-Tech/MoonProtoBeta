@@ -368,11 +368,12 @@ This matters for UI code that can emit rapid changes: settings and leverage are
 "latest wins"; MM-orders, DEX, and Spot commands preserve the user's command
 sequence.
 
-## Thin Terminal: Chart Alerts And Chart Text
+## Chart Alerts And Chart Text
 
-The active terminal model keeps kernel-owned chart facts separate from settings.
-Use `client.terminal()` for chart-alert/chart-text intents and
-`snapshot().thin_terminal()` for retained state.
+Chart alerts and chart text are core-owned UI facts, not settings. Use
+`client.chart_alerts()` for chart-alert user edits, `client.chart_text()` for
+the currently visible chart-text request, and the matching snapshot domains for
+retained state.
 
 Chart-alert objects are authoritative on the core side. The terminal sends an
 armed object snapshot when the user creates/changes an alert, sends delete when
@@ -383,18 +384,18 @@ let Some(state) = client.snapshot() else { return Ok(()); };
 let Some(market) = state.markets().get("BTCUSDT") else { return Ok(()); };
 
 client
-    .terminal()
-    .upsert_alert_object_for_market(&market, obj_uid, object_blob)?;
+    .chart_alerts()
+    .upsert_for_market(&market, obj_uid, object_blob)?;
 
 client
-    .terminal()
-    .delete_alert_object_for_market(&market, obj_uid)?;
+    .chart_alerts()
+    .delete_for_market(&market, obj_uid)?;
 
-client.terminal().request_alert_snapshot()?;
+client.chart_alerts().request_snapshot()?;
 ```
 
-Inbound accepted alert objects are exposed as `Event::AlertObject` and retained
-in `snapshot().thin_terminal()`. The blob is the accepted chart-object binary
+Inbound accepted alert objects are exposed as `Event::ChartAlert` and retained
+in `snapshot().chart_alerts()`. The blob is the accepted chart-object binary
 snapshot; UI code that owns the chart-object editor can load it into its local
 object model.
 
@@ -403,17 +404,17 @@ changes market/filter needs, tell the runtime which rows are wanted:
 
 ```rust
 client
-    .terminal()
-    .set_chart_text_state_for_market(&market, need_filters, need_debug_lines)?;
+    .chart_text()
+    .set_visible_market_for_market(&market, need_filters, need_debug_lines)?;
 
-client.terminal().clear_chart_text_state()?;
+client.chart_text().clear_visible_market()?;
 ```
 
-`Event::ChartTextSnapshot` arrives only after the core has built ready strings.
+`Event::ChartText` arrives only after the core has built ready strings.
 It is a full replacement for the currently requested market. If the user has
 already switched the fullscreen chart, the late snapshot is ignored. The latest
 accepted value is available from
-`snapshot().thin_terminal().chart_text("BTCUSDT")`.
+`snapshot().chart_text().get("BTCUSDT")`.
 
 ## Low-Level Parsing
 

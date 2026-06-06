@@ -774,40 +774,38 @@ impl MoonSettings<'_> {
     }
 }
 
-/// Thin-terminal command handle.
+/// Chart-alert command handle.
 ///
-/// These commands mirror the Delphi ActiveClient responsibilities: the terminal
-/// sends chart-alert object changes and the currently visible chart-text need;
-/// the core sends back accepted alert objects and ready text rows through
-/// `Event::AlertObject` / `Event::ChartTextSnapshot` and
-/// `snapshot().thin_terminal()`.
-pub struct MoonTerminal<'a> {
+/// The MoonProto core is the authoritative owner of armed chart alerts. UI code
+/// sends user edits here; accepted state arrives through `Event::ChartAlert` and
+/// `snapshot().chart_alerts()`.
+pub struct MoonChartAlerts<'a> {
     pub(super) client: &'a MoonClient,
 }
 
-impl MoonTerminal<'_> {
+impl MoonChartAlerts<'_> {
     /// Ask the core to resend all currently armed chart alerts.
-    pub fn request_alert_snapshot(&self) -> Result<(), MoonClientError> {
+    pub fn request_snapshot(&self) -> Result<(), MoonClientError> {
         self.client.request_alert_snapshot()
     }
 
     /// Upsert a chart alert object for a retained market handle.
     ///
     /// `blob` must be a Delphi-compatible `TChartObject.Save` payload. The core
-    /// is authoritative: after it accepts the object, all clients receive
-    /// `Event::AlertObject`, and the retained copy is available from
-    /// `snapshot().thin_terminal()`.
-    pub fn upsert_alert_object_for_market(
+    /// is authoritative: after it accepts the object, clients receive
+    /// `Event::ChartAlert`, and the retained copy is available from
+    /// `snapshot().chart_alerts()`.
+    pub fn upsert_for_market(
         &self,
         market: &crate::state::MarketHandle,
         obj_uid: u64,
         blob: Vec<u8>,
     ) -> Result<(), MoonClientError> {
-        self.upsert_alert_object(market.name(), obj_uid, blob)
+        self.upsert(market.name(), obj_uid, blob)
     }
 
     /// Upsert a chart alert object by market name.
-    pub fn upsert_alert_object(
+    pub fn upsert(
         &self,
         market_name: impl Into<String>,
         obj_uid: u64,
@@ -822,16 +820,16 @@ impl MoonTerminal<'_> {
     }
 
     /// Delete/dearm a chart alert object for a retained market handle.
-    pub fn delete_alert_object_for_market(
+    pub fn delete_for_market(
         &self,
         market: &crate::state::MarketHandle,
         obj_uid: u64,
     ) -> Result<(), MoonClientError> {
-        self.delete_alert_object(market.name(), obj_uid)
+        self.delete(market.name(), obj_uid)
     }
 
     /// Delete/dearm a chart alert object by market name.
-    pub fn delete_alert_object(
+    pub fn delete(
         &self,
         market_name: impl Into<String>,
         obj_uid: u64,
@@ -842,26 +840,37 @@ impl MoonTerminal<'_> {
                 obj_uid,
             ))
     }
+}
 
+/// Core-built chart-text command handle.
+///
+/// This is not a local strategy calculator. The UI tells the core which chart
+/// is visible and which text blocks it needs; ready rows arrive through
+/// `Event::ChartText` and `snapshot().chart_text()`.
+pub struct MoonChartText<'a> {
+    pub(super) client: &'a MoonClient,
+}
+
+impl MoonChartText<'_> {
     /// Tell the core which market currently needs chart filter/debug rows.
-    pub fn set_chart_text_state_for_market(
+    pub fn set_visible_market_for_market(
         &self,
         market: &crate::state::MarketHandle,
         need_filters: bool,
         need_debug_lines: bool,
     ) -> Result<(), MoonClientError> {
-        self.set_chart_text_state(market.name(), need_filters, need_debug_lines)
+        self.set_visible_market(market.name(), need_filters, need_debug_lines)
     }
 
     /// Tell the core which market currently needs chart filter/debug rows.
-    pub fn set_chart_text_state(
+    pub fn set_visible_market(
         &self,
         market_name: impl Into<String>,
         need_filters: bool,
         need_debug_lines: bool,
     ) -> Result<(), MoonClientError> {
         self.client
-            .set_chart_text_state(crate::commands::ui::ChartTextStateCommand::new(
+            .send_chart_text_state(crate::commands::ui::ChartTextStateCommand::new(
                 market_name,
                 need_filters,
                 need_debug_lines,
@@ -869,8 +878,8 @@ impl MoonTerminal<'_> {
     }
 
     /// Disable chart text relay for this client.
-    pub fn clear_chart_text_state(&self) -> Result<(), MoonClientError> {
-        self.set_chart_text_state("", false, false)
+    pub fn clear_visible_market(&self) -> Result<(), MoonClientError> {
+        self.set_visible_market("", false, false)
     }
 }
 

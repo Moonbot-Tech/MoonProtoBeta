@@ -18,8 +18,8 @@ use crate::commands::market::PositionType;
 use crate::commands::ui::SpotMarketKind;
 use commands::{RuntimeCommand, StratRuntimeCommand, UiRuntimeCommand};
 pub use handles::{
-    MoonAccount, MoonBalances, MoonCandles, MoonEmulator, MoonOrders, MoonSettings, MoonStrategies,
-    MoonStreams, MoonTerminal, MoonTrade, OrderTarget,
+    MoonAccount, MoonBalances, MoonCandles, MoonChartAlerts, MoonChartText, MoonEmulator,
+    MoonOrders, MoonSettings, MoonStrategies, MoonStreams, MoonTrade, OrderTarget,
 };
 use runtime_loop::runtime_loop;
 pub use types::{
@@ -390,9 +390,14 @@ impl MoonClient {
         MoonStrategies { client: self }
     }
 
-    /// Thin-terminal UI command API: chart alerts and core-built chart text.
-    pub fn terminal(&self) -> MoonTerminal<'_> {
-        MoonTerminal { client: self }
+    /// Chart-alert command API.
+    pub fn chart_alerts(&self) -> MoonChartAlerts<'_> {
+        MoonChartAlerts { client: self }
+    }
+
+    /// Core-built chart-text command API.
+    pub fn chart_text(&self) -> MoonChartText<'_> {
+        MoonChartText { client: self }
     }
 
     /// Subscribe to one orderbook by market name.
@@ -793,7 +798,7 @@ impl MoonClient {
         self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::AlertSnapshotRequest))
     }
 
-    pub(crate) fn set_chart_text_state(
+    pub(crate) fn send_chart_text_state(
         &self,
         cmd: crate::commands::ui::ChartTextStateCommand,
     ) -> Result<(), MoonClientError> {

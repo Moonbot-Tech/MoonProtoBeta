@@ -276,7 +276,7 @@ fn dispatcher_skips_unknown_ui_command_id() {
 
 #[test]
 // parity: MoonProtoClient.pas:MPC_UI TAlertObjectCommand branch.
-fn dispatcher_applies_alert_object_to_thin_terminal_state() {
+fn dispatcher_applies_alert_object_to_chart_alerts_state() {
     let mut d = EventDispatcher::new();
     let cmd =
         crate::commands::ui::AlertObjectCommand::new_upsert("BTCUSDT", 42, vec![1, 2, 3, 4, 5]);
@@ -284,7 +284,7 @@ fn dispatcher_applies_alert_object_to_thin_terminal_state() {
     let events = d.dispatch(Command::UI, &raw, 1000);
     assert_eq!(events.len(), 1);
     match &events[0] {
-        Event::AlertObject(crate::state::AlertObjectEvent::Upserted(obj)) => {
+        Event::ChartAlert(crate::state::ChartAlertEvent::Upserted(obj)) => {
             assert_eq!(obj.market_name, "BTCUSDT");
             assert_eq!(obj.obj_uid, 42);
             assert_eq!(obj.blob, vec![1, 2, 3, 4, 5]);
@@ -292,11 +292,7 @@ fn dispatcher_applies_alert_object_to_thin_terminal_state() {
         _ => panic!("wrong event"),
     }
     assert_eq!(
-        d.snapshot()
-            .thin_terminal()
-            .alert_object("BTCUSDT", 42)
-            .unwrap()
-            .blob,
+        d.snapshot().chart_alerts().get("BTCUSDT", 42).unwrap().blob,
         vec![1, 2, 3, 4, 5]
     );
 
@@ -306,21 +302,17 @@ fn dispatcher_applies_alert_object_to_thin_terminal_state() {
     let events = d.dispatch(Command::UI, &raw, 1001);
     assert!(matches!(
         &events[0],
-        Event::AlertObject(crate::state::AlertObjectEvent::Deleted { obj_uid: 42, .. })
+        Event::ChartAlert(crate::state::ChartAlertEvent::Deleted { obj_uid: 42, .. })
     ));
-    assert!(d
-        .snapshot()
-        .thin_terminal()
-        .alert_object("BTCUSDT", 42)
-        .is_none());
+    assert!(d.snapshot().chart_alerts().get("BTCUSDT", 42).is_none());
 }
 
 #[test]
 // parity: MoonProtoClient.pas:MPC_UI TChartTextSnapshotCommand branch.
-fn dispatcher_applies_chart_text_snapshot_to_thin_terminal_state() {
+fn dispatcher_applies_chart_text_snapshot_to_chart_text_state() {
     let mut d = EventDispatcher::new();
-    d.thin_terminal
-        .set_chart_text_state(&crate::commands::ui::ChartTextStateCommand::new(
+    d.chart_text
+        .set_visible_market(&crate::commands::ui::ChartTextStateCommand::new(
             "ETHUSDT", true, true,
         ));
     let raw = crate::commands::ui::build_chart_text_snapshot_for_test(
@@ -334,7 +326,7 @@ fn dispatcher_applies_chart_text_snapshot_to_thin_terminal_state() {
     let events = d.dispatch(Command::UI, &raw, 1000);
     assert_eq!(events.len(), 1);
     match &events[0] {
-        Event::ChartTextSnapshot(snapshot) => {
+        Event::ChartText(snapshot) => {
             assert_eq!(snapshot.market_name, "ETHUSDT");
             assert_eq!(snapshot.filter_lines, vec!["filter"]);
             assert_eq!(snapshot.debug_lines, vec!["debug A", "debug B"]);
@@ -342,7 +334,7 @@ fn dispatcher_applies_chart_text_snapshot_to_thin_terminal_state() {
         _ => panic!("wrong event"),
     }
     let snap = d.snapshot();
-    let chart_text = snap.thin_terminal().chart_text("ETHUSDT").unwrap();
+    let chart_text = snap.chart_text().get("ETHUSDT").unwrap();
     assert_eq!(chart_text.filter_lines, vec!["filter"]);
     assert_eq!(chart_text.debug_lines, vec!["debug A", "debug B"]);
 }
@@ -351,8 +343,8 @@ fn dispatcher_applies_chart_text_snapshot_to_thin_terminal_state() {
 // parity: Unit1.pas:ApplyChartTextSnapshot drops rows for a no-longer-current chart market.
 fn dispatcher_drops_stale_chart_text_snapshot() {
     let mut d = EventDispatcher::new();
-    d.thin_terminal
-        .set_chart_text_state(&crate::commands::ui::ChartTextStateCommand::new(
+    d.chart_text
+        .set_visible_market(&crate::commands::ui::ChartTextStateCommand::new(
             "BTCUSDT", true, false,
         ));
     let raw = crate::commands::ui::build_chart_text_snapshot_for_test(
@@ -367,7 +359,7 @@ fn dispatcher_drops_stale_chart_text_snapshot() {
     let events = d.dispatch(Command::UI, &raw, 1000);
 
     assert!(events.is_empty());
-    assert!(d.snapshot().thin_terminal().chart_text("ETHUSDT").is_none());
+    assert!(d.snapshot().chart_text().get("ETHUSDT").is_none());
 }
 
 fn balance_payload(cmd_id: u8, uid: u64, epoch: u16, btc_total: f64) -> Vec<u8> {
@@ -1350,7 +1342,7 @@ fn dispatcher_emits_detect_signal_fact() {
     let events = d.dispatch(Command::Strat, &raw, 1000);
     assert_eq!(events.len(), 1);
     match &events[0] {
-        Event::DetectSignal(ev) => {
+        Event::Detect(ev) => {
             assert_eq!(ev.market_name, "BTCUSDT");
             assert_eq!(ev.strategy_id, 123);
             assert!(ev.is_short);
@@ -1382,7 +1374,7 @@ fn dispatcher_emits_detect_row_and_alert_fact() {
     let events = d.dispatch(Command::Strat, &raw, 1000);
     assert_eq!(events.len(), 1);
     match &events[0] {
-        Event::DetectSignal(ev) => {
+        Event::Detect(ev) => {
             assert!(ev.has_watcher_row());
             assert!(ev.is_alert_fire());
             assert_eq!(ev.alert_obj_uid, Some(555));

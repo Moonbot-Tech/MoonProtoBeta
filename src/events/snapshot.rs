@@ -21,7 +21,8 @@ pub struct MoonStateSnapshot {
     strats: CowState<StratsState>,
     settings: CowState<SettingsState>,
     markets: CowState<MarketsState>,
-    thin_terminal: CowState<ThinTerminalState>,
+    chart_alerts: CowState<ChartAlertsState>,
+    chart_text: CowState<ChartTextState>,
     market_history: Option<MarketHistoryHandle>,
     local_strategy_epoch: u64,
     server_info: std::sync::Arc<ServerInfo>,
@@ -178,11 +179,20 @@ impl MoonStateSnapshot {
         &self.markets
     }
 
-    /// Thin-terminal UI state owned by the MoonProto core: accepted chart alert
-    /// objects and ready chart-text rows. These are facts/snapshots sent by the
-    /// core, not calculations performed by Rust terminal code.
-    pub fn thin_terminal(&self) -> &ThinTerminalState {
-        &self.thin_terminal
+    /// Authoritative chart-alert objects owned by the MoonProto core.
+    ///
+    /// The UI sends user edits through `client.chart_alerts()`. Accepted state
+    /// comes back here and through `Event::ChartAlert`.
+    pub fn chart_alerts(&self) -> &ChartAlertsState {
+        &self.chart_alerts
+    }
+
+    /// Ready chart filter/debug rows built by the MoonProto core.
+    ///
+    /// These are full replacements for the currently requested chart market.
+    /// The UI reads them directly instead of recomputing strategy filter text.
+    pub fn chart_text(&self) -> &ChartTextState {
+        &self.chart_text
     }
 
     /// Retained history readers for one market, if trades storage is active.
@@ -307,7 +317,8 @@ impl EventDispatcher {
             strats: self.strats.clone(),
             settings: self.settings.clone(),
             markets: self.markets.clone(),
-            thin_terminal: self.thin_terminal.clone(),
+            chart_alerts: self.chart_alerts.clone(),
+            chart_text: self.chart_text.clone(),
             market_history: self.market_history.clone(),
             local_strategy_epoch: self.local_strategy_epoch,
             server_info: self.session_server_info.clone(),

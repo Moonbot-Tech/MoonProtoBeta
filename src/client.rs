@@ -76,9 +76,9 @@ mod transport_state;
 
 pub use active_runtime::{
     ClosePositionParams, CoinCardCandlesTicket, EngineActionTicket, MoonAccount, MoonBalances,
-    MoonCandles, MoonClient, MoonClientError, MoonClientEvent, MoonClientSnapshot, MoonEmulator,
-    MoonEventQueue, MoonEventSink, MoonOrders, MoonSettings, MoonStrategies, MoonStreams,
-    MoonTerminal, MoonTrade, NewOrderParams, NewOrderTicket, OrderSide, OrderTarget,
+    MoonCandles, MoonChartAlerts, MoonChartText, MoonClient, MoonClientError, MoonClientEvent,
+    MoonClientSnapshot, MoonEmulator, MoonEventQueue, MoonEventSink, MoonOrders, MoonSettings,
+    MoonStrategies, MoonStreams, MoonTrade, NewOrderParams, NewOrderTicket, OrderSide, OrderTarget,
     SellOrderParams, SplitOrderParams, TradesStreamMode, VStopParams,
 };
 pub(crate) use candles::MergedCandles;

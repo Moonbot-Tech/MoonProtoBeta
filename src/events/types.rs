@@ -205,7 +205,7 @@ impl DetectWatcherRow {
 /// should display this fact using local UI settings and retained strategy/market
 /// state; it must not recompute the detect itself.
 #[derive(Debug, Clone, PartialEq)]
-pub struct DetectSignalEvent {
+pub struct DetectEvent {
     pub market_name: String,
     pub strategy_id: u64,
     pub is_short: bool,
@@ -215,7 +215,7 @@ pub struct DetectSignalEvent {
     pub alert_obj_uid: Option<u64>,
 }
 
-impl DetectSignalEvent {
+impl DetectEvent {
     pub(crate) fn from_command(cmd: DetectSignalCommand) -> Self {
         let watcher_row = cmd.has_row().then_some(DetectWatcherRow {
             pos_val: cmd.pos_val,
@@ -380,15 +380,15 @@ pub enum Event {
     Arb(ArbEvent),
     /// Strat channel: snapshot/delete/sell-price update.
     Strat(StratEvent),
-    /// ThinRefactor detect/watcher/chart-alert fact produced by the core.
-    DetectSignal(DetectSignalEvent),
+    /// Detect/watcher/chart-alert fact produced by the core.
+    Detect(DetectEvent),
     /// UI channel receive branch: settings snapshot, leverage snapshot, remote
     /// update request, or arbitrage activation notification.
     Settings(SettingsEvent),
-    /// Authoritative chart alert object state changed.
-    AlertObject(crate::state::AlertObjectEvent),
+    /// Authoritative chart-alert object state changed.
+    ChartAlert(crate::state::ChartAlertEvent),
     /// Ready chart text rows for one market were replaced by the core.
-    ChartTextSnapshot(crate::state::ChartTextSnapshot),
+    ChartText(crate::state::ChartTextSnapshot),
     /// Markets state was updated after an Engine API response.
     Markets(MarketsEvent),
     /// Engine API response that was not consumed by the pending-response

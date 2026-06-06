@@ -43,9 +43,7 @@ impl EventDispatcher {
                     log::warn!(target: "moonproto::events", "detect dropped: strat not found");
                     return;
                 }
-                out.push(Event::DetectSignal(
-                    crate::events::DetectSignalEvent::from_command(cmd),
-                ));
+                out.push(Event::Detect(crate::events::DetectEvent::from_command(cmd)));
             }
             StratCommand::Snapshot(snap) => {
                 let raw_len = snap.data.len();

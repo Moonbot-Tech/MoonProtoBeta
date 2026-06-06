@@ -76,8 +76,10 @@ state.
   final `RefreshCompleted` event after all requested wallet kinds have answered.
 - Time fields exposed to applications use `MoonTime`. Use
   `row.time().unix_millis()` or `row.time().system_time()` for UI labels.
-- Chart-alert and chart-text UI uses `client.terminal()` for user intents and
-  `snapshot().thin_terminal()` for retained state.
+- Chart-alert UI sends user edits through `client.chart_alerts()` and reads the
+  accepted core-owned set from `snapshot().chart_alerts()`.
+- Chart-text UI tells the core which chart is visible through
+  `client.chart_text()` and reads ready rows from `snapshot().chart_text()`.
 
 Regular applications should start from `MoonClient`: it owns the protocol loop,
 event sink, and retained state.

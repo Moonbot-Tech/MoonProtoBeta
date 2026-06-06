@@ -17,13 +17,13 @@ impl EventDispatcher {
                 self.force_markets_list_refresh = true;
             }
             Some(UICommand::AlertObject(cmd)) => {
-                if let Some(ev) = self.thin_terminal.apply_alert_object(cmd) {
-                    out.push(Event::AlertObject(ev));
+                if let Some(ev) = self.chart_alerts.apply(cmd) {
+                    out.push(Event::ChartAlert(ev));
                 }
             }
             Some(UICommand::ChartTextSnapshot(cmd)) => {
-                if let Some(snapshot) = self.thin_terminal.apply_chart_text_snapshot(cmd) {
-                    out.push(Event::ChartTextSnapshot(snapshot));
+                if let Some(snapshot) = self.chart_text.apply_snapshot(cmd) {
+                    out.push(Event::ChartText(snapshot));
                 }
             }
             Some(UICommand::AlertSnapshotRequest { .. } | UICommand::ChartTextState(_)) => {}

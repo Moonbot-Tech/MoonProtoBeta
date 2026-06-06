@@ -16,6 +16,7 @@
 
 pub(crate) mod account;
 pub(crate) mod balances;
+pub(crate) mod chart_ui;
 pub(crate) mod coin_card_candles;
 pub(crate) mod epoch;
 pub(crate) mod eps;
@@ -28,12 +29,14 @@ pub(crate) mod orders;
 pub(crate) mod seq_ring;
 pub(crate) mod settings;
 pub(crate) mod strats;
-pub(crate) mod thin_terminal;
 pub(crate) mod trades;
 pub(crate) mod transfer_assets;
 
 pub use account::{AccountEvent, AccountState};
 pub use balances::{BalanceEvent, BalancesState, GlobalBalance};
+pub use chart_ui::{
+    ChartAlertEvent, ChartAlertObject, ChartAlertsState, ChartTextSnapshot, ChartTextState,
+};
 pub use coin_card_candles::{CoinCardCandlesEvent, CoinCardCandlesState};
 pub use history::{
     hl_address_color, hl_address_hex, Candle5mRow, CandleVolumeSnapshot,
@@ -78,9 +81,6 @@ pub use seq_ring::{
 };
 pub use settings::{SettingsEvent, SettingsState};
 pub use strats::{StratEvent, StrategyInfo, StratsState};
-pub use thin_terminal::{
-    AlertObjectEvent, AlertObjectSnapshot, ChartTextSnapshot, ThinTerminalState,
-};
 pub use trades::TradesEvent;
 pub(crate) use trades::{
     iter_trades_resend_response, TradesPacketEffect, TradesPacketEffects, TradesState,

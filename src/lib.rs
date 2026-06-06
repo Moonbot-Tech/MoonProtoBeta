@@ -165,11 +165,12 @@ pub use client::ProtocolMetricsSnapshot;
 pub use client::{
     ActiveSubscriptions, ClientConfig, ClosePositionParams, CoinCardCandlesTicket, ConnectConfig,
     ConnectError, EngineActionTicket, InitConfig, InitError, InitialStrategies, LifecycleEvent,
-    MoonAccount, MoonBalances, MoonCandles, MoonClient, MoonClientError, MoonClientEvent,
-    MoonClientSnapshot, MoonEmulator, MoonEventQueue, MoonEventSink, MoonOrders, MoonSettings,
-    MoonStrategies, MoonStreams, MoonTerminal, MoonTrade, NewOrderParams, NewOrderTicket,
-    OrderSide, OrderTarget, RefreshConfig, SellOrderParams, SplitOrderParams, TradeContextError,
-    TradesStreamMode, TradesSubscription, TransportMode, VStopParams,
+    MoonAccount, MoonBalances, MoonCandles, MoonChartAlerts, MoonChartText, MoonClient,
+    MoonClientError, MoonClientEvent, MoonClientSnapshot, MoonEmulator, MoonEventQueue,
+    MoonEventSink, MoonOrders, MoonSettings, MoonStrategies, MoonStreams, MoonTrade,
+    NewOrderParams, NewOrderTicket, OrderSide, OrderTarget, RefreshConfig, SellOrderParams,
+    SplitOrderParams, TradeContextError, TradesStreamMode, TradesSubscription, TransportMode,
+    VStopParams,
 };
 #[cfg(feature = "diagnostics")]
 #[doc(hidden)]
@@ -211,7 +212,7 @@ pub use commands::candles::{DeepHistoryKind, DeepPrice};
 pub use commands::trade::{MoveAllBuysParams, MoveAllSellsParams};
 pub use commands::ui::{EmuPencilPoint, EmuTradePoint};
 pub use events::{
-    ArbEvent, DetectSignalEvent, DetectWatcherRow, EngineActionEvent, EngineActionKind, Event,
+    ArbEvent, DetectEvent, DetectWatcherRow, EngineActionEvent, EngineActionKind, Event,
     MoonStateSnapshot, ServerLogEvent, WatcherFillEvent, WatcherFillsEvent,
 };
 pub use key_import::{
@@ -222,8 +223,8 @@ pub use key_import::{
 #[doc(hidden)]
 pub use protocol::Command;
 pub use state::{
-    AlertObjectEvent, AlertObjectSnapshot, ChartTextSnapshot, CoinCardCandlesEvent,
-    CoinCardCandlesState, ExchangeKind, ThinTerminalState, TransferAssetsEvent,
+    ChartAlertEvent, ChartAlertObject, ChartAlertsState, ChartTextSnapshot, ChartTextState,
+    CoinCardCandlesEvent, CoinCardCandlesState, ExchangeKind, TransferAssetsEvent,
     TransferAssetsState,
 };
 #[cfg(any(test, feature = "diagnostics"))]
