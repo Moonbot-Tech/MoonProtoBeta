@@ -4,7 +4,7 @@ use super::*;
 use crate::commands::registry::CURRENT_PROTO_CMD_VER;
 use std::convert::TryInto;
 
-/// Parsed `TBaseTradeCommand` subcommands mapped by Delphi CmdId.
+/// Parsed `TBaseTradeCommand` payloads mapped by Delphi CmdId.
 ///
 /// This is the low-level protocol enum accepted by `state::Orders::apply`.
 #[derive(Debug, Clone)]

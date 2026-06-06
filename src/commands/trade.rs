@@ -1,4 +1,4 @@
-//! `MPC_Order` channel: Delphi `TBaseTradeCommand` subcommands.
+//! `MPC_Order` channel: Delphi `TBaseTradeCommand` payloads.
 //!
 //! Delphi source: `MoonProto/MoonProtoTradeStruct.pas`.
 //!
