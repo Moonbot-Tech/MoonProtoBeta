@@ -167,9 +167,9 @@ pub use client::{
     ConnectError, EngineActionTicket, InitConfig, InitError, InitialStrategies, LifecycleEvent,
     MoonAccount, MoonBalances, MoonCandles, MoonClient, MoonClientError, MoonClientEvent,
     MoonClientSnapshot, MoonEmulator, MoonEventQueue, MoonEventSink, MoonOrders, MoonSettings,
-    MoonStrategies, MoonStreams, MoonTrade, NewOrderParams, NewOrderTicket, OrderSide, OrderTarget,
-    RefreshConfig, SellOrderParams, SplitOrderParams, TradeContextError, TradesStreamMode,
-    TradesSubscription, TransportMode, VStopParams,
+    MoonStrategies, MoonStreams, MoonTerminal, MoonTrade, NewOrderParams, NewOrderTicket,
+    OrderSide, OrderTarget, RefreshConfig, SellOrderParams, SplitOrderParams, TradeContextError,
+    TradesStreamMode, TradesSubscription, TransportMode, VStopParams,
 };
 #[cfg(feature = "diagnostics")]
 #[doc(hidden)]
@@ -211,8 +211,8 @@ pub use commands::candles::{DeepHistoryKind, DeepPrice};
 pub use commands::trade::{MoveAllBuysParams, MoveAllSellsParams};
 pub use commands::ui::{EmuPencilPoint, EmuTradePoint};
 pub use events::{
-    ArbEvent, EngineActionEvent, EngineActionKind, Event, MoonStateSnapshot, ServerLogEvent,
-    WatcherFillEvent, WatcherFillsEvent,
+    ArbEvent, DetectSignalEvent, DetectWatcherRow, EngineActionEvent, EngineActionKind, Event,
+    MoonStateSnapshot, ServerLogEvent, WatcherFillEvent, WatcherFillsEvent,
 };
 pub use key_import::{
     import_key, parse_key_info, ImportedIpVersion, ImportedKeyFormat, ImportedKeyInfo,
@@ -222,7 +222,8 @@ pub use key_import::{
 #[doc(hidden)]
 pub use protocol::Command;
 pub use state::{
-    CoinCardCandlesEvent, CoinCardCandlesState, ExchangeKind, TransferAssetsEvent,
+    AlertObjectEvent, AlertObjectSnapshot, ChartTextSnapshot, CoinCardCandlesEvent,
+    CoinCardCandlesState, ExchangeKind, ThinTerminalState, TransferAssetsEvent,
     TransferAssetsState,
 };
 #[cfg(any(test, feature = "diagnostics"))]

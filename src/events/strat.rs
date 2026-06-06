@@ -29,45 +29,64 @@ impl EventDispatcher {
             | StratCommand::Unknown { .. } => return,
             _ => {}
         }
-        if let StratCommand::Snapshot(snap) = cmd_v {
-            let raw_len = snap.data.len();
-            if self
-                .strats
-                .apply_snapshot_decoded_with_mode_in_place(&snap.data, snap.full)
-                .is_none()
-            {
-                log::warn!(
-                    target: "moonproto::events",
-                    "failed to decode {} strategy snapshot payload ({} bytes)",
-                    if snap.full { "full" } else { "partial" },
-                    raw_len
-                );
-                return;
+        match cmd_v {
+            StratCommand::DetectSignal(cmd) => {
+                if self.markets.get(&cmd.market_name).is_none() {
+                    log::warn!(
+                        target: "moonproto::events",
+                        "detect dropped: market not found {}",
+                        cmd.market_name
+                    );
+                    return;
+                }
+                if !cmd.has_alert() && self.strats.get(cmd.strategy_id).is_none() {
+                    log::warn!(target: "moonproto::events", "detect dropped: strat not found");
+                    return;
+                }
+                out.push(Event::DetectSignal(
+                    crate::events::DetectSignalEvent::from_command(cmd),
+                ));
             }
-            self.strats.last_server_epoch = snap.server_epoch;
-            let ev = if snap.full {
-                StratEvent::SnapshotFull {
-                    server_epoch: snap.server_epoch,
-                    #[cfg(any(test, feature = "diagnostics"))]
-                    raw_len,
-                    #[cfg(feature = "diagnostics")]
-                    raw_data: snap.data,
+            StratCommand::Snapshot(snap) => {
+                let raw_len = snap.data.len();
+                if self
+                    .strats
+                    .apply_snapshot_decoded_with_mode_in_place(&snap.data, snap.full)
+                    .is_none()
+                {
+                    log::warn!(
+                        target: "moonproto::events",
+                        "failed to decode {} strategy snapshot payload ({} bytes)",
+                        if snap.full { "full" } else { "partial" },
+                        raw_len
+                    );
+                    return;
                 }
-            } else {
-                StratEvent::SnapshotPartial {
-                    server_epoch: snap.server_epoch,
-                    #[cfg(any(test, feature = "diagnostics"))]
-                    raw_len,
-                    #[cfg(feature = "diagnostics")]
-                    raw_data: snap.data,
+                self.strats.last_server_epoch = snap.server_epoch;
+                let ev = if snap.full {
+                    StratEvent::SnapshotFull {
+                        server_epoch: snap.server_epoch,
+                        #[cfg(any(test, feature = "diagnostics"))]
+                        raw_len,
+                        #[cfg(feature = "diagnostics")]
+                        raw_data: snap.data,
+                    }
+                } else {
+                    StratEvent::SnapshotPartial {
+                        server_epoch: snap.server_epoch,
+                        #[cfg(any(test, feature = "diagnostics"))]
+                        raw_len,
+                        #[cfg(feature = "diagnostics")]
+                        raw_data: snap.data,
+                    }
+                };
+                out.push(Event::Strat(ev));
+            }
+            other => {
+                if let Some(ev) = self.strats.apply(other) {
+                    out.push(Event::Strat(ev));
                 }
-            };
-            out.push(Event::Strat(ev));
-            return;
-        }
-
-        if let Some(ev) = self.strats.apply(cmd_v) {
-            out.push(Event::Strat(ev));
+            }
         }
     }
 }

@@ -77,6 +77,80 @@ fn update_version_roundtrip() {
 }
 
 #[test]
+fn alert_object_roundtrip_and_invalid_len_is_skipped() {
+    let cmd = AlertObjectCommand {
+        uid: 44,
+        market_name: "BTCUSDT".to_string(),
+        obj_uid: 12345,
+        upsert: true,
+        blob: vec![1, 2, 3, 4, 5],
+        skipped: false,
+    };
+    let raw = build_alert_object(&cmd);
+    match UICommand::parse(&raw).unwrap() {
+        UICommand::AlertObject(parsed) => {
+            assert_eq!(parsed.uid, 44);
+            assert_eq!(parsed.market_name, "BTCUSDT");
+            assert_eq!(parsed.obj_uid, 12345);
+            assert!(parsed.upsert);
+            assert_eq!(parsed.blob, vec![1, 2, 3, 4, 5]);
+            assert!(!parsed.skipped());
+        }
+        _ => panic!("wrong variant"),
+    }
+
+    let mut bad = header_bytes(CMD_ALERT_OBJECT, 45);
+    bad.extend_from_slice(&7u64.to_le_bytes());
+    bad.push(1);
+    write_string(&mut bad, "ETHUSDT");
+    bad.extend_from_slice(&100i32.to_le_bytes());
+    bad.extend_from_slice(&[1, 2, 3]);
+    match UICommand::parse(&bad).unwrap() {
+        UICommand::AlertObject(parsed) => {
+            assert!(parsed.skipped());
+            assert!(parsed.blob.is_empty());
+        }
+        _ => panic!("wrong variant"),
+    }
+}
+
+#[test]
+fn chart_text_commands_roundtrip() {
+    let state = ChartTextStateCommand {
+        uid: 50,
+        market_name: "SOLUSDT".to_string(),
+        need_filters: true,
+        need_debug_lines: false,
+    };
+    let raw = build_chart_text_state(&state);
+    match UICommand::parse(&raw).unwrap() {
+        UICommand::ChartTextState(parsed) => {
+            assert_eq!(parsed.uid, 50);
+            assert_eq!(parsed.market_name, "SOLUSDT");
+            assert!(parsed.need_filters);
+            assert!(!parsed.need_debug_lines);
+        }
+        _ => panic!("wrong variant"),
+    }
+
+    let snapshot = ChartTextSnapshotCommand {
+        uid: 51,
+        market_name: "SOLUSDT".to_string(),
+        filter_lines: vec!["filter A".to_string(), "filter B".to_string()],
+        debug_lines: vec!["debug".to_string()],
+    };
+    let raw = build_chart_text_snapshot_for_test(&snapshot);
+    match UICommand::parse(&raw).unwrap() {
+        UICommand::ChartTextSnapshot(parsed) => {
+            assert_eq!(parsed.market_name, "SOLUSDT");
+            assert_eq!(parsed.filter_lines, snapshot.filter_lines);
+            assert_eq!(parsed.debug_lines, snapshot.debug_lines);
+        }
+        _ => panic!("wrong variant"),
+    }
+}
+
+#[test]
 fn emu_trade_point_uses_private_wire_struct() {
     assert_eq!(std::mem::size_of::<WireEmuTradePoint>(), 6);
     assert_eq!(EMU_TRADE_POINT_SIZE, 6);

@@ -115,6 +115,10 @@ for event in client.drain_events() {
   themselves.
 - Aggregates chunked candle responses; trades subscription also schedules the
   initial 5m candles snapshot for retained history.
+- Receives core-built terminal facts: detect notifications, watcher rows,
+  chart-alert fires, accepted chart-alert objects, and ready chart text rows.
+  Applications render these facts/state; they do not recompute the kernel-side
+  detect/chart-text logic locally.
 
 ## String Compatibility Notes
 

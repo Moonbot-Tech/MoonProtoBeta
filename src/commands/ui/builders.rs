@@ -272,3 +272,61 @@ pub(crate) fn build_switch_spot(uid: u64, spot_index: u8) -> Vec<u8> {
     out.push(spot_index);
     out
 }
+
+/// CmdId=15 `TAlertObjectCommand`.
+#[doc(hidden)]
+pub(crate) fn build_alert_object(cmd: &AlertObjectCommand) -> Vec<u8> {
+    let len = if cmd.upsert {
+        cmd.blob.len().min(i32::MAX as usize)
+    } else {
+        0
+    };
+    let mut out = Vec::with_capacity(11 + 8 + 1 + 2 + cmd.market_name.len() + 4 + len);
+    write_header(&mut out, CMD_ALERT_OBJECT, cmd.uid);
+    out.extend_from_slice(&cmd.obj_uid.to_le_bytes());
+    out.push(cmd.upsert as u8);
+    write_string(&mut out, &cmd.market_name);
+    out.extend_from_slice(&(len as i32).to_le_bytes());
+    if len > 0 {
+        out.extend_from_slice(&cmd.blob[..len]);
+    }
+    out
+}
+
+/// CmdId=16 `TAlertSnapshotRequest` (empty body).
+#[doc(hidden)]
+pub(crate) fn build_alert_snapshot_request(uid: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(11);
+    write_header(&mut out, CMD_ALERT_SNAPSHOT_REQUEST, uid);
+    out
+}
+
+/// CmdId=17 `TChartTextStateCommand`.
+#[doc(hidden)]
+pub(crate) fn build_chart_text_state(cmd: &ChartTextStateCommand) -> Vec<u8> {
+    let mut out = Vec::with_capacity(11 + 2 + cmd.market_name.len() + 2);
+    write_header(&mut out, CMD_CHART_TEXT_STATE, cmd.uid);
+    write_string(&mut out, &cmd.market_name);
+    out.push(cmd.need_filters as u8);
+    out.push(cmd.need_debug_lines as u8);
+    out
+}
+
+#[cfg(test)]
+#[doc(hidden)]
+pub fn build_chart_text_snapshot_for_test(cmd: &ChartTextSnapshotCommand) -> Vec<u8> {
+    let filter_count = cmd.filter_lines.len().min(usize::from(u16::MAX));
+    let debug_count = cmd.debug_lines.len().min(usize::from(u16::MAX));
+    let mut out = Vec::new();
+    write_header(&mut out, CMD_CHART_TEXT_SNAPSHOT, cmd.uid);
+    write_string(&mut out, &cmd.market_name);
+    out.extend_from_slice(&(filter_count as u16).to_le_bytes());
+    for line in cmd.filter_lines.iter().take(filter_count) {
+        write_string(&mut out, line);
+    }
+    out.extend_from_slice(&(debug_count as u16).to_le_bytes());
+    for line in cmd.debug_lines.iter().take(debug_count) {
+        write_string(&mut out, line);
+    }
+    out
+}

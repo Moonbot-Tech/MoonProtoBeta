@@ -1,4 +1,4 @@
-//! MPC_Strat channel — 9 TBaseStratCommand subcommands.
+//! MPC_Strat channel — TBaseStratCommand subcommands.
 //!
 //! Delphi source: `MoonProto/MoonProtoStratStruct.pas` (~408 lines).
 //!
@@ -12,6 +12,7 @@
 //! - 6 — TStratCheckedEcho (S→C ACK for the Checked delta)
 //! - 7 — TStratSchemaRequest (C→S, empty)
 //! - 8 — TStratSchema (S→C, Sliced, raw-deflate schema blob)
+//! - 9 — TDetectSignalCommand (S→C, High, thin-terminal detect fact)
 //!
 //! ## Note on TStratSnapshot.Data
 //! `Data: bytes(Size)` is the serialized `TStrategySerializer` bin format (RTTI-driven,
@@ -36,6 +37,11 @@ const CMD_CHECKED_SYNC: u8 = 5;
 const CMD_CHECKED_ECHO: u8 = 6;
 const CMD_SCHEMA_REQUEST: u8 = 7;
 const CMD_SCHEMA: u8 = 8;
+const CMD_DETECT_SIGNAL: u8 = 9;
+
+pub const DETECT_KIND_ROW: u8 = 0x01;
+pub const DETECT_KIND_CHART_ONLY: u8 = 0x02;
+pub const DETECT_KIND_ALERT: u8 = 0x04;
 
 pub(crate) fn is_snapshot_request_payload(payload: &[u8]) -> bool {
     payload.first().copied() == Some(CMD_SNAPSHOT_REQUEST)
@@ -169,6 +175,55 @@ pub struct StratSchema {
     pub data: Vec<u8>,
 }
 
+/// `TDetectSignalCommand` (CmdId=9). Server → client thin-terminal UI fact.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DetectSignalCommand {
+    pub market_name: String,
+    pub strategy_id: u64,
+    pub is_short: bool,
+    /// Delphi `Kind` bitset: 0=regular detect, Row/ChartOnly/Alert bits.
+    pub kind: u8,
+    /// Reserved byte, currently always zero in Delphi.
+    pub reserved: u8,
+    /// Present for regular detects and alert fires.
+    pub msg: String,
+    /// Present when `kind & DETECT_KIND_ROW != 0`.
+    pub pos_val: f64,
+    /// Present when `kind & DETECT_KIND_ROW != 0`.
+    pub val: f64,
+    /// Present when `kind & DETECT_KIND_ROW != 0`.
+    pub row_flags: u8,
+    /// Present when `kind & DETECT_KIND_ALERT != 0`.
+    pub obj_uid: u64,
+}
+
+#[cfg_attr(feature = "diagnostics", allow(dead_code))]
+impl DetectSignalCommand {
+    pub fn is_regular_detect(&self) -> bool {
+        self.kind == 0
+    }
+
+    pub fn has_row(&self) -> bool {
+        (self.kind & DETECT_KIND_ROW) != 0
+    }
+
+    pub fn has_chart_only(&self) -> bool {
+        (self.kind & DETECT_KIND_CHART_ONLY) != 0
+    }
+
+    pub fn has_alert(&self) -> bool {
+        (self.kind & DETECT_KIND_ALERT) != 0
+    }
+
+    pub fn row_is_open(&self) -> bool {
+        (self.row_flags & 0x01) != 0
+    }
+
+    pub fn row_is_taker(&self) -> bool {
+        (self.row_flags & 0x02) != 0
+    }
+}
+
 /// All parseable incoming MPC_Strat subcommands.
 #[cfg_attr(feature = "diagnostics", allow(dead_code))]
 #[derive(Debug, Clone)]
@@ -185,6 +240,7 @@ pub enum StratCommand {
         uid: u64,
     },
     Schema(StratSchema),
+    DetectSignal(DetectSignalCommand),
     /// Header is valid, but protocol version is newer than this library can
     /// parse. Delphi registry marks this as `FSkipped` and returns the base
     /// command class.
@@ -297,6 +353,44 @@ impl StratCommand {
                 };
                 Some(StratCommand::Schema(StratSchema { data }))
             }
+            CMD_DETECT_SIGNAL => {
+                let market_name = read_string(payload, &mut pos)?;
+                let strategy_id = read_u64_zero_tail(payload, &mut pos);
+                let is_short = read_u8_zero_tail(payload, &mut pos) != 0;
+                let kind = read_u8_zero_tail(payload, &mut pos);
+                let reserved = read_u8_zero_tail(payload, &mut pos);
+                let msg = if kind == 0 || (kind & DETECT_KIND_ALERT) != 0 {
+                    read_string(payload, &mut pos)?
+                } else {
+                    String::new()
+                };
+                let (pos_val, val, row_flags) = if (kind & DETECT_KIND_ROW) != 0 {
+                    (
+                        f64::from_le_bytes(read_zero_tail::<8>(payload, &mut pos)),
+                        f64::from_le_bytes(read_zero_tail::<8>(payload, &mut pos)),
+                        read_u8_zero_tail(payload, &mut pos),
+                    )
+                } else {
+                    (0.0, 0.0, 0)
+                };
+                let obj_uid = if (kind & DETECT_KIND_ALERT) != 0 {
+                    read_u64_zero_tail(payload, &mut pos)
+                } else {
+                    0
+                };
+                Some(StratCommand::DetectSignal(DetectSignalCommand {
+                    market_name,
+                    strategy_id,
+                    is_short,
+                    kind,
+                    reserved,
+                    msg,
+                    pos_val,
+                    val,
+                    row_flags,
+                    obj_uid,
+                }))
+            }
             _ => Some(StratCommand::Unknown { cmd_id, uid }),
         }
     }
@@ -363,6 +457,30 @@ pub(crate) fn build_snapshot_request(uid: u64) -> Vec<u8> {
 pub(crate) fn build_schema_request(uid: u64) -> Vec<u8> {
     let mut out = Vec::with_capacity(11);
     write_header(&mut out, CMD_SCHEMA_REQUEST, uid);
+    out
+}
+
+#[cfg(test)]
+#[doc(hidden)]
+pub fn build_detect_signal_for_test(cmd: &DetectSignalCommand) -> Vec<u8> {
+    let mut out = Vec::with_capacity(64);
+    write_header(&mut out, CMD_DETECT_SIGNAL, rand::random());
+    write_string(&mut out, &cmd.market_name);
+    out.extend_from_slice(&cmd.strategy_id.to_le_bytes());
+    out.push(cmd.is_short as u8);
+    out.push(cmd.kind);
+    out.push(cmd.reserved);
+    if cmd.kind == 0 || (cmd.kind & DETECT_KIND_ALERT) != 0 {
+        write_string(&mut out, &cmd.msg);
+    }
+    if (cmd.kind & DETECT_KIND_ROW) != 0 {
+        out.extend_from_slice(&cmd.pos_val.to_le_bytes());
+        out.extend_from_slice(&cmd.val.to_le_bytes());
+        out.push(cmd.row_flags);
+    }
+    if (cmd.kind & DETECT_KIND_ALERT) != 0 {
+        out.extend_from_slice(&cmd.obj_uid.to_le_bytes());
+    }
     out
 }
 

@@ -190,6 +190,78 @@ impl UICommand {
                 Some(UICommand::SwitchSpot(SwitchSpot { uid, spot_index }))
             }
 
+            CMD_ALERT_OBJECT => {
+                let obj_uid = read_u64_zero_tail(payload, &mut pos);
+                let upsert = read_bool_zero_tail(payload, &mut pos);
+                let market_name = read_string(payload, &mut pos)?;
+                if pos + 4 > payload.len() {
+                    return None;
+                }
+                let len = i32::from_le_bytes(payload[pos..pos + 4].try_into().unwrap());
+                pos += 4;
+                let skipped = len < 0 || (len as usize) > payload.len().saturating_sub(pos);
+                let blob = if skipped {
+                    Vec::new()
+                } else if len > 0 {
+                    payload[pos..pos + len as usize].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Some(UICommand::AlertObject(AlertObjectCommand {
+                    uid,
+                    market_name,
+                    obj_uid,
+                    upsert,
+                    blob,
+                    skipped,
+                }))
+            }
+
+            CMD_ALERT_SNAPSHOT_REQUEST => Some(UICommand::AlertSnapshotRequest { uid }),
+
+            CMD_CHART_TEXT_STATE => {
+                let market_name = read_string(payload, &mut pos)?;
+                let need_filters = read_bool_zero_tail(payload, &mut pos);
+                let need_debug_lines = read_bool_zero_tail(payload, &mut pos);
+                Some(UICommand::ChartTextState(ChartTextStateCommand {
+                    uid,
+                    market_name,
+                    need_filters,
+                    need_debug_lines,
+                }))
+            }
+
+            CMD_CHART_TEXT_SNAPSHOT => {
+                let market_name = read_string(payload, &mut pos)?;
+
+                if pos + 2 > payload.len() {
+                    return None;
+                }
+                let filter_count = u16::from_le_bytes([payload[pos], payload[pos + 1]]) as usize;
+                pos += 2;
+                let mut filter_lines = Vec::with_capacity(filter_count);
+                for _ in 0..filter_count {
+                    filter_lines.push(read_string(payload, &mut pos)?);
+                }
+
+                if pos + 2 > payload.len() {
+                    return None;
+                }
+                let debug_count = u16::from_le_bytes([payload[pos], payload[pos + 1]]) as usize;
+                pos += 2;
+                let mut debug_lines = Vec::with_capacity(debug_count);
+                for _ in 0..debug_count {
+                    debug_lines.push(read_string(payload, &mut pos)?);
+                }
+
+                Some(UICommand::ChartTextSnapshot(ChartTextSnapshotCommand {
+                    uid,
+                    market_name,
+                    filter_lines,
+                    debug_lines,
+                }))
+            }
+
             _ => Some(UICommand::Unknown { cmd_id, uid }),
         }
     }

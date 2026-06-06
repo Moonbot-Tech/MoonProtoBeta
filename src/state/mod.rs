@@ -28,6 +28,7 @@ pub(crate) mod orders;
 pub(crate) mod seq_ring;
 pub(crate) mod settings;
 pub(crate) mod strats;
+pub(crate) mod thin_terminal;
 pub(crate) mod trades;
 pub(crate) mod transfer_assets;
 
@@ -77,6 +78,9 @@ pub use seq_ring::{
 };
 pub use settings::{SettingsEvent, SettingsState};
 pub use strats::{StratEvent, StrategyInfo, StratsState};
+pub use thin_terminal::{
+    AlertObjectEvent, AlertObjectSnapshot, ChartTextSnapshot, ThinTerminalState,
+};
 pub use trades::TradesEvent;
 pub(crate) use trades::{
     iter_trades_resend_response, TradesPacketEffect, TradesPacketEffects, TradesState,

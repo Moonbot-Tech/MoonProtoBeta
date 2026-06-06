@@ -774,6 +774,106 @@ impl MoonSettings<'_> {
     }
 }
 
+/// Thin-terminal command handle.
+///
+/// These commands mirror the Delphi ActiveClient responsibilities: the terminal
+/// sends chart-alert object changes and the currently visible chart-text need;
+/// the core sends back accepted alert objects and ready text rows through
+/// `Event::AlertObject` / `Event::ChartTextSnapshot` and
+/// `snapshot().thin_terminal()`.
+pub struct MoonTerminal<'a> {
+    pub(super) client: &'a MoonClient,
+}
+
+impl MoonTerminal<'_> {
+    /// Ask the core to resend all currently armed chart alerts.
+    pub fn request_alert_snapshot(&self) -> Result<(), MoonClientError> {
+        self.client.request_alert_snapshot()
+    }
+
+    /// Upsert a chart alert object for a retained market handle.
+    ///
+    /// `blob` must be a Delphi-compatible `TChartObject.Save` payload. The core
+    /// is authoritative: after it accepts the object, all clients receive
+    /// `Event::AlertObject`, and the retained copy is available from
+    /// `snapshot().thin_terminal()`.
+    pub fn upsert_alert_object_for_market(
+        &self,
+        market: &crate::state::MarketHandle,
+        obj_uid: u64,
+        blob: Vec<u8>,
+    ) -> Result<(), MoonClientError> {
+        self.upsert_alert_object(market.name(), obj_uid, blob)
+    }
+
+    /// Upsert a chart alert object by market name.
+    pub fn upsert_alert_object(
+        &self,
+        market_name: impl Into<String>,
+        obj_uid: u64,
+        blob: Vec<u8>,
+    ) -> Result<(), MoonClientError> {
+        self.client
+            .sync_alert_object(crate::commands::ui::AlertObjectCommand::new_upsert(
+                market_name,
+                obj_uid,
+                blob,
+            ))
+    }
+
+    /// Delete/dearm a chart alert object for a retained market handle.
+    pub fn delete_alert_object_for_market(
+        &self,
+        market: &crate::state::MarketHandle,
+        obj_uid: u64,
+    ) -> Result<(), MoonClientError> {
+        self.delete_alert_object(market.name(), obj_uid)
+    }
+
+    /// Delete/dearm a chart alert object by market name.
+    pub fn delete_alert_object(
+        &self,
+        market_name: impl Into<String>,
+        obj_uid: u64,
+    ) -> Result<(), MoonClientError> {
+        self.client
+            .sync_alert_object(crate::commands::ui::AlertObjectCommand::new_delete(
+                market_name,
+                obj_uid,
+            ))
+    }
+
+    /// Tell the core which market currently needs chart filter/debug rows.
+    pub fn set_chart_text_state_for_market(
+        &self,
+        market: &crate::state::MarketHandle,
+        need_filters: bool,
+        need_debug_lines: bool,
+    ) -> Result<(), MoonClientError> {
+        self.set_chart_text_state(market.name(), need_filters, need_debug_lines)
+    }
+
+    /// Tell the core which market currently needs chart filter/debug rows.
+    pub fn set_chart_text_state(
+        &self,
+        market_name: impl Into<String>,
+        need_filters: bool,
+        need_debug_lines: bool,
+    ) -> Result<(), MoonClientError> {
+        self.client
+            .set_chart_text_state(crate::commands::ui::ChartTextStateCommand::new(
+                market_name,
+                need_filters,
+                need_debug_lines,
+            ))
+    }
+
+    /// Disable chart text relay for this client.
+    pub fn clear_chart_text_state(&self) -> Result<(), MoonClientError> {
+        self.set_chart_text_state("", false, false)
+    }
+}
+
 /// Chart-trade emulator command handle.
 ///
 /// This is the high-level path matching Delphi's draw-tool emulator: terminal

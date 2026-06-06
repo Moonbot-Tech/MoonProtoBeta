@@ -78,8 +78,8 @@ pub use active_runtime::{
     ClosePositionParams, CoinCardCandlesTicket, EngineActionTicket, MoonAccount, MoonBalances,
     MoonCandles, MoonClient, MoonClientError, MoonClientEvent, MoonClientSnapshot, MoonEmulator,
     MoonEventQueue, MoonEventSink, MoonOrders, MoonSettings, MoonStrategies, MoonStreams,
-    MoonTrade, NewOrderParams, NewOrderTicket, OrderSide, OrderTarget, SellOrderParams,
-    SplitOrderParams, TradesStreamMode, VStopParams,
+    MoonTerminal, MoonTrade, NewOrderParams, NewOrderTicket, OrderSide, OrderTarget,
+    SellOrderParams, SplitOrderParams, TradesStreamMode, VStopParams,
 };
 pub(crate) use candles::MergedCandles;
 pub(crate) use clock::set_ntp_offset;

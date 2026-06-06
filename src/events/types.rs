@@ -3,6 +3,9 @@
 use super::*;
 use crate::commands::engine_api::EngineMethod;
 use crate::commands::market::PositionType;
+use crate::commands::strat::{
+    DetectSignalCommand, DETECT_KIND_ALERT, DETECT_KIND_CHART_ONLY, DETECT_KIND_ROW,
+};
 use crate::state::{AccountEvent, ExchangeKind};
 #[cfg(any(test, feature = "diagnostics"))]
 use crate::time::DelphiTime;
@@ -178,6 +181,76 @@ impl ServerLogEvent {
     }
 }
 
+/// One watcher row fact relayed by the MoonProto core.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DetectWatcherRow {
+    pub pos_val: f64,
+    pub val: f64,
+    pub row_flags: u8,
+}
+
+impl DetectWatcherRow {
+    pub fn is_open(&self) -> bool {
+        (self.row_flags & 0x01) != 0
+    }
+
+    pub fn is_taker(&self) -> bool {
+        (self.row_flags & 0x02) != 0
+    }
+}
+
+/// Server-side detect/UI fact from `TDetectSignalCommand`.
+///
+/// The core already performed detect/watcher/alert logic. Rust terminal code
+/// should display this fact using local UI settings and retained strategy/market
+/// state; it must not recompute the detect itself.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DetectSignalEvent {
+    pub market_name: String,
+    pub strategy_id: u64,
+    pub is_short: bool,
+    pub kind_bits: u8,
+    pub msg: String,
+    pub watcher_row: Option<DetectWatcherRow>,
+    pub alert_obj_uid: Option<u64>,
+}
+
+impl DetectSignalEvent {
+    pub(crate) fn from_command(cmd: DetectSignalCommand) -> Self {
+        let watcher_row = cmd.has_row().then_some(DetectWatcherRow {
+            pos_val: cmd.pos_val,
+            val: cmd.val,
+            row_flags: cmd.row_flags,
+        });
+        let alert_obj_uid = cmd.has_alert().then_some(cmd.obj_uid);
+        Self {
+            market_name: cmd.market_name,
+            strategy_id: cmd.strategy_id,
+            is_short: cmd.is_short,
+            kind_bits: cmd.kind,
+            msg: cmd.msg,
+            watcher_row,
+            alert_obj_uid,
+        }
+    }
+
+    pub fn is_regular_detect(&self) -> bool {
+        self.kind_bits == 0
+    }
+
+    pub fn has_watcher_row(&self) -> bool {
+        (self.kind_bits & DETECT_KIND_ROW) != 0
+    }
+
+    pub fn is_chart_only(&self) -> bool {
+        (self.kind_bits & DETECT_KIND_CHART_ONLY) != 0
+    }
+
+    pub fn is_alert_fire(&self) -> bool {
+        (self.kind_bits & DETECT_KIND_ALERT) != 0
+    }
+}
+
 /// User-facing asynchronous Engine API action kind.
 ///
 /// Delphi low-level `TMoonProtoEngine` often implements these commands through
@@ -307,9 +380,15 @@ pub enum Event {
     Arb(ArbEvent),
     /// Strat channel: snapshot/delete/sell-price update.
     Strat(StratEvent),
+    /// ThinRefactor detect/watcher/chart-alert fact produced by the core.
+    DetectSignal(DetectSignalEvent),
     /// UI channel receive branch: settings snapshot, leverage snapshot, remote
     /// update request, or arbitrage activation notification.
     Settings(SettingsEvent),
+    /// Authoritative chart alert object state changed.
+    AlertObject(crate::state::AlertObjectEvent),
+    /// Ready chart text rows for one market were replaced by the core.
+    ChartTextSnapshot(crate::state::ChartTextSnapshot),
     /// Markets state was updated after an Engine API response.
     Markets(MarketsEvent),
     /// Engine API response that was not consumed by the pending-response

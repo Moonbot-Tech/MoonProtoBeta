@@ -134,7 +134,11 @@ impl SettingsState {
             | UICommand::TriggerManage(_)
             | UICommand::ResetProfit(_)
             | UICommand::SwitchDex(_)
-            | UICommand::SwitchSpot(_) => None,
+            | UICommand::SwitchSpot(_)
+            | UICommand::AlertObject(_)
+            | UICommand::AlertSnapshotRequest { .. }
+            | UICommand::ChartTextState(_)
+            | UICommand::ChartTextSnapshot(_) => None,
 
             UICommand::UpdateVersion(u) => Some(SettingsEvent::VersionUpdate {
                 #[cfg(any(test, feature = "diagnostics"))]

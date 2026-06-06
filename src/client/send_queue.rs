@@ -60,6 +60,11 @@ pub(crate) const UK_ARB_PRICES: u8 = 12;
 pub(crate) const UK_DEX_SWITCH: u8 = 13;
 /// `UK_SpotSwitch`: spot-mode switch command key.
 pub(crate) const UK_SPOT_SWITCH: u8 = 14;
+/// `UK_ChartTextSnapshot`: per-client chart text snapshot key.
+#[allow(dead_code)]
+pub(crate) const UK_CHART_TEXT_SNAPSHOT: u8 = 15;
+/// `UK_ChartTextState`: singleton chart text state key.
+pub(crate) const UK_CHART_TEXT_STATE: u8 = 16;
 
 impl UniqueKey {
     /// No deduplication.
@@ -123,6 +128,14 @@ impl UniqueKey {
         Self {
             kind: UK_SPOT_SWITCH,
             uid,
+        }
+    }
+    /// `UK_ChartTextState` with Delphi `TChartTextStateCommand.SetUKey`
+    /// semantics: every state update competes for UID=1.
+    pub(crate) fn chart_text_state_slot() -> Self {
+        Self {
+            kind: UK_CHART_TEXT_STATE,
+            uid: 1,
         }
     }
     /// `UK_StratSellPriceUpdate` keyed by `strategy_id` so dedup is per

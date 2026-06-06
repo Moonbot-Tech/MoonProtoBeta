@@ -1,4 +1,4 @@
-﻿//! Active `MPC_UI` and `MPC_LogMsg` dispatch.
+//! Active `MPC_UI` and `MPC_LogMsg` dispatch.
 
 use super::{Event, EventDispatcher, ServerLogEvent};
 use crate::commands::registry::decode_utf8_delphi;
@@ -16,6 +16,17 @@ impl EventDispatcher {
                 self.markets.markets_list_refresh_needed = true;
                 self.force_markets_list_refresh = true;
             }
+            Some(UICommand::AlertObject(cmd)) => {
+                if let Some(ev) = self.thin_terminal.apply_alert_object(cmd) {
+                    out.push(Event::AlertObject(ev));
+                }
+            }
+            Some(UICommand::ChartTextSnapshot(cmd)) => {
+                if let Some(snapshot) = self.thin_terminal.apply_chart_text_snapshot(cmd) {
+                    out.push(Event::ChartTextSnapshot(snapshot));
+                }
+            }
+            Some(UICommand::AlertSnapshotRequest { .. } | UICommand::ChartTextState(_)) => {}
             Some(cmd_v) => {
                 let coin_blacklist_text = match &cmd_v {
                     UICommand::ClientSettings(settings) => {

@@ -47,8 +47,8 @@ use crate::state::{
     MarketHistoryCandlesSnapshot, MarketHistoryHandle, MarketHistoryReaders, MarketHistorySizing,
     MarketHistoryWorker, MarketsEvent, MarketsState, OrderBookControl, OrderBookEvent, OrderBooks,
     OrderEvent, Orders, RollingTradeVolumeSnapshot, SettingsEvent, SettingsState, StratEvent,
-    StratsState, TradeStorageScope, TradesEvent, TradesState, TransferAssetsEvent,
-    TransferAssetsState,
+    StratsState, ThinTerminalState, TradeStorageScope, TradesEvent, TradesState,
+    TransferAssetsEvent, TransferAssetsState,
 };
 use std::ops::{Deref, DerefMut};
 
@@ -68,8 +68,8 @@ mod ui;
 pub(crate) use active::{ActiveAction, ActiveDispatchContext};
 pub use snapshot::MoonStateSnapshot;
 pub use types::{
-    ArbEvent, EngineActionEvent, EngineActionKind, Event, ServerLogEvent, WatcherFillEvent,
-    WatcherFillsEvent,
+    ArbEvent, DetectSignalEvent, DetectWatcherRow, EngineActionEvent, EngineActionKind, Event,
+    ServerLogEvent, WatcherFillEvent, WatcherFillsEvent,
 };
 pub(crate) use types::{MissingOrderStatusRequest, StrategySnapshotReply};
 
@@ -139,6 +139,7 @@ pub(crate) struct EventDispatcher {
     pub(crate) strats: CowState<StratsState>,
     pub(crate) settings: CowState<SettingsState>,
     pub(crate) markets: CowState<MarketsState>,
+    pub(crate) thin_terminal: CowState<ThinTerminalState>,
     /// Session identity from `emk_BaseCheck`/`emk_AuthCheck`, pushed by the active
     /// runtime after Init so the published snapshot carries server/account info.
     /// Delphi keeps these in the engine's BaseCheck/AuthCheck state; multi-server
@@ -238,6 +239,7 @@ impl Default for EventDispatcher {
             strats: CowState::default(),
             settings: CowState::default(),
             markets: CowState::default(),
+            thin_terminal: CowState::default(),
             session_server_info: std::sync::Arc::new(ServerInfo::default()),
             session_auth_info: None,
             local_strategy_epoch: 0,

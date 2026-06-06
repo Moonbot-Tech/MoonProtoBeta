@@ -181,6 +181,7 @@ impl StratsState {
                 })
             }
             StratCommand::SnapshotRequest { .. } => None,
+            StratCommand::DetectSignal(_) => None,
             // Delphi client `ProcessStratCommand` has no branch for
             // `TStratSchemaRequest`. It is a client->server request handled by
             // the Delphi server, so a server->client copy is freed silently.

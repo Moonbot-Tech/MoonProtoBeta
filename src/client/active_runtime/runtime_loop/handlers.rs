@@ -157,10 +157,7 @@ pub(super) fn handle_command(
             schedule_coin_card_candles(client, &mut pending.coin_card_candles, ticket, payload);
             false
         }
-        RuntimeCommand::Ui(cmd) => {
-            handle_ui_command(client, cmd);
-            false
-        }
+        RuntimeCommand::Ui(cmd) => handle_ui_command(client, dispatcher, cmd),
         RuntimeCommand::Strat(cmd) => {
             handle_strat_command(client, cmd);
             false
@@ -320,32 +317,80 @@ pub(super) fn sync_runtime_trade_storage_scope(
     dispatcher.set_trade_storage_scope(scope.as_deref(), crate::client::delphi_now_raw());
 }
 
-fn handle_ui_command(client: &mut Client, cmd: UiRuntimeCommand) {
+fn handle_ui_command(
+    client: &mut Client,
+    dispatcher: &mut crate::events::EventDispatcher,
+    cmd: UiRuntimeCommand,
+) -> bool {
     match cmd {
-        UiRuntimeCommand::SettingsRequest => client.ui_settings_request(),
-        UiRuntimeCommand::MmSubscribe(subscribe) => client.ui_mm_subscribe(subscribe),
-        UiRuntimeCommand::SendSettings(settings) => client.ui_send_settings(&settings),
+        UiRuntimeCommand::SettingsRequest => {
+            client.ui_settings_request();
+            false
+        }
+        UiRuntimeCommand::MmSubscribe(subscribe) => {
+            client.ui_mm_subscribe(subscribe);
+            false
+        }
+        UiRuntimeCommand::SendSettings(settings) => {
+            client.ui_send_settings(&settings);
+            false
+        }
         UiRuntimeCommand::UpdateVersion {
             version_name,
             is_release,
-        } => client.ui_update_version(&version_name, is_release),
-        UiRuntimeCommand::SwitchDex(dex_name) => client.ui_switch_dex(&dex_name),
-        UiRuntimeCommand::SwitchSpot(spot) => client.ui_switch_spot(spot.to_byte()),
-        UiRuntimeCommand::LevManage(cmd) => client.ui_lev_manage(&cmd),
+        } => {
+            client.ui_update_version(&version_name, is_release);
+            false
+        }
+        UiRuntimeCommand::SwitchDex(dex_name) => {
+            client.ui_switch_dex(&dex_name);
+            false
+        }
+        UiRuntimeCommand::SwitchSpot(spot) => {
+            client.ui_switch_spot(spot.to_byte());
+            false
+        }
+        UiRuntimeCommand::LevManage(cmd) => {
+            client.ui_lev_manage(&cmd);
+            false
+        }
         UiRuntimeCommand::EmuTrades {
             market_index,
             base_time,
             points,
-        } => client.ui_emu_trades(market_index, base_time, &points),
+        } => {
+            client.ui_emu_trades(market_index, base_time, &points);
+            false
+        }
         UiRuntimeCommand::TriggerManage {
             action,
             all_markets,
             markets,
             keys,
-        } => client.ui_trigger_manage(action, all_markets, &markets, &keys),
-        UiRuntimeCommand::ResetProfit(kind) => client.ui_reset_profit(kind),
+        } => {
+            client.ui_trigger_manage(action, all_markets, &markets, &keys);
+            false
+        }
+        UiRuntimeCommand::ResetProfit(kind) => {
+            client.ui_reset_profit(kind);
+            false
+        }
         UiRuntimeCommand::ArbActivateNotify(valid_days) => {
-            client.ui_arb_activate_notify(valid_days)
+            client.ui_arb_activate_notify(valid_days);
+            false
+        }
+        UiRuntimeCommand::AlertObject(cmd) => {
+            client.ui_alert_object(&cmd);
+            false
+        }
+        UiRuntimeCommand::AlertSnapshotRequest => {
+            client.ui_alert_snapshot_request();
+            false
+        }
+        UiRuntimeCommand::ChartTextState(cmd) => {
+            let changed = dispatcher.thin_terminal.set_chart_text_state(&cmd);
+            client.ui_chart_text_state(&cmd);
+            changed
         }
     }
 }

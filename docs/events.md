@@ -84,6 +84,9 @@ fn handle_event(event: Event) {
         Event::Account(account_event) => handle_account_event(account_event),
         Event::CandlesSnapshot(candles_event) => handle_candles_ready(candles_event),
         Event::Strat(strat_event) => handle_strategy_event(strat_event),
+        Event::DetectSignal(detect_event) => handle_detect_fact(detect_event),
+        Event::AlertObject(alert_event) => handle_alert_object_state(alert_event),
+        Event::ChartTextSnapshot(rows) => redraw_chart_text(rows),
         Event::Settings(settings_event) => handle_settings_event(settings_event),
         Event::EngineAction(action) => handle_engine_action(action),
         Event::ServerLog(log) => append_server_log(log.time(), &log.msg),
@@ -150,6 +153,9 @@ pub enum Event {
     CandlesSnapshot(CandlesSnapshotEvent),
     Arb(ArbEvent),
     Strat(StratEvent),
+    DetectSignal(DetectSignalEvent),
+    AlertObject(AlertObjectEvent),
+    ChartTextSnapshot(ChartTextSnapshot),
     Settings(SettingsEvent),
     Markets(MarketsEvent),
     EngineAction(EngineActionEvent),
@@ -167,6 +173,21 @@ updated. Read actual rows from `MarketHistoryReaders`.
 `CandlesSnapshotEvent::Ready` is emitted after the initial full 5m candles
 snapshot has been processed by the history worker. At that point
 `market_history_readers_for(&market).candles_5m` already sees the retained rows.
+
+`DetectSignalEvent` is a terminal fact built by the core. It covers ordinary
+strategy detect messages, watcher rows, chart-only markers, and chart-alert
+fires. UI code displays/logs it and may consult the local strategy snapshot for
+user-facing labels, but it does not recompute the detect.
+
+`AlertObjectEvent` reports the accepted chart-alert object state. Read the
+retained set from `snapshot().thin_terminal().alert_objects_for_market(...)`;
+the event is the change signal, not a raw chart-object parser contract.
+
+`ChartTextSnapshot` is a full replacement of ready chart text rows for the
+currently requested chart-text market. Late snapshots for an older selected
+market are dropped like Delphi `ApplyChartTextSnapshot`. Read the latest rows
+from `snapshot().thin_terminal().chart_text(...)` when repainting the selected
+chart.
 
 `ArbEvent` is only a change signal/summary. Delphi writes incoming arb data into
 `TMarket.ArbSlots` / `TMarket.ArbNow`; Active Lib does the same, so UI code reads

@@ -8,8 +8,9 @@ use crate::commands::market::{
 };
 use crate::commands::registry::{write_string, CURRENT_PROTO_CMD_VER};
 use crate::commands::strat::{
-    build_schema_request, build_sell_price_update, build_snapshot_request, StratCommand,
-    StratSchema,
+    build_detect_signal_for_test, build_schema_request, build_sell_price_update,
+    build_snapshot_request, DetectSignalCommand, StratCommand, StratSchema, DETECT_KIND_ALERT,
+    DETECT_KIND_ROW,
 };
 use crate::commands::trade::trace_flags;
 use crate::commands::trade::{
@@ -273,6 +274,102 @@ fn dispatcher_skips_unknown_ui_command_id() {
     );
 }
 
+#[test]
+// parity: MoonProtoClient.pas:MPC_UI TAlertObjectCommand branch.
+fn dispatcher_applies_alert_object_to_thin_terminal_state() {
+    let mut d = EventDispatcher::new();
+    let cmd =
+        crate::commands::ui::AlertObjectCommand::new_upsert("BTCUSDT", 42, vec![1, 2, 3, 4, 5]);
+    let raw = crate::commands::ui::build_alert_object(&cmd);
+    let events = d.dispatch(Command::UI, &raw, 1000);
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        Event::AlertObject(crate::state::AlertObjectEvent::Upserted(obj)) => {
+            assert_eq!(obj.market_name, "BTCUSDT");
+            assert_eq!(obj.obj_uid, 42);
+            assert_eq!(obj.blob, vec![1, 2, 3, 4, 5]);
+        }
+        _ => panic!("wrong event"),
+    }
+    assert_eq!(
+        d.snapshot()
+            .thin_terminal()
+            .alert_object("BTCUSDT", 42)
+            .unwrap()
+            .blob,
+        vec![1, 2, 3, 4, 5]
+    );
+
+    let raw = crate::commands::ui::build_alert_object(
+        &crate::commands::ui::AlertObjectCommand::new_delete("BTCUSDT", 42),
+    );
+    let events = d.dispatch(Command::UI, &raw, 1001);
+    assert!(matches!(
+        &events[0],
+        Event::AlertObject(crate::state::AlertObjectEvent::Deleted { obj_uid: 42, .. })
+    ));
+    assert!(d
+        .snapshot()
+        .thin_terminal()
+        .alert_object("BTCUSDT", 42)
+        .is_none());
+}
+
+#[test]
+// parity: MoonProtoClient.pas:MPC_UI TChartTextSnapshotCommand branch.
+fn dispatcher_applies_chart_text_snapshot_to_thin_terminal_state() {
+    let mut d = EventDispatcher::new();
+    d.thin_terminal
+        .set_chart_text_state(&crate::commands::ui::ChartTextStateCommand::new(
+            "ETHUSDT", true, true,
+        ));
+    let raw = crate::commands::ui::build_chart_text_snapshot_for_test(
+        &crate::commands::ui::ChartTextSnapshotCommand {
+            uid: 77,
+            market_name: "ETHUSDT".to_string(),
+            filter_lines: vec!["filter".to_string()],
+            debug_lines: vec!["debug A".to_string(), "debug B".to_string()],
+        },
+    );
+    let events = d.dispatch(Command::UI, &raw, 1000);
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        Event::ChartTextSnapshot(snapshot) => {
+            assert_eq!(snapshot.market_name, "ETHUSDT");
+            assert_eq!(snapshot.filter_lines, vec!["filter"]);
+            assert_eq!(snapshot.debug_lines, vec!["debug A", "debug B"]);
+        }
+        _ => panic!("wrong event"),
+    }
+    let snap = d.snapshot();
+    let chart_text = snap.thin_terminal().chart_text("ETHUSDT").unwrap();
+    assert_eq!(chart_text.filter_lines, vec!["filter"]);
+    assert_eq!(chart_text.debug_lines, vec!["debug A", "debug B"]);
+}
+
+#[test]
+// parity: Unit1.pas:ApplyChartTextSnapshot drops rows for a no-longer-current chart market.
+fn dispatcher_drops_stale_chart_text_snapshot() {
+    let mut d = EventDispatcher::new();
+    d.thin_terminal
+        .set_chart_text_state(&crate::commands::ui::ChartTextStateCommand::new(
+            "BTCUSDT", true, false,
+        ));
+    let raw = crate::commands::ui::build_chart_text_snapshot_for_test(
+        &crate::commands::ui::ChartTextSnapshotCommand {
+            uid: 78,
+            market_name: "ETHUSDT".to_string(),
+            filter_lines: vec!["stale".to_string()],
+            debug_lines: Vec::new(),
+        },
+    );
+
+    let events = d.dispatch(Command::UI, &raw, 1000);
+
+    assert!(events.is_empty());
+    assert!(d.snapshot().thin_terminal().chart_text("ETHUSDT").is_none());
+}
+
 fn balance_payload(cmd_id: u8, uid: u64, epoch: u16, btc_total: f64) -> Vec<u8> {
     let mut out = Vec::with_capacity(49);
     out.push(cmd_id);
@@ -449,6 +546,19 @@ fn seed_event_markets(d: &mut EventDispatcher, names: &[&str]) {
         markets: names.iter().map(|name| event_market(name)).collect(),
         corr_markets: vec![],
     });
+}
+
+fn seed_strategy(d: &mut EventDispatcher, strategy_id: u64) {
+    let strategy = crate::commands::strategy_serializer::StrategySnapshot {
+        strategy_id,
+        strategy_ver: 1,
+        last_date: 0,
+        checked: true,
+        kind: 1,
+        path: "".into(),
+        fields: crate::commands::strategy_serializer::StrategyFields::new(),
+    };
+    d.strats.upsert_from_snapshot(&strategy);
 }
 
 fn api_response_payload_ver(ver: u16, method: EngineMethod, data: &[u8]) -> Vec<u8> {
@@ -1216,6 +1326,95 @@ fn dispatcher_skips_inapplicable_incoming_strat_commands() {
         events.is_empty(),
         "Delphi client has no TStratSellPriceUpdate receive branch"
     );
+}
+
+#[test]
+// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessStratCommand, TDetectSignalCommand
+fn dispatcher_emits_detect_signal_fact() {
+    let mut d = EventDispatcher::new();
+    seed_event_markets(&mut d, &["BTCUSDT"]);
+    seed_strategy(&mut d, 123);
+
+    let raw = build_detect_signal_for_test(&DetectSignalCommand {
+        market_name: "BTCUSDT".to_string(),
+        strategy_id: 123,
+        is_short: true,
+        kind: 0,
+        reserved: 0,
+        msg: "pump".to_string(),
+        pos_val: 0.0,
+        val: 0.0,
+        row_flags: 0,
+        obj_uid: 0,
+    });
+    let events = d.dispatch(Command::Strat, &raw, 1000);
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        Event::DetectSignal(ev) => {
+            assert_eq!(ev.market_name, "BTCUSDT");
+            assert_eq!(ev.strategy_id, 123);
+            assert!(ev.is_short);
+            assert!(ev.is_regular_detect());
+            assert_eq!(ev.msg, "pump");
+        }
+        _ => panic!("wrong event"),
+    }
+}
+
+#[test]
+// parity: TDetectSignalCommand DK_Row/DK_Alert conditional fields.
+fn dispatcher_emits_detect_row_and_alert_fact() {
+    let mut d = EventDispatcher::new();
+    seed_event_markets(&mut d, &["ETHUSDT"]);
+
+    let raw = build_detect_signal_for_test(&DetectSignalCommand {
+        market_name: "ETHUSDT".to_string(),
+        strategy_id: 0,
+        is_short: false,
+        kind: DETECT_KIND_ROW | DETECT_KIND_ALERT,
+        reserved: 0,
+        msg: "alert".to_string(),
+        pos_val: 10.0,
+        val: 2.5,
+        row_flags: 0b10,
+        obj_uid: 555,
+    });
+    let events = d.dispatch(Command::Strat, &raw, 1000);
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        Event::DetectSignal(ev) => {
+            assert!(ev.has_watcher_row());
+            assert!(ev.is_alert_fire());
+            assert_eq!(ev.alert_obj_uid, Some(555));
+            let row = ev.watcher_row.as_ref().expect("row");
+            assert_eq!(row.pos_val, 10.0);
+            assert_eq!(row.val, 2.5);
+            assert!(!row.is_open());
+            assert!(row.is_taker());
+        }
+        _ => panic!("wrong event"),
+    }
+}
+
+#[test]
+// parity: Delphi drops non-alert detect facts when local strategy is missing.
+fn dispatcher_drops_detect_signal_without_strategy_except_alerts() {
+    let mut d = EventDispatcher::new();
+    seed_event_markets(&mut d, &["BTCUSDT"]);
+
+    let raw = build_detect_signal_for_test(&DetectSignalCommand {
+        market_name: "BTCUSDT".to_string(),
+        strategy_id: 999,
+        is_short: false,
+        kind: 0,
+        reserved: 0,
+        msg: "missing strat".to_string(),
+        pos_val: 0.0,
+        val: 0.0,
+        row_flags: 0,
+        obj_uid: 0,
+    });
+    assert!(d.dispatch(Command::Strat, &raw, 1000).is_empty());
 }
 
 #[test]

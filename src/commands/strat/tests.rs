@@ -74,6 +74,63 @@ fn parse_schema_request() {
 }
 
 #[test]
+fn detect_signal_regular_roundtrip() {
+    let raw = build_detect_signal_for_test(&DetectSignalCommand {
+        market_name: "BTCUSDT".to_string(),
+        strategy_id: 123,
+        is_short: true,
+        kind: 0,
+        reserved: 0,
+        msg: "pump".to_string(),
+        pos_val: 0.0,
+        val: 0.0,
+        row_flags: 0,
+        obj_uid: 0,
+    });
+    match StratCommand::parse(&raw).unwrap() {
+        StratCommand::DetectSignal(cmd) => {
+            assert_eq!(cmd.market_name, "BTCUSDT");
+            assert_eq!(cmd.strategy_id, 123);
+            assert!(cmd.is_short);
+            assert!(cmd.is_regular_detect());
+            assert_eq!(cmd.msg, "pump");
+            assert!(!cmd.has_row());
+            assert!(!cmd.has_alert());
+        }
+        _ => panic!("wrong variant"),
+    }
+}
+
+#[test]
+fn detect_signal_conditional_row_and_alert_fields_roundtrip() {
+    let raw = build_detect_signal_for_test(&DetectSignalCommand {
+        market_name: "ETHUSDT".to_string(),
+        strategy_id: 0,
+        is_short: false,
+        kind: DETECT_KIND_ROW | DETECT_KIND_ALERT,
+        reserved: 0,
+        msg: "alert".to_string(),
+        pos_val: 12.5,
+        val: 3.25,
+        row_flags: 0b11,
+        obj_uid: 777,
+    });
+    match StratCommand::parse(&raw).unwrap() {
+        StratCommand::DetectSignal(cmd) => {
+            assert_eq!(cmd.market_name, "ETHUSDT");
+            assert_eq!(cmd.kind, DETECT_KIND_ROW | DETECT_KIND_ALERT);
+            assert_eq!(cmd.msg, "alert");
+            assert_eq!(cmd.pos_val, 12.5);
+            assert_eq!(cmd.val, 3.25);
+            assert!(cmd.row_is_open());
+            assert!(cmd.row_is_taker());
+            assert_eq!(cmd.obj_uid, 777);
+        }
+        _ => panic!("wrong variant"),
+    }
+}
+
+#[test]
 fn parse_sell_price_update() {
     // CmdId=4 + ver=3 + UID=1 + strategy_id=99 + sell_price=123.45
     let mut payload = vec![CMD_SELL_PRICE_UPDATE, 0x03, 0x00];

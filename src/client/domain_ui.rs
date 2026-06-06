@@ -178,4 +178,33 @@ impl Client {
             self.mark_server_update_sent();
         }
     }
+
+    #[doc(hidden)]
+    /// Send `TAlertObjectCommand` (UI CmdId=15, Sliced).
+    pub(crate) fn ui_alert_object(&self, cmd: &crate::commands::ui::AlertObjectCommand) {
+        let raw = crate::commands::ui::build_alert_object(cmd);
+        self.send_domain_cmd(raw, Command::UI, SendPriority::Sliced, true, 6);
+    }
+
+    #[doc(hidden)]
+    /// Send `TAlertSnapshotRequest` (UI CmdId=16, High).
+    pub(crate) fn ui_alert_snapshot_request(&self) {
+        let raw = crate::commands::ui::build_alert_snapshot_request(rand::random());
+        self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3);
+    }
+
+    #[doc(hidden)]
+    /// Send `TChartTextStateCommand` (UI CmdId=17, High,
+    /// `UK_ChartTextState`).
+    pub(crate) fn ui_chart_text_state(&self, cmd: &crate::commands::ui::ChartTextStateCommand) {
+        let raw = crate::commands::ui::build_chart_text_state(cmd);
+        self.send_domain_cmd_keyed(
+            raw,
+            Command::UI,
+            SendPriority::High,
+            true,
+            3,
+            UniqueKey::chart_text_state_slot(),
+        );
+    }
 }

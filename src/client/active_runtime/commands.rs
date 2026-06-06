@@ -74,6 +74,9 @@ pub(super) enum UiRuntimeCommand {
     },
     ResetProfit(u8),
     ArbActivateNotify(f64),
+    AlertObject(crate::commands::ui::AlertObjectCommand),
+    AlertSnapshotRequest,
+    ChartTextState(crate::commands::ui::ChartTextStateCommand),
 }
 
 pub(super) enum StratRuntimeCommand {

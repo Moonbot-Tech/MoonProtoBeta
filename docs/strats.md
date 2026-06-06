@@ -29,6 +29,11 @@ strategy field metadata from the server instead of carrying a hardcoded copy of
 Delphi `TStrategy` UI metadata. If the schema response is missing, malformed,
 or cannot be decompressed, Init fails and the domain gate does not open.
 
+In active-client terminal mode, strategy checked state is still synchronized
+with the core, but detect calculation runs on the core. Rust receives ready
+detect facts through `Event::DetectSignal`; it does not run local strategy
+detect loops or rebuild watcher/chart-alert text from strategy fields.
+
 Low-level parser edge cases are intentionally kept out of the application model.
 Normal terminal code observes decoded `StratsState`, `StrategySnapshot`, and
 `StrategySchema`; malformed or future-version protocol payloads are handled by

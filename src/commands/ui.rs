@@ -17,6 +17,10 @@
 //! - 12 — `TArbActivateNotify`      (TDateTime ArbValid)
 //! - 13 — `TSwitchDexCommand`       (ShortString\[15\] DexName, UK_DexSwitch, High)
 //! - 14 — `TSwitchSpotCommand`      (byte SpotIndex, UK_SpotSwitch, High)
+//! - 15 — `TAlertObjectCommand`     (Sliced, authoritative chart alert object)
+//! - 16 — `TAlertSnapshotRequest`   (empty)
+//! - 17 — `TChartTextStateCommand`  (High, UK_ChartTextState)
+//! - 18 — `TChartTextSnapshotCommand` (Sliced, UK_ChartTextSnapshot)
 //!
 //! ## ASCfg / ASCfg2 blobs
 //! `TAutoStartConfig` (104 bytes) and `TAutoStartConfig2` (168 bytes) are
@@ -45,9 +49,12 @@ mod builders;
 mod parser;
 
 #[cfg(test)]
+pub use builders::build_chart_text_snapshot_for_test;
+#[cfg(test)]
 pub(crate) use builders::build_new_market_notify;
 pub(crate) use builders::{
-    build_arb_activate_notify, build_client_settings, build_emu_trades, build_lev_manage,
+    build_alert_object, build_alert_snapshot_request, build_arb_activate_notify,
+    build_chart_text_state, build_client_settings, build_emu_trades, build_lev_manage,
     build_mm_orders_subscribe, build_reset_profit, build_settings_request, build_strat_start_stop,
     build_strat_start_stop_v2, build_switch_dex, build_switch_spot, build_trigger_manage,
     build_update_version,
@@ -68,6 +75,10 @@ const CMD_RESET_PROFIT: u8 = 11;
 const CMD_ARB_ACTIVATE_NOTIFY: u8 = 12;
 const CMD_SWITCH_DEX: u8 = 13;
 const CMD_SWITCH_SPOT: u8 = 14;
+const CMD_ALERT_OBJECT: u8 = 15;
+const CMD_ALERT_SNAPSHOT_REQUEST: u8 = 16;
+const CMD_CHART_TEXT_STATE: u8 = 17;
+const CMD_CHART_TEXT_SNAPSHOT: u8 = 18;
 
 const LEV_CMD_VER: u8 = 1;
 
@@ -1248,6 +1259,87 @@ pub struct SwitchSpot {
     pub spot_index: SpotMarketKind,
 }
 
+/// `TAlertObjectCommand` (UI CmdId=15).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlertObjectCommand {
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
+    pub uid: u64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) uid: u64,
+    pub market_name: String,
+    pub obj_uid: u64,
+    pub upsert: bool,
+    /// `TChartObject.Save` blob. Empty for delete.
+    pub blob: Vec<u8>,
+    pub(crate) skipped: bool,
+}
+
+impl AlertObjectCommand {
+    pub fn new_upsert(market_name: impl Into<String>, obj_uid: u64, blob: Vec<u8>) -> Self {
+        Self {
+            uid: rand::random(),
+            market_name: market_name.into(),
+            obj_uid,
+            upsert: true,
+            blob,
+            skipped: false,
+        }
+    }
+
+    pub fn new_delete(market_name: impl Into<String>, obj_uid: u64) -> Self {
+        Self {
+            uid: rand::random(),
+            market_name: market_name.into(),
+            obj_uid,
+            upsert: false,
+            blob: Vec::new(),
+            skipped: false,
+        }
+    }
+
+    pub(crate) fn skipped(&self) -> bool {
+        self.skipped
+    }
+}
+
+/// `TChartTextStateCommand` (UI CmdId=17).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChartTextStateCommand {
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
+    pub uid: u64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) uid: u64,
+    pub market_name: String,
+    pub need_filters: bool,
+    pub need_debug_lines: bool,
+}
+
+impl ChartTextStateCommand {
+    pub fn new(market_name: impl Into<String>, need_filters: bool, need_debug_lines: bool) -> Self {
+        Self {
+            uid: rand::random(),
+            market_name: market_name.into(),
+            need_filters,
+            need_debug_lines,
+        }
+    }
+}
+
+/// `TChartTextSnapshotCommand` (UI CmdId=18).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChartTextSnapshotCommand {
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
+    pub uid: u64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) uid: u64,
+    pub market_name: String,
+    pub filter_lines: Vec<String>,
+    pub debug_lines: Vec<String>,
+}
+
 // =============================================================================
 //  UICommand enum
 // =============================================================================
@@ -1272,6 +1364,12 @@ pub enum UICommand {
     ArbActivateNotify(ArbActivateNotify),
     SwitchDex(SwitchDex),
     SwitchSpot(SwitchSpot),
+    AlertObject(AlertObjectCommand),
+    AlertSnapshotRequest {
+        uid: u64,
+    },
+    ChartTextState(ChartTextStateCommand),
+    ChartTextSnapshot(ChartTextSnapshotCommand),
     /// Command header is well-formed, but the command version is newer than
     /// this library can parse. Delphi registry marks this as `FSkipped`.
     Skipped {

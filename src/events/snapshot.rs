@@ -21,6 +21,7 @@ pub struct MoonStateSnapshot {
     strats: CowState<StratsState>,
     settings: CowState<SettingsState>,
     markets: CowState<MarketsState>,
+    thin_terminal: CowState<ThinTerminalState>,
     market_history: Option<MarketHistoryHandle>,
     local_strategy_epoch: u64,
     server_info: std::sync::Arc<ServerInfo>,
@@ -177,6 +178,13 @@ impl MoonStateSnapshot {
         &self.markets
     }
 
+    /// Thin-terminal UI state owned by the MoonProto core: accepted chart alert
+    /// objects and ready chart-text rows. These are facts/snapshots sent by the
+    /// core, not calculations performed by Rust terminal code.
+    pub fn thin_terminal(&self) -> &ThinTerminalState {
+        &self.thin_terminal
+    }
+
     /// Retained history readers for one market, if trades storage is active.
     pub fn market_history_readers(&self, market_name: &str) -> Option<MarketHistoryReaders> {
         self.market_history.as_ref()?.try_readers(market_name)
@@ -299,6 +307,7 @@ impl EventDispatcher {
             strats: self.strats.clone(),
             settings: self.settings.clone(),
             markets: self.markets.clone(),
+            thin_terminal: self.thin_terminal.clone(),
             market_history: self.market_history.clone(),
             local_strategy_epoch: self.local_strategy_epoch,
             server_info: self.session_server_info.clone(),

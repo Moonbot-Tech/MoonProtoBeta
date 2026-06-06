@@ -368,6 +368,53 @@ This matters for UI code that can emit rapid changes: settings and leverage are
 "latest wins"; MM-orders, DEX, and Spot commands preserve the user's command
 sequence.
 
+## Thin Terminal: Chart Alerts And Chart Text
+
+The active terminal model keeps kernel-owned chart facts separate from settings.
+Use `client.terminal()` for chart-alert/chart-text intents and
+`snapshot().thin_terminal()` for retained state.
+
+Chart-alert objects are authoritative on the core side. The terminal sends an
+armed object snapshot when the user creates/changes an alert, sends delete when
+the object is removed, and asks for a snapshot after reconnect or screen reload:
+
+```rust
+let Some(state) = client.snapshot() else { return Ok(()); };
+let Some(market) = state.markets().get("BTCUSDT") else { return Ok(()); };
+
+client
+    .terminal()
+    .upsert_alert_object_for_market(&market, obj_uid, object_blob)?;
+
+client
+    .terminal()
+    .delete_alert_object_for_market(&market, obj_uid)?;
+
+client.terminal().request_alert_snapshot()?;
+```
+
+Inbound accepted alert objects are exposed as `Event::AlertObject` and retained
+in `snapshot().thin_terminal()`. The blob is the accepted chart-object binary
+snapshot; UI code that owns the chart-object editor can load it into its local
+object model.
+
+Chart text rows are also built by the core. When a chart becomes fullscreen or
+changes market/filter needs, tell the runtime which rows are wanted:
+
+```rust
+client
+    .terminal()
+    .set_chart_text_state_for_market(&market, need_filters, need_debug_lines)?;
+
+client.terminal().clear_chart_text_state()?;
+```
+
+`Event::ChartTextSnapshot` arrives only after the core has built ready strings.
+It is a full replacement for the currently requested market. If the user has
+already switched the fullscreen chart, the late snapshot is ignored. The latest
+accepted value is available from
+`snapshot().thin_terminal().chart_text("BTCUSDT")`.
+
 ## Low-Level Parsing
 
 Inside the owned `MoonClient` runtime, UI payloads are parsed and applied to

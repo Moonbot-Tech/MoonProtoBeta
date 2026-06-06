@@ -19,7 +19,7 @@ use crate::commands::ui::SpotMarketKind;
 use commands::{RuntimeCommand, StratRuntimeCommand, UiRuntimeCommand};
 pub use handles::{
     MoonAccount, MoonBalances, MoonCandles, MoonEmulator, MoonOrders, MoonSettings, MoonStrategies,
-    MoonStreams, MoonTrade, OrderTarget,
+    MoonStreams, MoonTerminal, MoonTrade, OrderTarget,
 };
 use runtime_loop::runtime_loop;
 pub use types::{
@@ -388,6 +388,11 @@ impl MoonClient {
     /// Strategy-state command API.
     pub fn strategies(&self) -> MoonStrategies<'_> {
         MoonStrategies { client: self }
+    }
+
+    /// Thin-terminal UI command API: chart alerts and core-built chart text.
+    pub fn terminal(&self) -> MoonTerminal<'_> {
+        MoonTerminal { client: self }
     }
 
     /// Subscribe to one orderbook by market name.
@@ -775,6 +780,24 @@ impl MoonClient {
         self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::ArbActivateNotify(
             valid_days,
         )))
+    }
+
+    pub(crate) fn sync_alert_object(
+        &self,
+        cmd: crate::commands::ui::AlertObjectCommand,
+    ) -> Result<(), MoonClientError> {
+        self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::AlertObject(cmd)))
+    }
+
+    pub(crate) fn request_alert_snapshot(&self) -> Result<(), MoonClientError> {
+        self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::AlertSnapshotRequest))
+    }
+
+    pub(crate) fn set_chart_text_state(
+        &self,
+        cmd: crate::commands::ui::ChartTextStateCommand,
+    ) -> Result<(), MoonClientError> {
+        self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::ChartTextState(cmd)))
     }
 
     /// Send a strategy sell-price update.
