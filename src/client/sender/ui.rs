@@ -21,28 +21,21 @@ impl ClientSender {
         let mut wire_settings = settings.clone();
         wire_settings.uid = rand::random();
         let raw = crate::commands::ui::build_client_settings(&wire_settings);
-        self.send_domain_cmd_keyed(
-            raw,
-            Command::UI,
-            SendPriority::Sliced,
-            true,
-            6,
-            UniqueKey::base_ui_settings_slot(),
-        );
+        self.send_typed_domain_cmd(raw, Command::UI);
     }
 
     #[doc(hidden)]
     /// Send `TSettingsRequest`.
     pub(crate) fn ui_settings_request(&self) {
         let raw = crate::commands::ui::build_settings_request(rand::random());
-        self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3);
+        self.send_typed_domain_cmd(raw, Command::UI);
     }
 
     #[doc(hidden)]
     /// Send `TStratStartStopCommand`.
     pub(crate) fn ui_strat_start_stop(&self, is_start: bool) {
         let raw = crate::commands::ui::build_strat_start_stop(rand::random(), is_start);
-        self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3);
+        self.send_typed_domain_cmd(raw, Command::UI);
     }
 
     #[doc(hidden)]
@@ -57,7 +50,7 @@ impl ClientSender {
         items: &[crate::commands::strat::StratCheckedItem],
     ) {
         let raw = crate::commands::ui::build_strat_start_stop_v2(rand::random(), is_start, items);
-        self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3);
+        self.send_typed_domain_cmd(raw, Command::UI);
     }
 
     #[doc(hidden)]
@@ -81,14 +74,7 @@ impl ClientSender {
         }
         let uid = rand::random();
         let raw = crate::commands::ui::build_mm_orders_subscribe(uid, subscribe);
-        self.try_send_domain_cmd_keyed(
-            raw,
-            Command::UI,
-            SendPriority::High,
-            true,
-            3,
-            UniqueKey::turn_mm_detection_for(uid),
-        )
+        self.try_send_typed_domain_cmd(raw, Command::UI)
     }
 
     #[doc(hidden)]
@@ -96,7 +82,7 @@ impl ClientSender {
     pub(crate) fn ui_update_version(&self, version_name: &str, is_release: bool) {
         let raw =
             crate::commands::ui::build_update_version(rand::random(), version_name, is_release);
-        if self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3) {
+        if self.send_typed_domain_cmd(raw, Command::UI) {
             self.mark_server_update_sent();
         }
     }
@@ -110,7 +96,7 @@ impl ClientSender {
         points: &[crate::commands::ui::EmuTradePoint],
     ) {
         let raw = crate::commands::ui::build_emu_trades(rand::random(), m_index, base_time, points);
-        self.send_domain_cmd(raw, Command::UI, SendPriority::Sliced, true, 6);
+        self.send_typed_domain_cmd(raw, Command::UI);
     }
 
     #[doc(hidden)]
@@ -118,14 +104,7 @@ impl ClientSender {
     pub(crate) fn ui_lev_manage(&self, cmd: &crate::commands::ui::LevManage) {
         let uid: u64 = rand::random();
         let raw = crate::commands::ui::build_lev_manage(uid, cmd);
-        self.send_domain_cmd_keyed(
-            raw,
-            Command::UI,
-            SendPriority::Sliced,
-            true,
-            6,
-            UniqueKey::lev_manage_settings_slot(),
-        );
+        self.send_typed_domain_cmd(raw, Command::UI);
     }
 
     #[doc(hidden)]
@@ -144,21 +123,21 @@ impl ClientSender {
             markets,
             keys,
         );
-        self.send_domain_cmd(raw, Command::UI, SendPriority::Sliced, true, 6);
+        self.send_typed_domain_cmd(raw, Command::UI);
     }
 
     #[doc(hidden)]
     /// Send `TResetProfitCommand`.
     pub(crate) fn ui_reset_profit(&self, kind: u8) {
         let raw = crate::commands::ui::build_reset_profit(rand::random(), kind);
-        self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3);
+        self.send_typed_domain_cmd(raw, Command::UI);
     }
 
     #[doc(hidden)]
     /// Send `TArbActivateNotify`.
     pub(crate) fn ui_arb_activate_notify(&self, arb_valid: f64) {
         let raw = crate::commands::ui::build_arb_activate_notify(rand::random(), arb_valid);
-        self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3);
+        self.send_typed_domain_cmd(raw, Command::UI);
     }
 
     #[doc(hidden)]
@@ -166,14 +145,7 @@ impl ClientSender {
     pub(crate) fn ui_switch_dex(&self, dex_name: &str) {
         let uid = rand::random();
         let raw = crate::commands::ui::build_switch_dex(uid, dex_name);
-        if self.send_domain_cmd_keyed(
-            raw,
-            Command::UI,
-            SendPriority::High,
-            true,
-            3,
-            UniqueKey::dex_switch_for(uid),
-        ) {
+        if self.send_typed_domain_cmd(raw, Command::UI) {
             self.mark_server_update_sent();
         }
     }
@@ -183,15 +155,15 @@ impl ClientSender {
     pub(crate) fn ui_switch_spot(&self, spot_index: u8) {
         let uid = rand::random();
         let raw = crate::commands::ui::build_switch_spot(uid, spot_index);
-        if self.send_domain_cmd_keyed(
-            raw,
-            Command::UI,
-            SendPriority::High,
-            true,
-            3,
-            UniqueKey::spot_switch_for(uid),
-        ) {
+        if self.send_typed_domain_cmd(raw, Command::UI) {
             self.mark_server_update_sent();
         }
+    }
+
+    #[doc(hidden)]
+    /// Send `TOrdersHistoryRequestCommand`.
+    pub(crate) fn ui_orders_history_request(&self, market_name: &str) {
+        let raw = crate::commands::ui::build_orders_history_request(rand::random(), market_name);
+        self.send_typed_domain_cmd(raw, Command::UI);
     }
 }

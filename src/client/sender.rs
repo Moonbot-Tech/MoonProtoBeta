@@ -192,8 +192,7 @@ impl ClientSender {
     ) -> Result<(), SubscribeError> {
         let method = engine_request_method(&request_payload);
         let request_uid = engine_request_uid(&request_payload);
-        let result =
-            self.try_send_cmd(request_payload, Command::API, SendPriority::Sliced, true, 6);
+        let result = self.try_send_typed_domain_cmd(request_payload, Command::API);
         if result.is_ok() {
             let now_ms = self.start.elapsed().as_millis() as i64;
             match method {
@@ -217,50 +216,57 @@ impl ClientSender {
         result
     }
 
-    fn send_domain_cmd(
-        &self,
-        data: Vec<u8>,
-        cmd: Command,
-        priority: SendPriority,
-        encrypted: bool,
-        max_retries: i32,
-    ) -> bool {
-        if !self.domain_ready_for_typed_send() {
-            return false;
-        }
-        self.send_cmd(data, cmd, priority, encrypted, max_retries);
-        true
+    fn send_typed_domain_cmd(&self, data: Vec<u8>, cmd: Command) -> bool {
+        self.send_typed_domain_cmd_int(data, cmd, None).is_ok()
     }
 
-    fn send_domain_cmd_keyed(
-        &self,
-        data: Vec<u8>,
-        cmd: Command,
-        priority: SendPriority,
-        encrypted: bool,
-        max_retries: i32,
-        u_key: UniqueKey,
-    ) -> bool {
-        if !self.domain_ready_for_typed_send() {
-            return false;
-        }
-        self.send_cmd_keyed(data, cmd, priority, encrypted, max_retries, u_key);
-        true
+    fn send_typed_domain_cmd_keyed(&self, data: Vec<u8>, cmd: Command, u_key: UniqueKey) -> bool {
+        self.send_typed_domain_cmd_int(data, cmd, Some(u_key))
+            .is_ok()
     }
 
-    fn try_send_domain_cmd_keyed(
+    fn try_send_typed_domain_cmd(&self, data: Vec<u8>, cmd: Command) -> Result<(), SubscribeError> {
+        self.send_typed_domain_cmd_int(data, cmd, None)
+    }
+
+    fn try_send_typed_domain_cmd_keyed(
         &self,
         data: Vec<u8>,
         cmd: Command,
-        priority: SendPriority,
-        encrypted: bool,
-        max_retries: i32,
         u_key: UniqueKey,
     ) -> Result<(), SubscribeError> {
-        if !self.domain_ready_for_typed_send() {
-            return Ok(());
+        self.send_typed_domain_cmd_int(data, cmd, Some(u_key))
+    }
+
+    fn send_typed_domain_cmd_int(
+        &self,
+        data: Vec<u8>,
+        cmd: Command,
+        explicit_u_key: Option<UniqueKey>,
+    ) -> Result<(), SubscribeError> {
+        if !self.shared.app_queue_alive.load(Ordering::Relaxed) {
+            return Err(SubscribeError::Disconnected);
         }
-        self.try_send_cmd_keyed(data, cmd, priority, encrypted, max_retries, u_key)
+        if !self.shared.domain_ready.load(Ordering::Relaxed)
+            && !outgoing_allowed_before_domain_ready(cmd.to_byte(), &data)
+        {
+            return Err(SubscribeError::DomainNotReady);
+        }
+        let Some(meta) = typed_send_metadata(cmd, &data, explicit_u_key) else {
+            log::error!(target: "moonproto::client",
+                "ClientSender::send_typed_domain_cmd: no descriptor/UKey for cmd={:?} payload_cmd_id={:?}",
+                cmd,
+                data.first().copied());
+            return Err(SubscribeError::Disconnected);
+        };
+        self.try_send_cmd_keyed(
+            data,
+            cmd,
+            meta.priority,
+            meta.encrypted,
+            meta.max_retries,
+            meta.u_key,
+        )
     }
 
     fn try_enqueue_send_item(&self, item: SendItem) -> Result<(), SubscribeError> {

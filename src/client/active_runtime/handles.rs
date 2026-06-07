@@ -1,7 +1,7 @@
 //! High-level Active Lib intent handles.
 
 use super::{
-    commands::{RuntimeCommand, RuntimeCommandKind, RuntimeTradeCommandKind},
+    commands::{RuntimeCommand, RuntimeCommandKind, RuntimeTradeCommandKind, UiRuntimeCommand},
     CoinCardCandlesTicket, EngineActionTicket, MoonClient, MoonClientError, NewOrderParams,
     NewOrderTicket, OrderSide, SellOrderParams, SplitOrderParams, TradesStreamMode, VStopParams,
 };
@@ -52,6 +52,27 @@ impl MoonOrders {
     pub fn request_snapshot(&self) -> Result<(), MoonClientError> {
         self.tx
             .send(RuntimeCommand::OrderSnapshotRefresh)
+            .map_err(|_| MoonClientError::RuntimeStopped)
+    }
+
+    /// Ask the core to execute its orders-history flow for one retained market.
+    ///
+    /// This mirrors the MoonBot UI action: it is a fire-and-forget request, not
+    /// a paired snapshot response. The core decides where/how the history is
+    /// written or refreshed.
+    pub fn request_history_for_market(
+        &self,
+        market: &crate::state::MarketHandle,
+    ) -> Result<(), MoonClientError> {
+        self.request_history(market.name())
+    }
+
+    /// Ask the core to execute its orders-history flow for one market name.
+    pub fn request_history(&self, market_name: impl Into<String>) -> Result<(), MoonClientError> {
+        self.tx
+            .send(RuntimeCommand::Ui(UiRuntimeCommand::OrdersHistoryRequest(
+                market_name.into(),
+            )))
             .map_err(|_| MoonClientError::RuntimeStopped)
     }
 

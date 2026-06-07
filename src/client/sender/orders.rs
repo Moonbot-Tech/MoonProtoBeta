@@ -4,33 +4,12 @@
 use super::*;
 
 impl ClientSender {
-    fn send_trade(&self, payload: Vec<u8>, max_retries: i32) -> bool {
-        if !self.domain_ready_for_typed_send() {
-            return false;
-        }
-        self.send_cmd(
-            payload,
-            Command::Order,
-            SendPriority::High,
-            true,
-            max_retries,
-        );
-        true
+    fn send_trade(&self, payload: Vec<u8>) -> bool {
+        self.send_typed_domain_cmd(payload, Command::Order)
     }
 
-    fn send_trade_keyed(&self, payload: Vec<u8>, max_retries: i32, u_key: UniqueKey) -> bool {
-        if !self.domain_ready_for_typed_send() {
-            return false;
-        }
-        self.send_cmd_keyed(
-            payload,
-            Command::Order,
-            SendPriority::High,
-            true,
-            max_retries,
-            u_key,
-        );
-        true
+    fn send_trade_keyed(&self, payload: Vec<u8>, u_key: UniqueKey) -> bool {
+        self.send_typed_domain_cmd_keyed(payload, Command::Order, u_key)
     }
 
     pub(super) fn send_order_cancel_request(&self, request: crate::state::orders::OrderCancelSend) {
@@ -46,14 +25,14 @@ impl ClientSender {
                     crate::commands::trade::OrderType::Buy,
                     price,
                 );
-                self.send_trade_keyed(replace, 3, UniqueKey::order_move(ctx.uid));
+                self.send_trade_keyed(replace, UniqueKey::order_move(ctx.uid));
                 let cancel = crate::commands::trade::build_order_cancel(
                     ctx,
                     &market,
                     0,
                     crate::commands::trade::OrderWorkerStatus::None,
                 );
-                self.send_trade_keyed(cancel, 3, UniqueKey::order_move(ctx.uid));
+                self.send_trade_keyed(cancel, UniqueKey::order_move(ctx.uid));
             }
             crate::state::orders::OrderCancelSend::Cancel {
                 ctx,
@@ -61,7 +40,7 @@ impl ClientSender {
                 status,
             } => {
                 let raw = crate::commands::trade::build_order_cancel(ctx, &market, 0, status);
-                self.send_trade_keyed(raw, 3, UniqueKey::order_move(ctx.uid));
+                self.send_trade_keyed(raw, UniqueKey::order_move(ctx.uid));
             }
         }
     }
@@ -72,13 +51,13 @@ impl ClientSender {
             &request.market,
             request.turn_on,
         );
-        self.send_trade_keyed(raw, 3, UniqueKey::order_move(request.ctx.uid));
+        self.send_trade_keyed(raw, UniqueKey::order_move(request.ctx.uid));
     }
 
     /// Send `TNewOrderCommand` from a thread-safe sender.
     ///
-    /// This mirrors [`Client::new_order`]: `MPC_Order`, high priority,
-    /// encrypted, `MaxRetries=3`.
+    /// This mirrors [`Client::new_order`]; send metadata is derived from the
+    /// command descriptor for `TNewOrderCommand`.
     #[doc(hidden)]
     pub(crate) fn new_order(
         &self,
@@ -92,7 +71,7 @@ impl ClientSender {
         let raw = crate::commands::trade::build_new_order(
             ctx, market, is_short, price, strat_id, order_size,
         );
-        self.send_trade(raw, 3)
+        self.send_trade(raw)
     }
 
     #[inline]
@@ -116,7 +95,7 @@ impl ClientSender {
             return false;
         };
         let raw = crate::commands::trade::build_order_replace(ctx, &market, order_type, price);
-        self.send_trade_keyed(raw, 3, UniqueKey::order_move(ctx.uid));
+        self.send_trade_keyed(raw, UniqueKey::order_move(ctx.uid));
         true
     }
 
@@ -137,7 +116,7 @@ impl ClientSender {
     #[doc(hidden)]
     pub(crate) fn request_all_statuses(&self, uid: u64) -> bool {
         let raw = crate::commands::trade::build_all_statuses_request(uid);
-        self.send_trade(raw, 3)
+        self.send_trade(raw)
     }
 
     /// Apply Delphi cancel request locally and send `TOrderCancelCommand`.
@@ -166,7 +145,7 @@ impl ClientSender {
         is_short: bool,
     ) -> bool {
         let raw = crate::commands::trade::build_join_orders(ctx, market, is_short);
-        self.send_trade(raw, 3)
+        self.send_trade(raw)
     }
 
     /// Send `TSplitOrderCommand`.
@@ -186,7 +165,7 @@ impl ClientSender {
             split_small,
             split_small_sell,
         );
-        self.send_trade(raw, 3)
+        self.send_trade(raw)
     }
 
     /// Split an order already tracked by `EventDispatcher::orders()`.
@@ -222,7 +201,7 @@ impl ClientSender {
             return false;
         }
         let raw = crate::commands::trade::build_move_all_sells(ctx, market, params);
-        self.send_trade(raw, 3);
+        self.send_trade(raw);
         true
     }
 
@@ -235,7 +214,7 @@ impl ClientSender {
         market_sell: bool,
     ) -> bool {
         let raw = crate::commands::trade::build_do_close_position(ctx, market, market_sell);
-        self.send_trade(raw, 1)
+        self.send_trade(raw)
     }
 
     /// Send `TDoLimitClosePositionCommand` (`MaxRetries=1`).
@@ -247,7 +226,7 @@ impl ClientSender {
         is_short: bool,
     ) -> bool {
         let raw = crate::commands::trade::build_do_limit_close_position(ctx, market, is_short);
-        self.send_trade(raw, 1)
+        self.send_trade(raw)
     }
 
     /// Send `TDoSplitPositionCommand` (`MaxRetries=1`).
@@ -259,7 +238,7 @@ impl ClientSender {
         is_short: bool,
     ) -> bool {
         let raw = crate::commands::trade::build_do_split_position(ctx, market, is_short);
-        self.send_trade(raw, 1)
+        self.send_trade(raw)
     }
 
     /// Send `TDoSellOrderCommand` (`MaxRetries=1`).
@@ -272,7 +251,7 @@ impl ClientSender {
         size: f64,
     ) -> bool {
         let raw = crate::commands::trade::build_do_sell_order(ctx, market, price, size);
-        self.send_trade(raw, 1)
+        self.send_trade(raw)
     }
 
     /// Send `TOrderStatusRequest`.
@@ -283,7 +262,7 @@ impl ClientSender {
         market: &str,
     ) -> bool {
         let raw = crate::commands::trade::build_order_status_request(ctx, market);
-        self.send_trade(raw, 3)
+        self.send_trade(raw)
     }
 
     /// Request a fresh status for an order already tracked by
@@ -307,7 +286,7 @@ impl ClientSender {
             return false;
         };
         let raw = crate::commands::trade::build_order_stops_update(ctx, &market, 0, status, &stops);
-        self.send_trade_keyed(raw, 3, UniqueKey::order_move(ctx.uid));
+        self.send_trade_keyed(raw, UniqueKey::order_move(ctx.uid));
         true
     }
 
@@ -402,7 +381,7 @@ impl ClientSender {
         let items_uid_sum: u64 = applied
             .iter()
             .fold(0u64, |acc, it| acc.wrapping_add(it.uid));
-        self.send_trade_keyed(raw, 3, UniqueKey::immune_clicks(items_uid_sum));
+        self.send_trade_keyed(raw, UniqueKey::immune_clicks(items_uid_sum));
         true
     }
 
@@ -426,7 +405,7 @@ impl ClientSender {
             return false;
         }
         let raw = crate::commands::trade::build_move_all_buys(ctx, market, params);
-        self.send_trade(raw, 3);
+        self.send_trade(raw);
         true
     }
 
@@ -449,7 +428,7 @@ impl ClientSender {
             return false;
         };
         let raw = crate::commands::trade::build_vstop_update(ctx, &market, 0, params);
-        self.send_trade_keyed(raw, 3, UniqueKey::order_move(ctx.uid));
+        self.send_trade_keyed(raw, UniqueKey::order_move(ctx.uid));
         true
     }
 
@@ -475,13 +454,13 @@ impl ClientSender {
         is_short: bool,
     ) -> bool {
         let raw = crate::commands::trade::build_do_market_split_position(ctx, market, is_short);
-        self.send_trade(raw, 1)
+        self.send_trade(raw)
     }
 
     /// Send `TPenaltyCommand`.
     #[doc(hidden)]
     pub(crate) fn penalty(&self, ctx: crate::commands::trade::TradeCtx, market: &str) -> bool {
         let raw = crate::commands::trade::build_penalty(ctx, market);
-        self.send_trade(raw, 3)
+        self.send_trade(raw)
     }
 }

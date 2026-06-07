@@ -79,10 +79,10 @@ use moonproto::Command;
 use moonproto::{
     parse_key_info, ClientConfig, ClientSettingsCommand, ConnectConfig, DeepHistoryKind,
     EngineMethod, EngineResponse, ExchangeKind, ExchangeOrder, FieldValue, ImportedKeys,
-    InitConfig, InitialStrategies, LifecycleEvent, MoonClient, MoonStateSnapshot, MoonTime,
-    OrderWorkerStatus, ProtocolMetricsSnapshot, StrategyDynamicPicklist, StrategyFieldLayout,
-    StrategyFieldUiKind, StrategyFields, StrategyKind, StrategySchema, StrategySnapshot,
-    TradesStreamMode, TransportMode,
+    InitConfig, InitialStrategies, LifecycleEvent, MoonClient, MoonShotStrategy, MoonStateSnapshot,
+    MoonTime, OrderWorkerStatus, ProtocolMetricsSnapshot, StrategyDynamicPicklist,
+    StrategyFieldLayout, StrategyFieldUiKind, StrategyFields, StrategyKind, StrategySchema,
+    StrategySnapshot, TradesStreamMode, TransportMode,
 };
 
 const DEFAULT_FIRETEST_ERR_EMU_PERCENT: u8 = 10;
@@ -102,6 +102,14 @@ const FIRETEST_ORDER_SIZE_USD: f64 = 1000.0;
 const FIRETEST_REAL_BALANCE_ORDER_MARKET: &str = "SOLUSDT";
 const FIRETEST_REAL_BALANCE_ORDER_DISCOUNT: f64 = 0.05;
 const FIRETEST_REAL_BALANCE_ORDER_TIMEOUT: Duration = Duration::from_secs(5);
+const FIRETEST_MOONSHOT_STRATEGY_ID: u64 = 0xF17E_5737_0000_0002;
+const FIRETEST_MOONSHOT_NAME: &str = "MoonProto FireTest Shot";
+const FIRETEST_MOONSHOT_FOLDER: &str = "FireTest";
+const FIRETEST_MOONSHOT_COIN: &str = "ETH";
+const FIRETEST_MOONSHOT_MARKET: &str = "ETHUSDT";
+const FIRETEST_MOONSHOT_ORDER_SIZE_USD: f64 = 250.0;
+const FIRETEST_MOONSHOT_ORDER_SIZE_MIN_USD: f64 = 240.0;
+const FIRETEST_MOONSHOT_ORDER_SIZE_MAX_USD: f64 = 260.0;
 const EPS: f64 = 1e-9;
 const QUICK_CONNECT_TIMEOUT_SECS: u64 = 18;
 const QUICK_STREAM_TIMEOUT_SECS: u64 = 8;
@@ -3406,6 +3414,189 @@ fn firetest_strategy(cfg: &FireConfig) -> StrategySnapshot {
     )
 }
 
+fn is_firetest_moonshot_strategy(strategy: &StrategySnapshot) -> bool {
+    strategy.strategy_id == FIRETEST_MOONSHOT_STRATEGY_ID
+        || strategy
+            .strategy_name()
+            .map(|name| name == FIRETEST_MOONSHOT_NAME)
+            .unwrap_or(false)
+}
+
+fn firetest_moonshot_strategy_ids(snapshot: &MoonStateSnapshot) -> Vec<u64> {
+    let mut ids = snapshot
+        .strategy_snapshots()
+        .filter(|strategy| is_firetest_moonshot_strategy(strategy))
+        .map(|strategy| strategy.strategy_id)
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+fn firetest_moonshot_snapshot(session: &Session) -> Option<StrategySnapshot> {
+    session.maybe_state_snapshot().and_then(|snapshot| {
+        snapshot
+            .strategy_snapshots()
+            .find(|strategy| is_firetest_moonshot_strategy(strategy))
+            .cloned()
+    })
+}
+
+fn firetest_strategy_schema(session: &Session) -> StrategySchema {
+    session
+        .state_snapshot()
+        .strats()
+        .strategy_schema()
+        .expect("FireTest MoonShot gate requires live TStratSchema")
+        .clone()
+}
+
+fn sync_firetest_moonshot_snapshot(a: &mut Session, strategy: StrategySnapshot) {
+    let mut strategies = a.state_snapshot().strategy_snapshot_vec();
+    strategies.retain(|existing| !is_firetest_moonshot_strategy(existing));
+    strategies.push(strategy);
+    a.sync_local_strategies(&strategies);
+}
+
+fn delete_firetest_moonshot_if_present(cfg: &FireConfig, a: &mut Session, b: &mut Session) {
+    let mut ids = firetest_moonshot_strategy_ids(&a.state_snapshot());
+    ids.extend(firetest_moonshot_strategy_ids(&b.state_snapshot()));
+    ids.sort_unstable();
+    ids.dedup();
+    if ids.is_empty() {
+        return;
+    }
+    println!("FIRETEST MoonShot strategy: deleting old test strategies ids={ids:?}");
+    for id in &ids {
+        a.client
+            .strategies()
+            .delete(*id, "")
+            .expect("MoonClient strategy delete must queue");
+    }
+    assert!(
+        pump_pair_until_sessions(
+            a,
+            b,
+            cfg.connect_timeout,
+            "old MoonShot FireTest strategy delete echo",
+            |a, b| firetest_moonshot_strategy_ids(&a.state_snapshot()).is_empty()
+                && firetest_moonshot_strategy_ids(&b.state_snapshot()).is_empty()
+        ),
+        "old MoonShot FireTest strategy was not deleted from both clients within {:?}",
+        cfg.connect_timeout
+    );
+}
+
+fn build_firetest_moonshot(
+    schema: &StrategySchema,
+    base: Option<&StrategySnapshot>,
+    checked: bool,
+    ignore_filters: bool,
+    white_list: &str,
+    black_list: &str,
+) -> StrategySnapshot {
+    let mut strategy = match base {
+        Some(base) => MoonShotStrategy::from_snapshot(schema, base)
+            .expect("existing FireTest MoonShot snapshot must parse through typed editor"),
+        None => MoonShotStrategy::new(FIRETEST_MOONSHOT_STRATEGY_ID),
+    };
+    strategy.name = FIRETEST_MOONSHOT_NAME.to_string();
+    strategy.path = FIRETEST_MOONSHOT_FOLDER.to_string();
+    strategy.checked = checked;
+    strategy.auto_buy = true;
+    strategy.emulator_mode = true;
+    strategy.ignore_filters = ignore_filters;
+    strategy.mshot_price_min = 3.0;
+    strategy.mshot_price = 5.0;
+    strategy.order_size = FIRETEST_MOONSHOT_ORDER_SIZE_USD;
+    strategy.coins_white_list = white_list.to_string();
+    strategy.coins_black_list = black_list.to_string();
+    strategy
+        .into_snapshot(schema)
+        .expect("FireTest MoonShot typed strategy must match live schema")
+}
+
+fn chart_filter_lines(session: &Session, market: &str) -> Option<Vec<String>> {
+    session
+        .maybe_state_snapshot()
+        .and_then(|snapshot| snapshot.chart_text().get(market).cloned())
+        .map(|snapshot| snapshot.filter_lines)
+}
+
+fn line_mentions_blacklist(line: &str) -> bool {
+    let line = line.to_ascii_lowercase();
+    line.contains("blacklist") || (line.contains("black") && line.contains("list"))
+}
+
+fn line_mentions_firetest_moonshot(line: &str) -> bool {
+    line.contains(FIRETEST_MOONSHOT_NAME)
+}
+
+fn firetest_moonshot_has_state(
+    strategy: &StrategySnapshot,
+    checked: bool,
+    ignore_filters: bool,
+    white_list: &str,
+    black_list: &str,
+) -> bool {
+    strategy.checked == checked
+        && strategy.strategy_name() == Some(FIRETEST_MOONSHOT_NAME)
+        && strategy.fields.get_bool("IgnoreFilters").unwrap_or(false) == ignore_filters
+        && strategy.fields.get_string("CoinsWhiteList").unwrap_or("") == white_list
+        && strategy.fields.get_string("CoinsBlackList").unwrap_or("") == black_list
+}
+
+fn moonshot_order_size_candidates(order: &Order) -> Vec<(&'static str, f64)> {
+    let mut out = Vec::with_capacity(10);
+    out.push(("buy.total_btc", order.buy_order.total_btc.abs()));
+    out.push(("buy.spent_btc", order.buy_order.spent_btc.abs()));
+    out.push(("buy.quantity_base", order.buy_order.quantity_base.abs()));
+    out.push(("buy.quantity", order.buy_order.quantity.abs()));
+    if order.buy_order.actual_q.abs() > EPS && order.buy_order.actual_price.abs() > EPS {
+        out.push((
+            "buy.actual_q*actual_price",
+            (order.buy_order.actual_q * order.buy_order.actual_price).abs(),
+        ));
+    }
+    if order.buy_order.actual_q.abs() > EPS && order.buy_order.mean_price.abs() > EPS {
+        out.push((
+            "buy.actual_q*mean_price",
+            (order.buy_order.actual_q * order.buy_order.mean_price).abs(),
+        ));
+    }
+    if order.buy_order.quantity.abs() > EPS && order.buy_price.abs() > EPS {
+        out.push((
+            "buy.quantity*order.buy_price",
+            (order.buy_order.quantity * order.buy_price).abs(),
+        ));
+    }
+    out
+}
+
+fn moonshot_order_size_match(order: &Order) -> Option<(&'static str, f64)> {
+    moonshot_order_size_candidates(order)
+        .into_iter()
+        .find(|(_, value)| {
+            value.is_finite()
+                && *value >= FIRETEST_MOONSHOT_ORDER_SIZE_MIN_USD
+                && *value <= FIRETEST_MOONSHOT_ORDER_SIZE_MAX_USD
+        })
+}
+
+fn find_firetest_moonshot_order(
+    snapshot: &MoonStateSnapshot,
+) -> Option<(&Order, &'static str, f64)> {
+    snapshot.orders().iter().find_map(|order| {
+        if order.market_name != FIRETEST_MOONSHOT_MARKET
+            || order.strat_id != FIRETEST_MOONSHOT_STRATEGY_ID
+            || !order.emulator_mode
+        {
+            return None;
+        }
+        moonshot_order_size_match(order).map(|(field, size)| (order, field, size))
+    })
+}
+
 fn assert_strategy_field_visible_for_firetest(
     session: &Session,
     cfg: &FireConfig,
@@ -4780,6 +4971,224 @@ fn run_real_order_cancel_gate_body(a: &mut Session, b: &mut Session) {
     println!("OK: real non-emulator SOL order was created, canceled, and removed; balance stream was observed independently");
 }
 
+fn run_moonshot_strategy_gate(cfg: &FireConfig, a: &mut Session, b: &mut Session) {
+    let restore_emu_mode = ensure_server_emulator_mode(cfg, a, b);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_moonshot_strategy_gate_body(cfg, a, b);
+    }));
+    let _ = a.client.chart_text().clear_visible_market();
+    disable_firetest_moonshot_strategy(cfg, a, b);
+    restore_server_emulator_mode(cfg, a, b, restore_emu_mode);
+    if let Err(payload) = result {
+        std::panic::resume_unwind(payload);
+    }
+}
+
+fn run_moonshot_strategy_gate_body(cfg: &FireConfig, a: &mut Session, b: &mut Session) {
+    delete_firetest_moonshot_if_present(cfg, a, b);
+
+    let schema = firetest_strategy_schema(a);
+    let draft = build_firetest_moonshot(&schema, None, false, true, FIRETEST_MOONSHOT_COIN, "");
+    sync_firetest_moonshot_snapshot(a, draft.clone());
+    assert!(
+        pump_pair_until_sessions(
+            a,
+            b,
+            cfg.connect_timeout,
+            "MoonShot FireTest strategy create echo",
+            |a, b| firetest_moonshot_snapshot(a)
+                .as_ref()
+                .map(|strategy| {
+                    strategy.strategy_id == FIRETEST_MOONSHOT_STRATEGY_ID
+                        && strategy.strategy_name() == Some(FIRETEST_MOONSHOT_NAME)
+                        && !strategy.checked
+                })
+                .unwrap_or(false)
+                && firetest_moonshot_snapshot(b)
+                    .as_ref()
+                    .map(|strategy| {
+                        strategy.strategy_id == FIRETEST_MOONSHOT_STRATEGY_ID
+                            && strategy.strategy_name() == Some(FIRETEST_MOONSHOT_NAME)
+                    })
+                    .unwrap_or(false)
+        ),
+        "MoonShot FireTest strategy was not created on both clients within {:?}",
+        cfg.connect_timeout
+    );
+
+    a.client
+        .chart_text()
+        .set_visible_market(FIRETEST_MOONSHOT_MARKET, true, false)
+        .expect("MoonClient chart text subscription must queue");
+    let blocked_base = firetest_moonshot_snapshot(a).unwrap_or(draft);
+    let blocked = build_firetest_moonshot(
+        &schema,
+        Some(&blocked_base),
+        true,
+        false,
+        "",
+        FIRETEST_MOONSHOT_COIN,
+    );
+    sync_firetest_moonshot_snapshot(a, blocked.clone());
+    assert!(
+        pump_pair_until_sessions(
+            a,
+            b,
+            cfg.connect_timeout,
+            "MoonShot BlackList snapshot echo",
+            |_, b| firetest_moonshot_snapshot(b)
+                .as_ref()
+                .map(|strategy| {
+                    firetest_moonshot_has_state(strategy, true, false, "", FIRETEST_MOONSHOT_COIN)
+                })
+                .unwrap_or(false)
+        ),
+        "MoonShot BlackList snapshot was not echoed by server within {:?}; B={:?}",
+        cfg.connect_timeout,
+        firetest_moonshot_snapshot(b)
+    );
+    a.client
+        .strategies()
+        .start()
+        .expect("MoonClient strategy start must queue");
+    assert!(
+        pump_pair_until_sessions(
+            a,
+            b,
+            cfg.connect_timeout,
+            "MoonShot BlackList filter line",
+            |a, _| chart_filter_lines(a, FIRETEST_MOONSHOT_MARKET)
+                .map(|lines| {
+                    lines.iter().any(|line| {
+                        line_mentions_firetest_moonshot(line) && line_mentions_blacklist(line)
+                    })
+                })
+                .unwrap_or(false)
+        ),
+        "MoonShot BlackList filter line did not arrive for {} within {:?}; last_lines={:?}",
+        FIRETEST_MOONSHOT_MARKET,
+        cfg.connect_timeout,
+        chart_filter_lines(a, FIRETEST_MOONSHOT_MARKET)
+    );
+
+    let unblocked_base = firetest_moonshot_snapshot(a).unwrap_or(blocked);
+    let unblocked = build_firetest_moonshot(
+        &schema,
+        Some(&unblocked_base),
+        true,
+        true,
+        FIRETEST_MOONSHOT_COIN,
+        "",
+    );
+    sync_firetest_moonshot_snapshot(a, unblocked);
+    assert!(
+        pump_pair_until_sessions(
+            a,
+            b,
+            cfg.connect_timeout,
+            "MoonShot unblocked snapshot echo",
+            |_, b| firetest_moonshot_snapshot(b)
+                .as_ref()
+                .map(|strategy| {
+                    firetest_moonshot_has_state(strategy, true, true, FIRETEST_MOONSHOT_COIN, "")
+                })
+                .unwrap_or(false)
+        ),
+        "MoonShot unblocked snapshot was not echoed by server within {:?}; B={:?}",
+        cfg.connect_timeout,
+        firetest_moonshot_snapshot(b)
+    );
+    a.client
+        .strategies()
+        .start()
+        .expect("MoonClient strategy restart must queue");
+
+    assert!(
+        pump_pair_until_sessions(
+            a,
+            b,
+            cfg.connect_timeout,
+            "MoonShot filter lines cleared",
+            |a, _| chart_filter_lines(a, FIRETEST_MOONSHOT_MARKET)
+                .map(|lines| !lines
+                    .iter()
+                    .any(|line| line_mentions_firetest_moonshot(line)))
+                .unwrap_or(false)
+        ),
+        "MoonShot filter lines stayed non-empty after BlackList removal; last_lines={:?}",
+        chart_filter_lines(a, FIRETEST_MOONSHOT_MARKET)
+    );
+    let order_seen = pump_pair_until_sessions(
+        a,
+        b,
+        cfg.connect_timeout,
+        "MoonShot ETH emulator order",
+        |a, _| find_firetest_moonshot_order(&a.state_snapshot()).is_some(),
+    );
+    let snapshot = a.state_snapshot();
+    let order_debug = find_firetest_moonshot_order(&snapshot)
+        .map(|(order, size_field, size)| {
+            format!(
+                "{} size_by_{}={:.8}",
+                format_order_for_debug(order),
+                size_field,
+                size
+            )
+        })
+        .unwrap_or_else(|| {
+            let nearby = snapshot
+                .orders()
+                .iter()
+                .filter(|order| order.market_name == FIRETEST_MOONSHOT_MARKET)
+                .map(|order| {
+                    let sizes = moonshot_order_size_candidates(order)
+                        .into_iter()
+                        .map(|(field, value)| format!("{field}={value:.8}"))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    format!("{} sizes=[{}]", format_order_for_debug(order), sizes)
+                })
+                .collect::<Vec<_>>()
+                .join(" | ");
+            format!("<not found>; ETH orders=[{nearby}]")
+        });
+    assert!(
+        order_seen,
+        "MoonShot strategy did not place an emulator ETH order of roughly {} USD within {:?}: {}",
+        FIRETEST_MOONSHOT_ORDER_SIZE_USD, cfg.connect_timeout, order_debug
+    );
+    println!("OK: MoonShot strategy filter cycle and emulator ETH order: {order_debug}");
+}
+
+fn disable_firetest_moonshot_strategy(cfg: &FireConfig, a: &mut Session, b: &mut Session) {
+    let Some(base) = firetest_moonshot_snapshot(a) else {
+        return;
+    };
+    let schema = firetest_strategy_schema(a);
+    let disabled = build_firetest_moonshot(&schema, Some(&base), false, false, "", "");
+    sync_firetest_moonshot_snapshot(a, disabled);
+    let _ = a
+        .client
+        .strategies()
+        .set_checked(FIRETEST_MOONSHOT_STRATEGY_ID, false);
+    let _ = a.client.strategies().send_checked_delta();
+    let _ = a.client.strategies().stop();
+    let _ = pump_pair_until_sessions(
+        a,
+        b,
+        cfg.wait,
+        "MoonShot FireTest strategy disabled",
+        |a, b| {
+            firetest_moonshot_snapshot(a)
+                .map(|strategy| !strategy.checked)
+                .unwrap_or(true)
+                && firetest_moonshot_snapshot(b)
+                    .map(|strategy| !strategy.checked)
+                    .unwrap_or(true)
+        },
+    );
+}
+
 fn price_matches(a: f64, b: f64) -> bool {
     let tolerance = (b.abs() * 1e-9).max(EPS);
     (a - b).abs() <= tolerance
@@ -5217,6 +5626,7 @@ fn fire_test_active_library_health() {
 
     run_order_lifecycle_gate(&cfg, &mut a, &mut b);
     run_real_order_cancel_gate(&cfg, &mut a, &mut b);
+    run_moonshot_strategy_gate(&cfg, &mut a, &mut b);
 
     let a_initial = a.snapshot();
     let original_settings = a_initial

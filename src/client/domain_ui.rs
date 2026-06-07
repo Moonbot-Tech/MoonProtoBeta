@@ -18,21 +18,14 @@ impl Client {
         let mut wire_settings = settings.clone();
         wire_settings.uid = rand::random();
         let raw = crate::commands::ui::build_client_settings(&wire_settings);
-        self.send_domain_cmd_keyed(
-            raw,
-            Command::UI,
-            SendPriority::Sliced,
-            true,
-            6,
-            UniqueKey::base_ui_settings_slot(),
-        );
+        self.send_typed_domain_cmd(raw, Command::UI);
     }
 
     #[doc(hidden)]
     /// Send `TSettingsRequest` (UI CmdId=2, High) to request current settings.
     pub(crate) fn ui_settings_request(&self) {
         let raw = crate::commands::ui::build_settings_request(rand::random());
-        self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3);
+        self.send_typed_domain_cmd(raw, Command::UI);
     }
 
     #[doc(hidden)]
@@ -48,7 +41,7 @@ impl Client {
         items: &[crate::commands::strat::StratCheckedItem],
     ) {
         let raw = crate::commands::ui::build_strat_start_stop_v2(rand::random(), is_start, items);
-        self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3);
+        self.send_typed_domain_cmd(raw, Command::UI);
     }
 
     #[doc(hidden)]
@@ -73,7 +66,7 @@ impl Client {
     pub(crate) fn ui_update_version(&self, version_name: &str, is_release: bool) {
         let raw =
             crate::commands::ui::build_update_version(rand::random(), version_name, is_release);
-        if self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3) {
+        if self.send_typed_domain_cmd(raw, Command::UI) {
             self.mark_server_update_sent();
         }
     }
@@ -88,7 +81,7 @@ impl Client {
         points: &[crate::commands::ui::EmuTradePoint],
     ) {
         let raw = crate::commands::ui::build_emu_trades(rand::random(), m_index, base_time, points);
-        self.send_domain_cmd(raw, Command::UI, SendPriority::Sliced, true, 6);
+        self.send_typed_domain_cmd(raw, Command::UI);
     }
 
     #[doc(hidden)]
@@ -97,14 +90,7 @@ impl Client {
     pub(crate) fn ui_lev_manage(&self, cmd: &crate::commands::ui::LevManage) {
         let uid: u64 = rand::random();
         let raw = crate::commands::ui::build_lev_manage(uid, cmd);
-        self.send_domain_cmd_keyed(
-            raw,
-            Command::UI,
-            SendPriority::Sliced,
-            true,
-            6,
-            UniqueKey::lev_manage_settings_slot(),
-        );
+        self.send_typed_domain_cmd(raw, Command::UI);
     }
 
     #[doc(hidden)]
@@ -124,14 +110,14 @@ impl Client {
             markets,
             keys,
         );
-        self.send_domain_cmd(raw, Command::UI, SendPriority::Sliced, true, 6);
+        self.send_typed_domain_cmd(raw, Command::UI);
     }
 
     #[doc(hidden)]
     /// Send `TResetProfitCommand` (UI CmdId=11, High) to reset profit counters.
     pub(crate) fn ui_reset_profit(&self, kind: u8) {
         let raw = crate::commands::ui::build_reset_profit(rand::random(), kind);
-        self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3);
+        self.send_typed_domain_cmd(raw, Command::UI);
     }
 
     #[doc(hidden)]
@@ -139,7 +125,7 @@ impl Client {
     /// timestamp.
     pub(crate) fn ui_arb_activate_notify(&self, arb_valid: f64) {
         let raw = crate::commands::ui::build_arb_activate_notify(rand::random(), arb_valid);
-        self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3);
+        self.send_typed_domain_cmd(raw, Command::UI);
     }
 
     #[doc(hidden)]
@@ -149,14 +135,7 @@ impl Client {
     pub(crate) fn ui_switch_dex(&self, dex_name: &str) {
         let uid = rand::random();
         let raw = crate::commands::ui::build_switch_dex(uid, dex_name);
-        if self.send_domain_cmd_keyed(
-            raw,
-            Command::UI,
-            SendPriority::High,
-            true,
-            3,
-            UniqueKey::dex_switch_for(uid),
-        ) {
+        if self.send_typed_domain_cmd(raw, Command::UI) {
             self.mark_server_update_sent();
         }
     }
@@ -167,14 +146,7 @@ impl Client {
     pub(crate) fn ui_switch_spot(&self, spot_index: u8) {
         let uid = rand::random();
         let raw = crate::commands::ui::build_switch_spot(uid, spot_index);
-        if self.send_domain_cmd_keyed(
-            raw,
-            Command::UI,
-            SendPriority::High,
-            true,
-            3,
-            UniqueKey::spot_switch_for(uid),
-        ) {
+        if self.send_typed_domain_cmd(raw, Command::UI) {
             self.mark_server_update_sent();
         }
     }
@@ -183,14 +155,14 @@ impl Client {
     /// Send `TAlertObjectCommand` (UI CmdId=15, Sliced).
     pub(crate) fn ui_alert_object(&self, cmd: &crate::commands::ui::AlertObjectCommand) {
         let raw = crate::commands::ui::build_alert_object(cmd);
-        self.send_domain_cmd(raw, Command::UI, SendPriority::Sliced, true, 6);
+        self.send_typed_domain_cmd(raw, Command::UI);
     }
 
     #[doc(hidden)]
     /// Send `TAlertSnapshotRequest` (UI CmdId=16, High).
     pub(crate) fn ui_alert_snapshot_request(&self) {
         let raw = crate::commands::ui::build_alert_snapshot_request(rand::random());
-        self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3);
+        self.send_typed_domain_cmd(raw, Command::UI);
     }
 
     #[doc(hidden)]
@@ -198,13 +170,13 @@ impl Client {
     /// `UK_ChartTextState`).
     pub(crate) fn ui_chart_text_state(&self, cmd: &crate::commands::ui::ChartTextStateCommand) {
         let raw = crate::commands::ui::build_chart_text_state(cmd);
-        self.send_domain_cmd_keyed(
-            raw,
-            Command::UI,
-            SendPriority::High,
-            true,
-            3,
-            UniqueKey::chart_text_state_slot(),
-        );
+        self.send_typed_domain_cmd(raw, Command::UI);
+    }
+
+    #[doc(hidden)]
+    /// Send `TOrdersHistoryRequestCommand` (UI CmdId=19, High).
+    pub(crate) fn ui_orders_history_request(&self, market_name: &str) {
+        let raw = crate::commands::ui::build_orders_history_request(rand::random(), market_name);
+        self.send_typed_domain_cmd(raw, Command::UI);
     }
 }

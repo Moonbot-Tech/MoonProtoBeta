@@ -31,13 +31,7 @@ impl Client {
 
     pub(crate) fn send_api_request_at(&self, request_payload: &[u8], now_ms: i64) {
         self.mark_engine_request_queued_at(request_payload, now_ms);
-        self.send_cmd(
-            request_payload.to_vec(),
-            Command::API,
-            SendPriority::Sliced,
-            true, // Engine API is always encrypted
-            6,    // TEngineRequest effective MaxRetries for MPS_Sliced
-        );
+        self.send_typed_domain_cmd(request_payload.to_vec(), Command::API);
     }
 
     /// Send an Engine API request and register it in `api_pending`.

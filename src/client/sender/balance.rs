@@ -8,6 +8,6 @@ impl ClientSender {
     #[doc(hidden)]
     pub(crate) fn balance_request_refresh(&self) {
         let raw = crate::commands::balance::build_request_balance_refresh(rand::random());
-        self.send_domain_cmd(raw, Command::Balance, SendPriority::High, true, 3);
+        self.send_typed_domain_cmd(raw, Command::Balance);
     }
 }

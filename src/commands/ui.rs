@@ -21,6 +21,7 @@
 //! - 16 — `TAlertSnapshotRequest`   (empty)
 //! - 17 — `TChartTextStateCommand`  (High, UK_ChartTextState)
 //! - 18 — `TChartTextSnapshotCommand` (Sliced, UK_ChartTextSnapshot)
+//! - 19 — `TOrdersHistoryRequestCommand` (market name)
 //!
 //! ## ASCfg / ASCfg2 blobs
 //! `TAutoStartConfig` (104 bytes) and `TAutoStartConfig2` (168 bytes) are
@@ -55,9 +56,9 @@ pub(crate) use builders::build_new_market_notify;
 pub(crate) use builders::{
     build_alert_object, build_alert_snapshot_request, build_arb_activate_notify,
     build_chart_text_state, build_client_settings, build_emu_trades, build_lev_manage,
-    build_mm_orders_subscribe, build_reset_profit, build_settings_request, build_strat_start_stop,
-    build_strat_start_stop_v2, build_switch_dex, build_switch_spot, build_trigger_manage,
-    build_update_version,
+    build_mm_orders_subscribe, build_orders_history_request, build_reset_profit,
+    build_settings_request, build_strat_start_stop, build_strat_start_stop_v2, build_switch_dex,
+    build_switch_spot, build_trigger_manage, build_update_version,
 };
 
 // --- CmdId constants ---
@@ -79,6 +80,7 @@ const CMD_ALERT_OBJECT: u8 = 15;
 const CMD_ALERT_SNAPSHOT_REQUEST: u8 = 16;
 const CMD_CHART_TEXT_STATE: u8 = 17;
 const CMD_CHART_TEXT_SNAPSHOT: u8 = 18;
+const CMD_ORDERS_HISTORY_REQUEST: u8 = 19;
 
 const LEV_CMD_VER: u8 = 1;
 
@@ -1340,6 +1342,22 @@ pub struct ChartTextSnapshotCommand {
     pub debug_lines: Vec<String>,
 }
 
+/// `TOrdersHistoryRequestCommand` (UI CmdId=19).
+///
+/// Client asks the server-side MoonBot terminal to execute its existing orders
+/// history export/update flow for one market. The response is not a paired
+/// MoonProto payload; this is a fire-and-forget UI command like the Delphi
+/// button path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrdersHistoryRequest {
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
+    pub uid: u64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) uid: u64,
+    pub market_name: String,
+}
+
 // =============================================================================
 //  UICommand enum
 // =============================================================================
@@ -1370,6 +1388,7 @@ pub enum UICommand {
     },
     ChartTextState(ChartTextStateCommand),
     ChartTextSnapshot(ChartTextSnapshotCommand),
+    OrdersHistoryRequest(OrdersHistoryRequest),
     /// Command header is well-formed, but the command version is newer than
     /// this library can parse. Delphi registry marks this as `FSkipped`.
     Skipped {

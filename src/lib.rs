@@ -192,7 +192,8 @@ pub use commands::strategy_schema::{
     StrategySchemaField, StrategySchemaKind,
 };
 pub use commands::strategy_serializer::{
-    field_names, FieldValue, StrategyActiveMode, StrategyFields, StrategyKind, StrategySnapshot,
+    field_names, FieldValue, MoonShotStrategy, StrategyActiveMode, StrategyEditError,
+    StrategyEditor, StrategyFields, StrategyKind, StrategySnapshot,
 };
 pub use commands::trade::{
     BulkMoveKind, ExchangeOrder, OrderSubType, OrderType, OrderWorkerStatus, PositionFilter,

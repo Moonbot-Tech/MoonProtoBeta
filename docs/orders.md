@@ -44,6 +44,18 @@ for event in client.drain_events() {
 keeps the hot event path cheap. UI code that already redraws at its own frame
 rate can also ignore individual events and read the latest snapshot each frame.
 
+## Orders History
+
+Use `client.orders().request_history("BTCUSDT")` when the terminal needs the
+core to run its orders-history flow for a market, or
+`request_history_for_market(&market)` when the UI already keeps a
+`MarketHandle`.
+
+This is a fire-and-forget UI intent. It does not return a paired snapshot over
+MoonProto; the core owns the history/export side effect. Regular order tables
+and chart overlays continue to read live retained orders from
+`snapshot().orders()`.
+
 ## Closed Sell Reports
 
 When the core closes a sell order or later updates that report row, it can emit

@@ -176,14 +176,7 @@ impl Client {
     pub(crate) fn send_mm_orders_subscribe_cmd(&self, subscribe: bool) {
         let uid = rand::random();
         let raw = crate::commands::ui::build_mm_orders_subscribe(uid, subscribe);
-        self.send_cmd_keyed(
-            raw,
-            Command::UI,
-            SendPriority::High,
-            true,
-            3,
-            UniqueKey::turn_mm_detection_for(uid),
-        );
+        self.send_typed_domain_cmd(raw, Command::UI);
     }
 
     pub(crate) fn domain_restore_needs_indexes(&self) -> bool {

@@ -20,6 +20,7 @@ impl Client {
     /// block on local queue fullness and never silently drops a trading/API
     /// command because the Rust main loop is busy. If the client is gone, the
     /// command is rejected and the error is logged.
+    #[cfg(any(test, feature = "diagnostics"))]
     pub(crate) fn send_cmd(
         &self,
         data: Vec<u8>,

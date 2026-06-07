@@ -360,6 +360,72 @@ Raw serializer parsers remain available for diagnostics and custom protocol
 tools, but they are hidden from the normal API surface. Applications should use
 decoded `StratsState` from `MoonClient::snapshot()`.
 
+## Editing Strategy Objects
+
+`StrategySnapshot` is the retained/core snapshot shape. It preserves every field
+needed for round-trip synchronization, including fields the current UI may not
+understand yet. Terminal editors should not build the `fields` container by
+hand for common strategy types. Use the live schema and an editor object:
+
+```rust
+use moonproto::MoonShotStrategy;
+
+let Some(state) = client.snapshot() else { return; };
+let schema = state
+    .strats()
+    .strategy_schema()
+    .expect("schema is available after Ready");
+
+let existing = state.strategy_snapshot(strategy_id);
+let mut shot = match existing {
+    Some(snapshot) => MoonShotStrategy::from_snapshot(schema, snapshot)?,
+    None => MoonShotStrategy::new(strategy_id),
+};
+
+shot.name = "MoonProto FireTest Shot".to_string();
+shot.path = "FireTest".to_string();
+shot.checked = true;
+shot.auto_buy = true;
+shot.emulator_mode = true;
+shot.ignore_filters = false;
+shot.mshot_price_min = 3.0;
+shot.mshot_price = 5.0;
+shot.order_size = 250.0;
+shot.coins_white_list = "ETH".to_string();
+shot.coins_black_list.clear();
+
+let edited = shot.into_snapshot(schema)?;
+```
+
+Typed wrappers such as `MoonShotStrategy` keep the public editing surface close
+to what terminal code actually changes, while `into_snapshot` still validates
+field names, visibility, and TypeIDs against the live schema. Unknown/future
+fields from an existing snapshot are preserved.
+
+For generic editors or less common strategy kinds, use `StrategyEditor`:
+
+```rust
+use moonproto::{field_names, StrategyEditor};
+
+let mut editor = StrategyEditor::from_snapshot(schema, snapshot)?;
+editor.set_string(field_names::STRATEGY_NAME, "Local strategy")?;
+editor.set_number("OrderSize", 250.0)?;
+editor.set_checked(true);
+let edited = editor.into_snapshot();
+```
+
+After editing, synchronize the current local strategy list. This is list
+synchronization, not a single-field patch. Start from the list retained in
+Active Lib, replace the edited strategy, then send the whole current list:
+
+```rust
+let mut strategies = state.strategy_snapshot_vec();
+strategies.retain(|s| s.strategy_id != edited.strategy_id);
+strategies.push(edited);
+
+client.strategies().sync_local_strategies(strategies)?;
+```
+
 ## Sending Strategy Commands
 
 Regular applications use `client.strategies()`:

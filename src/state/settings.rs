@@ -138,7 +138,8 @@ impl SettingsState {
             | UICommand::AlertObject(_)
             | UICommand::AlertSnapshotRequest { .. }
             | UICommand::ChartTextState(_)
-            | UICommand::ChartTextSnapshot(_) => None,
+            | UICommand::ChartTextSnapshot(_)
+            | UICommand::OrdersHistoryRequest(_) => None,
 
             UICommand::UpdateVersion(u) => Some(SettingsEvent::VersionUpdate {
                 #[cfg(any(test, feature = "diagnostics"))]
