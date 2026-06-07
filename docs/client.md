@@ -82,7 +82,7 @@ let cfg = ClientConfig::new(host, port, master_key, mac_key)
 
 Struct literals are still supported for full control.
 
-NTP follows Delphi's process-global model: all clients share one corrected time
+NTP follows the MoonBot core's process-global model: all clients share one corrected time
 offset and one background syncer. Use the same `ntp_host` for every client in a
 process; if a different host is requested while the syncer is already running,
 the existing worker is reused.
@@ -142,8 +142,8 @@ Command-line tools, scripts, and tests that do one-shot work after connect can
 use `MoonClient::connect_blocking(cfg, connect, timeout)` instead: it blocks on a
 single channel receive until `Ready` or failure (no busy polling). This is a
 convenience for scripts, not the UI path — long-running applications use
-`connect` and react to `LifecycleEvent::Ready` like the Delphi client gates work
-on its async `InitDone` flag.
+`connect` and react to `LifecycleEvent::Ready`; UI work is gated by the async
+ready state instead of blocking the caller.
 Applications do not choose a finite protocol-loop duration; the session runs
 until explicit `disconnect()` or drop. UI code reads typed events, lifecycle
 events, and immutable snapshots:
@@ -165,8 +165,8 @@ if let Some(snapshot) = client.snapshot() {
 ```
 
 New order and market-level trade actions are user intents too. They are
-marshalled into the runtime owner, which derives the Delphi route bytes from the
-active session:
+marshalled into the runtime owner, which derives the MoonBot route bytes from
+the active session:
 
 ```rust
 use moonproto::{NewOrderParams, OrderSide};
@@ -212,9 +212,9 @@ client.account().set_hedge_mode(true)?;
 client.account().cancel_all_orders()?;
 ```
 
-User/API sends append directly to the client's unbounded Delphi-style
-`DataToSend` / `DataToSendH` / `DataToSendL` queues, separate from accepted UDP
-packets and receive-decoded delivery. Typed domain helpers are gated by Init:
+User/API sends append directly to the client's unbounded priority send queues,
+separate from accepted UDP packets and receive-decoded delivery. Typed domain
+helpers are gated by Init:
 before `domain_ready`, subscriptions update only the reconnect registry and
 order/UI/strategy/balance wrappers queue no server command. After Init, the same
 typed helpers append their Engine API/UI/domain commands to the send queues. The
@@ -232,17 +232,16 @@ This section is available only when the crate is built with
 the production Active Lib surface does not expose packet-loss emulation,
 per-packet CPU counters, or debug blackhole hooks.
 
-`moonproto::client::set_err_emu(percent)` enables Delphi-style client-side
-packet loss emulation for tests. It is process-global, affects every `Client` in
-the process, and drops only incoming packets after MoonProto transport
-verification succeeds. A valid packet selected for emulated drop still updates
-transport side effects first (`total_recv`, online timestamp, receive counters),
-matching Delphi `UDPRead`; it is then withheld from the protocol dispatcher.
+`moonproto::client::set_err_emu(percent)` enables client-side packet loss
+emulation for tests. It is process-global, affects every `Client` in the
+process, and drops only incoming packets after MoonProto transport verification
+succeeds. A valid packet selected for emulated drop still updates transport side
+effects first (`total_recv`, online timestamp, receive counters); it is then
+withheld from the protocol dispatcher.
 Outgoing packets are still sent normally.
 
-Service packets use half of the configured drop rate, matching Delphi
-`MoonProtoErrEmu`: `Ping`, handshake/reconnect commands, MTU probes, and
-`SlicedACK`.
+Service packets use half of the configured drop rate: `Ping`,
+handshake/reconnect commands, MTU probes, and `SlicedACK`.
 
 For reconnect/handshake health gates this matters mathematically. With
 `set_err_emu(50)`, service packets are dropped at 25% and delivered at 75%.
@@ -300,9 +299,9 @@ send/maintenance nanoseconds. The old internal receive-decoded bridge is not
 part of the public metrics API because production decoded delivery is direct.
 
 The snapshot also separates CPU-ish protocol work from wall-clock waits:
-`writer_cpu_*` excludes the fixed Delphi-style 5 ms sleep, `reader_protocol_*`
-is the protocol recv path excluding deliberate Delphi-compatible protocol
-barriers, and `reader_protocol_wait_*` accounts for those barriers separately
+`writer_cpu_*` excludes the fixed 5 ms writer sleep, `reader_protocol_*`
+is the protocol recv path excluding deliberate protocol barriers, and
+`reader_protocol_wait_*` accounts for those barriers separately
 (currently the `WhoAreYou` -> duplicate `ImFriend` 32 ms wait).
 `active_dispatch_*` / `app_enqueue_*` measure typed Active Lib state apply and
 event enqueue before user callbacks. In `MoonClient`, the runtime owner applies
@@ -318,7 +317,7 @@ FireTest treats any `>5ms` sample in CPU-ish sections (`reader_protocol`,
 `writer_cpu`, `active_dispatch`, `app_enqueue`, or send/maintenance phase) as a
 hard health failure. `>1ms` samples stay visible in the summary as watch
 signals, because large initial snapshots and balance/strategy payloads can sit
-near that boundary while still matching the Delphi machine effect.
+near that boundary while still matching the MoonBot core machine effect.
 
 For the current maximum samples, the snapshot carries diagnostic attribution:
 `reader_protocol_max_cmd/payload_len`, `active_dispatch_max_cmd/payload_len`
@@ -339,7 +338,7 @@ let client = MoonClient::connect(cfg, ConnectConfig::new(init))?;
 It starts the runtime immediately and reports completion as
 `LifecycleEvent::Ready`; startup errors arrive as `LifecycleEvent::ConnectFailed`.
 
-The Delphi init contract is mandatory: BaseCheck, AuthCheck, markets list
+The MoonBot init contract is mandatory: BaseCheck, AuthCheck, markets list
 (which also builds the initial server-index map), price refresh, balance
 refresh, order snapshot, client strategy
 snapshot, and settings sync. `InitConfig` only adds local strategies, optional
@@ -354,9 +353,9 @@ Init is a one-time step for a `MoonClient` session. After it succeeds, do not
 start a second init just because the UDP transport reconnected; the library
 maintains the user-requested active-lib state for that session.
 
-Cold init does not send a separate `GetMarketsIndexes`: Delphi
-`GetMarketsList` builds `SrvMarkets` from the server list order and stores the
-current `PeerAppToken`. After reconnect/server-token changes, the library
+Cold init does not send a separate `GetMarketsIndexes`: `GetMarketsList` builds
+the server-index map from the server list order and stores the current
+`PeerAppToken`. After reconnect/server-token changes, the library
 refreshes `GetMarketsIndexes` before any `UpdateMarketsList` price refresh that
 depends on server `mIndex` values. Init also sends `TStratSchemaRequest` after
 AuthCheck. The decoded schema is stored in the active strategy state and
@@ -364,41 +363,41 @@ contains strategy kinds, fields,
 TypeIDs, UI kind, picklists, visibility, and chapter/layout markers. This is
 agreed active-library behavior: clients use the live server schema for strategy
 UI metadata and typed `TStrategySerializer` snapshot writes instead of a
-hardcoded Rust copy of Delphi `TStrategy` fields/defaults. Only this schema
+hardcoded Rust copy of core strategy fields/defaults. Only this schema
 request/response is allowed through the pre-Init Strat gate; regular Strat
 commands remain closed until `domain_ready`.
 Periodic market refresh starts only after init opens the domain gate, so
 BaseCheck/AuthCheck are not delayed by early background refresh traffic.
-Critical BaseCheck/AuthCheck waits use the same default as Delphi
-`TMoonProtoEngine.FTimeout`: 12 seconds per Engine API request. Mandatory init
+Critical BaseCheck/AuthCheck waits use the MoonBot core default timeout:
+12 seconds per Engine API request. Mandatory init
 step timeouts/errors fail init and leave the domain gate closed.
 
-`AuthCheck` follows Delphi's result ordering: a successful server response opens
+`AuthCheck` follows the MoonBot core result ordering: a successful server response opens
 the next init step even if the optional account payload cannot be parsed. When
 the payload is valid, `client.auth_info()` contains
 the parsed account metadata (`account_id`, `btc_address`, sub-account flag,
 transfer payload limit, and Hyperliquid DEX tail). When a successful AuthCheck
 payload is malformed, `auth_check_ok` remains true, `auth_info` stays `None`,
-and an internal non-fatal parse note is recorded, matching Delphi's
-`AuthCheck parse` log path.
+and an internal non-fatal parse note is recorded.
 
-If the first BaseCheck/AuthCheck block fails, init follows Delphi `InitInt`:
+If the first BaseCheck/AuthCheck block fails, init follows the MoonBot core
+startup retry path:
 wait 200 ms, send one more BaseCheck, then send AuthCheck again. The retry
 branch's final gate is the second AuthCheck result; the second BaseCheck still
 updates `client.server_info()` if it succeeds.
 
-`BaseCheck` retry follows Delphi exactly. A normal init sends one BaseCheck
+`BaseCheck` retry follows the MoonBot core behavior. A normal init sends one BaseCheck
 request. If a version/switch action marked `ServerUpdateSent` before init, the
 init spine consumes that marker, waits up to `34 * 300ms` for
 `AuthDone`, sends BaseCheck once, and if it still fails retries it 10 times with
-`2000ms` pauses. The high-level UI wrappers that match Delphi
-`ServerUpdateSent` behavior call the marker automatically:
+`2000ms` pauses. The high-level UI wrappers that trigger server-update behavior
+set this marker automatically:
 `settings().request_release_update`, `settings().request_version_update`,
 `settings().switch_dex`, and
 `settings().switch_spot`.
 
 Domain pushes received before init completion are ignored in every client run
-mode, including internal low-level test pumps. This matches the Delphi
+mode, including internal low-level test pumps. This matches the MoonBot core
 `InitDone` gate for `Order`, `Strat`, `Balance`, `TradesStream`,
 `TradesResendResponse`, `OrderBook`, and `UI` pushes. Engine API responses and
 transport service packets are not part of this domain gate, because Init itself
@@ -428,7 +427,7 @@ cache before Init. The mandatory init primitives (`BaseCheck`, `AuthCheck`,
 `GetMarketsList`, `UpdateMarketsList`, and the strategy schema request) are
 owned by the runtime, not by application code.
 Balance bootstrap uses the post-init `TRequestBalanceRefresh`, matching the
-MoonProto Delphi client where `GetMarketsBalanceFull` returns success without a
+MoonBot core behavior where `GetMarketsBalanceFull` returns success without a
 serialized balance snapshot.
 
 ## Trade Context
@@ -477,10 +476,10 @@ client.settings().refresh()?; // async; read Event::Settings + snapshot().settin
 client.account().set_hedge_mode(true)?;
 ```
 
-`candles().request_coin_card_for(&market, kind)` is intentionally non-blocking
-even though the underlying Delphi `Engine.getDeepHistory` call is blocking:
-Delphi UI sets a need flag on the selected `TMarket` and the background worker
-fills `TMarket.CoinCardCandles`. In Rust, completion arrives as
+`candles().request_coin_card_for(&market, kind)` is intentionally non-blocking:
+the request marks the selected market as needing deep history, and the runtime
+publishes completion after the background path fills the retained CoinCard
+candles. In Rust, completion arrives as
 `Event::CoinCardCandles` and the rows are readable through
 `snapshot().coin_card_candles_for(&market, kind)`. The string-keyed
 `request_coin_card(market, kind)` variant is a convenience for scripts/tools.
@@ -523,7 +522,7 @@ for event in client.drain_events() {
 ```
 
 If an application already has local UI settings before connecting, pass them in
-the active-library init/settings path. This preserves Delphi soft-read behavior
+the active-library init/settings path. This preserves MoonBot soft-read behavior
 for old settings snapshots: missing tail fields keep the current local values
 (`FreePositionCheck`, `VolDropLevel`, `UseStopMarket`, AutoStart settings, hotkey
 prices, `JoinSellKind`, and `SignOrders` for old versions) instead of being
@@ -592,18 +591,18 @@ the application running Init again. After a server restart, orderbook replay is
 delayed until fresh market indexes have been received for the current
 `PeerAppToken`; this prevents new server `market_index` values from racing the
 old local index map.
-All-trades reconnect follows Delphi `NeedReconnectAllTrades`: until a
+All-trades reconnect follows the MoonBot stream-recovery gate: until a
 `TradesStream` packet is seen with the current `ServerToken`, the library sends
 `UnsubscribeAllTrades`, waits 100 ms, then sends `SubscribeAllTrades`, retrying
 that sequence no more often than once per 5000 ms. A queued
 `SubscribeAllTrades` request arms the same gate, and a successful response
 refreshes it, so the active library waits for the first trades packet before
 deciding that the stream needs another reconnect cycle.
-Orderbook reconnect follows Delphi `NeedResubscribeOrderBooks`: until a
+Orderbook reconnect follows the MoonBot orderbook recovery gate: until a
 successful full-registry `SubscribeOrderBook` response confirms the current
 `ServerToken`, the library repeats the batched subscribe no more often than
 once per 5000 ms. The retry resets local orderbook sequence/cache state but
-keeps the last visible snapshot levels, matching Delphi `ResetOrderBookCaches`.
+keeps the last visible snapshot levels.
 All-trades is opt-in in the Rust library. If the registry has no all-trades
 subscription intent, incoming `TradesStream` / `TradesResendResponse` packets
 are treated as unexpected and are dropped instead of becoming public events.
@@ -626,18 +625,18 @@ client.balances().refresh()?;
 client.strategies().sell_price_update(strategy_id, sell_price)?;
 ```
 
-Typed command methods append into the same unbounded Delphi-style send queues
+Typed command methods append into the same unbounded priority send queues
 after Init. Before Init, subscriptions update only the reconnect registry and
 other domain commands queue nothing. Neither path has a local capacity cap.
 
-Order actions with Delphi-local side effects, such as replace/cancel/panic,
+Order actions with local stateful effects, such as replace/cancel/panic,
 stop/VStop, and immune clicks, are intents on `client.orders()`. The runtime
 owner applies them to live `Orders` before queueing protocol commands.
 
 ## Periodic Refresh
 
 `ClientConfig.refresh` controls automatic background Engine API requests.
-The default matches the Delphi active client cadence, but refresh ticks are
+The default matches the MoonBot active-client cadence, but refresh ticks are
 gated by Init: transport `Fine` alone never starts `UpdateMarketsList` or
 `CheckBinanceTags`.
 

@@ -27,7 +27,7 @@ state.
   signed BTC/exchange signal deltas, and derived volume/delta snapshots when
   trades storage is enabled. The local
   `settings().set_exclude_blacklisted_markets_from_exchange_delta(...)` policy
-  mirrors Delphi `ExcludeBlackListDelta` for the exchange-delta aggregate.
+  matches the MoonBot core exchange-delta aggregate policy.
 - Transferable wallet assets for Spot, Futures, and Quarterly wallets. These
   are separate from per-market balances and are refreshed by an explicit async
   Active Lib command.

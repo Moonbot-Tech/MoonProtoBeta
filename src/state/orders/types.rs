@@ -5,13 +5,12 @@ use crate::commands::trade::{OrderType, OrderWorkerStatus, PositionFilter, Trade
 use crate::time::DelphiTime;
 use crate::MoonTime;
 
-/// Order close reason, matching Delphi `TSellReasonCode`
-/// (MarketsU.pas:245-261).
+/// Order close reason byte used by the MoonBot order stream.
 ///
 /// The server may set this byte in `OrderStatusUpdate.sell_reason_code`.
-/// Delphi updates the local sell reason only when the code is non-zero and
-/// differs from the previous value. Unknown bytes are preserved like Delphi
-/// enum storage and display as `Unknown`.
+/// Active Lib updates the local sell reason only when the code is non-zero and
+/// differs from the previous value. Unknown bytes are preserved and display as
+/// `Unknown`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SellReason(u8);
 
@@ -48,7 +47,7 @@ impl SellReason {
     /// TakeProfit reached.
     pub const TakeProfit: Self = Self(14);
 
-    /// Preserve a raw Delphi reason byte while applying inbound order status.
+    /// Preserve a raw reason byte while applying inbound order status.
     pub(crate) const fn from_byte(b: u8) -> Self {
         Self(b)
     }
@@ -117,12 +116,12 @@ pub(crate) struct PanicSellSend {
     pub turn_on: bool,
 }
 
-/// One side of the Delphi chart "unprotected position" calculation.
+/// One side of the chart "unprotected position" calculation.
 ///
 /// `difference = position_size - closing_sell_quantity`: positive means the
 /// position is not fully covered by active sell-close orders; negative means
-/// sell-close orders exceed the current position. Delphi blinks the label for
-/// either mismatch.
+/// sell-close orders exceed the current position. UI can highlight either
+/// mismatch.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PositionProtectionSide {
     pub side: PositionFilter,
@@ -146,7 +145,7 @@ impl Default for PositionProtectionSide {
     }
 }
 
-/// Delphi chart position-protection snapshot for one market.
+/// Chart position-protection snapshot for one market.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct MarketPositionProtection {
     pub both: PositionProtectionSide,
@@ -154,7 +153,7 @@ pub struct MarketPositionProtection {
     pub short: PositionProtectionSide,
 }
 
-/// One chart point in Delphi `TOrderLine.Points`.
+/// One chart point in an order trace line.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OrderTraceChartPoint {
     #[cfg(any(test, feature = "diagnostics"))]
@@ -190,7 +189,7 @@ impl Default for OrderTraceChartPoint {
     }
 }
 
-/// Read-model counterpart of Delphi `coBuy` / `coSell` `TOrderLine`.
+/// Read-model counterpart of buy/sell order trace lines.
 #[derive(Debug, Clone)]
 pub struct OrderTraceLine {
     pub order_type: OrderType,
@@ -256,10 +255,10 @@ impl OrderTraceLine {
         self.can_finish = true;
     }
 
-    /// Number of Delphi order-line segments represented by `points`.
+    /// Number of order-line segments represented by `points`.
     ///
-    /// Delphi stores one anchor point and then three chart points per segment;
-    /// `TOrderLine.ShrinkPoints` uses the same `(Count - 1) div 3` formula.
+    /// The wire chart line stores one anchor point and then three chart points
+    /// per segment; shrinking uses the same `(Count - 1) / 3` formula.
     pub fn line_count(&self) -> usize {
         self.points.len().saturating_sub(1) / 3
     }

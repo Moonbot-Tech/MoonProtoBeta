@@ -3,7 +3,7 @@
 //! The UDP protocol path does not take this history lock; it queues typed
 //! batches to `StoreWorker`, the single writer. Rows live in a dense `Vec<T>`
 //! behind a short `parking_lot::RwLock`, so large reads scan contiguous memory
-//! like Delphi dense arrays while staying sound around overwrite slots.
+//! while staying sound around overwrite slots.
 //! That cache-friendly layout is what charts and rolling analytics need:
 //! rendering bulk-copies ranges, derived calculations scan borrowed slices, and
 //! neither path pays per-row atomics.
@@ -23,8 +23,8 @@ impl<T> SeqRingRow for T where T: Copy + Default + Send + Sync + 'static {}
 ///
 /// Domain APIs use this to expose "from time T" and "time range" reads without
 /// exposing internal sequence numbers to application code. The retained futures
-/// history preserves Delphi append order and can contain late resend rows, so
-/// timed reads scan the retained sequence instead of assuming monotonic time.
+/// history preserves append order and can contain late resend rows, so timed
+/// reads scan the retained sequence instead of assuming monotonic time.
 pub trait SeqRingTimedRow: SeqRingRow {
     fn seq_ring_time_ms(&self) -> i64;
 }
@@ -200,9 +200,9 @@ impl<T: SeqRingRow> SeqRingWriter<T> {
 
     /// Append a row and return the overwritten row when the ring was full.
     ///
-    /// `StoreWorker` uses this to preserve Delphi's old-trade compaction
-    /// meaning: detailed rows that leave retained history can be folded into
-    /// `TMiniCandle`-like aggregates instead of disappearing silently.
+    /// `StoreWorker` uses this to preserve old-trade compaction semantics:
+    /// detailed rows that leave retained history can be folded into mini-candle
+    /// aggregates instead of disappearing silently.
     pub(crate) fn push_with_evicted(&mut self, row: T) -> (u64, Option<T>) {
         let mut state = self.inner.state.write();
         let seq = state.next_seq;

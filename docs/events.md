@@ -17,7 +17,7 @@ their own main loop:
 use moonproto::{ConnectConfig, MoonClient, MoonClientEvent, MoonEventSink};
 
 let sink = MoonEventSink::callback(move |event| {
-    // For Tauri/Qt/winit/Delphi-like hosts: post/emit into the framework loop.
+    // For callback-oriented hosts: post/emit into the framework loop.
     // Keep this callback quick; do not render or wait here.
     post_to_ui(event);
 });
@@ -59,13 +59,13 @@ queue adapter internally and exposes `client.drain_lifecycle_events()` /
 `client.drain_events()` for simple apps and tests. Hot UI loops can use
 `drain_lifecycle_events_into` / `drain_events_into` to reuse buffers.
 
-The queue adapter is intentionally unbounded. It mirrors the Delphi active
-client shape: the runtime must not drop already-produced domain events because
-of a hidden Rust-only capacity cap. The application side must therefore drain
-it from its UI tick/event bridge. If a queue adapter is never drained, pending
-events keep memory until the process hits memory pressure. Callback sinks have
-the same practical rule: keep the callback quick and post into the framework
-loop; blocking there only moves the backlog to the delivery worker.
+The queue adapter is intentionally unbounded: the runtime must not drop
+already-produced domain events because of a hidden capacity cap. The application
+side must therefore drain it from its UI tick/event bridge. If a queue adapter
+is never drained, pending events keep memory until the process hits memory
+pressure. Callback sinks have the same practical rule: keep the callback quick
+and post into the framework loop; blocking there only moves the backlog to the
+delivery worker.
 
 Timeout waits exist only as hidden diagnostic/script helpers.
 
@@ -187,9 +187,8 @@ change signal, not a raw chart-object parser contract.
 
 `ChartTextSnapshot` is a full replacement of ready chart text rows for the
 currently requested chart-text market. Late snapshots for an older selected
-market are dropped like Delphi `ApplyChartTextSnapshot`. Read the latest rows
-from `snapshot().chart_text().get(...)` when repainting the selected
-chart.
+market are dropped. Read the latest rows from `snapshot().chart_text().get(...)`
+when repainting the selected chart.
 
 `ClosedSellOrderReportEvent` carries the exact expanded Orders SQL that the
 core wrote for a closed sell order report, plus the MoonBot Orders DB row id.
@@ -198,11 +197,11 @@ fills, or final execution updates the same DB record. This event is for external
 report/DB sync; it does not mutate the retained `Orders` model and is not a
 second order schema.
 
-`ArbEvent` is only a change signal/summary. Delphi writes incoming arb data into
-`TMarket.ArbSlots` / `TMarket.ArbNow`; Active Lib does the same, so UI code reads
+`ArbEvent` is only a change signal/summary. Incoming arb data is applied to the
+selected market state, so UI code reads
 `MarketHandle::arb_slot(ArbPlatformCode::...)` /
-`arb_now(ArbPlatformCode::...)` from the
-selected market instead of handling raw server `market_index` blocks.
+`arb_now(ArbPlatformCode::...)` from the selected market instead of handling raw
+server `market_index` blocks.
 
 `WatcherFillsEvent` contains a shared `market_name` (`event.market_name.as_ref()`),
 HyperDex user address (`event.user_hex()` for display/logging), decoded fill

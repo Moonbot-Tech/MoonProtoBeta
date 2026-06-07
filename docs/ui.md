@@ -43,7 +43,7 @@ for event in client.drain_events() {
 leverage management and arb validity time. Client-originated UI commands such as
 MM-orders subscription, emulator ticks, trigger management, reset-profit, and
 DEX/spot switching are sent through high-level handles; they are not inbound
-settings state in the Delphi client receive path.
+settings state.
 
 ## Requesting Current Settings
 
@@ -163,8 +163,7 @@ if let Some(mut lev) = client
 ```
 
 The wire UID and command-version fields are not user input. The runtime writes a
-fresh UID and Delphi's current leverage command version when it queues the
-command.
+fresh UID and the current leverage command version when it queues the command.
 
 Leverage-management fields are UI controls, not protocol switches:
 
@@ -187,7 +186,7 @@ emit `SettingsEvent::ArbActivated { arb_valid }`, where `arb_valid` is a
 
 For UI gating, use `snapshot().settings().arb_is_active_now()` or
 `arb_is_active_at(now)`. This matches MoonBot's `cfg.ArbActive :=
-cfg.ArbValid > Now` meaning without exposing the raw Delphi-day double as the
+cfg.ArbValid > Now` meaning without exposing the raw wire-day double as the
 terminal model.
 
 ### Chart Trade Emulator
@@ -217,12 +216,12 @@ client
     .send_pencil_prices_for_market(&sol, base_time, points)?;
 ```
 
-`send_pencil_prices_for_market` follows the Delphi UI algorithm: it starts from
-the market's current `LastAsk`, converts falling pencil points to sell ticks,
-skips points outside the `0..=65535` millisecond command window, and ignores an
-empty result. `EmuTradePoint::buy` / `EmuTradePoint::sell` remain available for
-explicit low-level tick injection, but chart tools should usually pass
-`EmuPencilPoint` values and let Active Lib encode the trade side.
+`send_pencil_prices_for_market` follows MoonBot's pencil-trade algorithm: it
+starts from the market's current `LastAsk`, converts falling pencil points to
+sell ticks, skips points outside the `0..=65535` millisecond command window, and
+ignores an empty result. `EmuTradePoint::buy` / `EmuTradePoint::sell` remain
+available for explicit low-level tick injection, but chart tools should usually
+pass `EmuPencilPoint` values and let Active Lib encode the trade side.
 
 ### Trigger Management
 
@@ -323,12 +322,12 @@ they write the same fields while hiding the historic `x_tmode` scale flag and
 the scalp-mode `x_sell=0` convention.
 
 `set_exclude_blacklisted_markets_from_exchange_delta` is local Active Lib
-policy, not a `TClientSettingsCommand` wire field. It mirrors Delphi
-`cfg.ExcludeBlackListDelta`: when enabled, markets whose currency appears in
+policy, not a `TClientSettingsCommand` wire field. When enabled, markets whose
+currency appears in
 `coins_black_list_text` are skipped from `MarketsState::global_deltas()`
 exchange-delta aggregation.
 
-AutoStart is stored on the wire as two fixed Delphi blobs, but Active Lib keeps
+AutoStart is stored on the wire as two fixed compact blobs, but Active Lib keeps
 that detail inside the retained settings snapshot. Normal UI code edits typed
 views:
 

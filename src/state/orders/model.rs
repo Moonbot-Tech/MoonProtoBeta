@@ -4,7 +4,7 @@ use super::{OrderTraceLine, SellReason};
 use crate::commands::market::{BaseCurrency, ExchangeCode};
 use crate::commands::trade::*;
 
-/// One retained order with Delphi worker-equivalent state.
+/// One retained order with worker-equivalent state.
 ///
 /// Fields mirror `BOrderWorker` data received from the server through
 /// `TOrderStatus`, `TOrderStatusUpdate`, `TOrderReplaceResponse`,
@@ -12,7 +12,7 @@ use crate::commands::trade::*;
 /// `TOrderTracePoint`.
 #[derive(Debug, Clone)]
 pub struct Order {
-    /// Unique order id = task UID (`MServerTag` in Delphi).
+    /// Unique order id = server task UID.
     pub uid: u64,
     /// Market name, for example `BTCUSDT`.
     pub market_name: String,
@@ -26,11 +26,9 @@ pub struct Order {
     pub buy_order: ExchangeOrder,
     /// Exchange sell-side order leg.
     pub sell_order: ExchangeOrder,
-    /// Delphi `pBuyOrder.Price`: desired/local replace price, not part of
-    /// exchange-order wire data.
+    /// Desired/local buy replace price, not part of exchange-order wire data.
     pub buy_price: f64,
-    /// Delphi `pSellOrder.Price`: desired/local replace price, not part of
-    /// exchange-order wire data.
+    /// Desired/local sell replace price, not part of exchange-order wire data.
     pub sell_price: f64,
     /// Stop settings.
     pub stops: StopSettings,
@@ -39,9 +37,9 @@ pub struct Order {
     pub vstop_fixed: bool,
     pub vstop_level: f64,
     pub vstop_vol: f64,
-    /// Delphi `BOrderWorker.FPanicSell`, local outgoing panic-sell intent.
+    /// Local outgoing panic-sell intent.
     pub panic_sell: bool,
-    /// Delphi `BOrderWorker.IsMoonShot`, raised by `TCorridorUpdate`.
+    /// Moon-shot marker raised by `TCorridorUpdate`.
     pub is_moon_shot: bool,
     /// Last corridor price range update.
     pub corridor_price_down: f32,
@@ -56,26 +54,25 @@ pub struct Order {
     pub emulator_mode: bool,
     /// True when UI clicks must be ignored.
     pub immune_for_clicks: bool,
-    /// Rust read-model marker for Delphi `BOrderWorker.vOrder <> nil`.
+    /// Read-model marker for a local visual order attached to the worker.
     ///
-    /// Stop/VStop outgoing worker actions require this marker, because Delphi
-    /// `SendStopsIfChanged` / `SendVStopIfChanged` exit immediately when no
-    /// visual order is attached to the worker.
+    /// Stop/VStop outgoing worker actions require this marker: when no visual
+    /// order is attached, there is no local stop/VStop state to compare and send.
     pub has_local_visual_order: bool,
-    /// Delphi `vOrder.BuyCondPrice` for pending `OS_None` orders.
+    /// Pending buy condition price for `OS_None` orders.
     pub pending_buy_cond_price: Option<f64>,
-    /// Delphi `vOrder.PendingCancel` for pending `OS_None` orders.
+    /// Pending-cancel flag for `OS_None` orders.
     pub pending_cancel: bool,
     /// Side on which BulkReplace is currently marked.
     pub bulk_replace_buy: bool,
     pub bulk_replace_sell: bool,
-    /// Delphi `coBuy` order-line state built by `ApplyServerTrace`.
+    /// Buy-side order-line state built by server trace packets.
     pub buy_trace_line: Option<OrderTraceLine>,
-    /// Delphi `coSell` order-line state built by `ApplyServerTrace`.
+    /// Sell-side order-line state built by server trace packets.
     pub sell_trace_line: Option<OrderTraceLine>,
     /// True when the order is terminal and awaits deferred removal.
     pub job_is_done: bool,
-    /// Delphi `CancellRequest`: server requested worker cancellation.
+    /// Server requested worker cancellation.
     pub cancel_request: bool,
     /// Server-forced removal (`TOrderNotFound` arrived).
     pub server_forced_remove: bool,

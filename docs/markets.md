@@ -19,8 +19,8 @@ symbol (`BTC`, `SOL`). The result is a stable `MarketHandle`, not a temporary
 borrow. `MarketsState::get(name)` remains the exact-name path for code that
 already has the canonical name.
 
-This mirrors Delphi `TMarkets = TSlowSafeList<TMarket>`: listing refresh may
-replace the surrounding list/dictionaries, but existing `TMarket` objects stay
+This follows the production core's stable-market-object model: listing refresh
+may replace the surrounding list/dictionaries, but existing market objects stay
 alive and are mutated in place. UI code may keep the handle after a search and
 read it later without re-searching by name.
 
@@ -68,7 +68,7 @@ totals view, not the primary per-market UI object.
 
 For chart overlays that only need position fields, `MarketHandle::balance_position`
 returns a small copy without cloning the whole market object.
-For the Delphi "unprotected position" warning, use
+For the "unprotected position" warning, use
 `snapshot.position_protection_for(&market)`: the library counts active
 non-emulator `SellSet` close orders by side, and the UI only decides how to
 draw/blink that warning.
@@ -78,7 +78,7 @@ handle instead of resolving the market name again.
 For signed MoonBot signal deltas, use `MarketHandle::delta_state()` for the
 selected market and `MarketsState::global_deltas()` for BTC/exchange signals.
 These are separate from retained-history range/max-move analytics. If the UI
-wants Delphi's "Exclude blacklisted markets from the market delta calculation"
+wants "Exclude blacklisted markets from the market delta calculation"
 checkbox, call
 `client.settings().set_exclude_blacklisted_markets_from_exchange_delta(true)`;
 the runtime then applies `coins_black_list_text` to retained markets before
@@ -105,7 +105,7 @@ let client = MoonClient::connect(cfg, ConnectConfig::new(init))?;
 ```
 
 Long-running price refresh is controlled by `ClientConfig.refresh`. The default
-uses the Delphi worker cadence, but ticks are gated by Init: transport `Fine`
+uses the MoonBot core worker cadence, but ticks are gated by Init: transport `Fine`
 does not start background Engine API. Set `update_markets_every` /
 `check_tags_every` to `None` if the application owns those requests manually.
 
@@ -213,14 +213,14 @@ let time = point.time();
 UI code should use `price()`, `time()`, or `unix_millis()` instead of carrying
 raw protocol time.
 
-This row mirrors Delphi `THistoricalPrices`. It is not the last trade price.
-Delphi fills it from `UpdateMarketsList`: the server sends `Bid/Ask`, the
-client computes `pLast = (Bid + Ask) / 2`, and the brown LastPrice chart line is
-drawn from `Market.HistoryPrice`.
+This row is the retained LastPrice chart line, not the last trade price. It is
+filled from `UpdateMarketsList`: the server sends `Bid/Ask`, the client
+computes `pLast = (Bid + Ask) / 2`, and the chart line is drawn from that
+retained price history.
 
-The retained-history worker appends a `LastPricePoint` only when Delphi
-`TMarket.AddFrom` would add a `HistoryPrice` row: `pLast > 0`, bid or ask is
-present, and the market is a BTC market or a base-USDT market.
+The retained-history worker appends a `LastPricePoint` only when the production
+core would add a price-history row: `pLast > 0`, bid or ask is present, and the
+market is a BTC market or a base-USDT market.
 
 The retained MarkPrice line row has the same shape:
 
@@ -260,8 +260,8 @@ are preserved as their original byte instead of being collapsed to
 `Market::futures_type` is `BaseCurrency::EMPTY`.
 Use `BaseCurrency::name()` for UI labels.
 
-`Market::listed_type()` returns the Delphi `TListedOnExchange`
-post-processing result for `GetMarketsList`: `BaseCurrency::EMPTY` means
+`Market::listed_type()` returns the core post-processing result for
+`GetMarketsList`: `BaseCurrency::EMPTY` means
 `ListedType::SPOT`; any other `futures_type` means `ListedType::BOTH`.
 `ListedType` is a public ordinal wrapper for the derived listing kind.
 
@@ -322,20 +322,19 @@ These notes describe how the active runtime keeps the public read model current.
 Regular UI code should still use `MarketHandle`, market history readers, and
 typed events instead of server-index helpers.
 
-`CheckBinanceTags` follows the Delphi client: the latest successful response is
+`CheckBinanceTags` follows the MoonBot core client: the latest successful response is
 authoritative for tags. Known markets present in the response receive the new
 tags; known markets absent from that response read back as empty tags. A late
 payload read error is the only exception: already-read tags remain applied, and
-old absent tags are not cleared because Delphi reaches the clear-unseen pass only
+old absent tags are not cleared because the clear-unseen pass runs only
 after the read loop completes.
 
-`GetMarketsList` follows Delphi merge semantics. The first response populates
+`GetMarketsList` follows MoonBot core merge semantics. The first response populates
 the market list. Later responses update known markets by name and leave old
 names present if they are absent from the response; live price slots and token
 tags for known markets are preserved. Unknown names from a later response are
-added only when the list refresh was triggered by Delphi-style
-`NewMarketFound`; otherwise they are ignored like Delphi frees the incoming
-`TMarket`.
+added only when the list refresh was triggered by the `NewMarketFound`
+recovery path; otherwise they are ignored.
 
 The server-index mapping is rebuilt from the `GetMarketsList` response order on
 the first list and on a `NewMarketFound` refresh. A plain later
@@ -343,9 +342,9 @@ the first list and on a `NewMarketFound` refresh. A plain later
 `mIndex -> market name` mapping.
 
 `MarketsState::indexes_synchronized()` is a critical invariant.
-Cold Init builds the initial map from `GetMarketsList`, exactly like Delphi
-`SrvMarkets.Rebuild(IndexMap)` inside `TMoonProtoEngine.GetMarketsList`. After
-server restart the runtime can mark it stale. If the one-time Init already
+Cold Init builds the initial map from `GetMarketsList` using the same
+server-index rebuild contract as the MoonBot core. After server restart the
+runtime can mark it stale. If the one-time Init already
 completed, reconnect restore sends `GetMarketsIndexes` automatically and only
 then refreshes prices with `UpdateMarketsList`. Until the fresh response
 arrives, the active runtime drops orderbook/trades packets that depend on server
@@ -354,62 +353,58 @@ Price updates keyed by server `mIndex` are also skipped while a previously known
 mapping is stale.
 
 For existing markets, `max_leverage` is updated from `GetMarketsList` only when
-the Delphi support flag `ES_MaxLevInGetMarkets` is active. In the active
+the MoonBot core support flag `ES_MaxLevInGetMarkets` is active. In the active
 library path this is inferred from `BaseCheck`: currently only
 `ExchangeCode::FGate` enables it. New markets keep the value
-from the incoming list because Delphi inserts the whole `TMarket`.
+from the incoming list because the whole new market row is inserted.
 
 Correlation market definitions from `GetMarketsList` are inserted only when
-their `base_currency_name` is non-empty, matching Delphi's `If not
-BaseCur.IsEmpty then AddOrSetCorrMarket`. Repeated definitions for an existing
+their `base_currency_name` is non-empty. Repeated definitions for an existing
 correlation market update tick size and `base_currency_name`, but keep the
-original exchange market currency, matching Delphi `AddOrSetCorrMarket`.
-After a successful list, the active state also rebuilds Delphi
-`TMarket.refBTCMarket` equivalents and `BaseCurDict` references. `refBTCMarket`
+original exchange market currency. After a successful list, the active state
+also rebuilds `refBTCMarket` equivalents and base-currency references. `refBTCMarket`
 uses the current server base currency from `BaseCheck`: for a non-BTC base,
 the library replaces that base currency text in the market name with `BTC` and
 looks up the resulting CorrMarket name. For a BTC base it does nothing, like
-Delphi `CheckCorrMarkets`.
+the core correlation-market check.
 Correlation market price updates are merge-style for known correlation markets
 only: prices present in `UpdateMarketsList` overwrite their entries, unknown
-names are ignored like Delphi `GetCorrMarket(MName) = nil`, and absent known
+names are ignored, and absent known
 prices keep their previous value.
 
 After each successful price update, `BaseCurrencyPrice.last_price` is refreshed
-with Delphi priority: direct USDT market ask, reverse USDT market ask inverse,
+with MoonBot core priority: direct USDT market ask, reverse USDT market ask inverse,
 direct USDT CorrMarket price, reverse USDT CorrMarket price inverse, then
 `USDT = 1`.
-For every applied market price row, `MarketPrice` also mirrors the Delphi
-post-assign fields from `TMoonProtoEngine.UpdateMarketsList`:
+For every applied market price row, `MarketPrice` also mirrors the core
+post-assign fields from `UpdateMarketsList`:
 `last_bid = bid`, `last_ask = ask`, `p_last = (bid + ask) / 2`, and
 `min_lot_size = max(max(step_size, min_qty) * p_last, min_notional)`.
-`chart_price_step` mirrors Delphi `TMarket.ChartPriceStep` from
-`AddNewAksPrice(Ask)`: both `UpdateMarketsList` and applied orderbook updates
-can refresh it from the current ask; when `Ask > 0`, it becomes
+`chart_price_step` is refreshed from the current ask by both
+`UpdateMarketsList` and applied orderbook updates; when `Ask > 0`, it becomes
 `max(eps, Ask / 5000)`, and when `Ask` is zero/missing, the previous value is
 kept.
 When funding is included, the same row also updates the retained market funding
-rate/time, matching Delphi's `TMarket` mutation in the `HasFunding` branch.
+rate/time.
 
-Funding timestamps match Delphi client state. The server serializes
+Funding timestamps match MoonBot client state. The server serializes
 `FundingTime - TZShift`; Rust parsers add the local client timezone shift back,
-so retained funding time is client-local Delphi `TDateTime`. A zero funding
+so retained funding time is client-local MoonBot wire time. A zero funding
 time stays zero. It is not Unix time; UI code should use
 `MarketHandle::price().funding_time().unix_millis()` or
 `Market::funding_time()` instead of carrying a raw `f64` timestamp.
 
-Trades stream packets also update the bounded live trade tail kept by Delphi on
-`TMarket`. For futures trade rows, the runtime updates
+Trades stream packets also update the bounded live trade tail kept on each
+market. For futures trade rows, the runtime updates
 `MarketTradeState::last_got_all_trades_ms`, `last_trade_price`,
 `last_buy_price`, `last_sell_price`, `last_trade_price_ema15`,
 `last_trade_price_ema5`, and `last_trade_was_sell` before emitting the public
 `TradesEvent::Applied` signal. Spot trade rows update only
-`last_got_spot_trades_ms`, matching Delphi's spot branch which exits before
-`SetLastTradePrices`.
+`last_got_spot_trades_ms`; spot rows do not update last-trade price fields.
 
 If `UpdateMarketsList` refers to a server market index whose name is present in
 `GetMarketsIndexes` but absent from the current market list, the active runtime
-follows Delphi `NewMarketFound`: it schedules a fresh `GetMarketsList` request
+follows the `NewMarketFound` recovery path: it schedules a fresh `GetMarketsList` request
 automatically, throttled to roughly one request per 30 seconds while the unknown
 market condition persists. If that listing refresh adds new markets, the
 runtime emits `MarketsEvent::NewMarketsAdded { names }` and immediately

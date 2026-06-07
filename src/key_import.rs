@@ -7,14 +7,13 @@
 //! Use [`parse_key_info`] when UI code wants to show the key name and suggest
 //! those connection settings to the user.
 //!
-//! The parser is a byte-exact port of `TMoonProtoForm.bPasteKeyClick`.
-//! It tries the current V1 password head first, then falls back to the legacy
-//! key-only password head. Both branches verify the Delphi stream checksum after
-//! decryption.
+//! The parser follows the MoonBot exported-key container exactly. It tries the
+//! current V1 password head first, then falls back to the legacy key-only
+//! password head. Both branches verify the container checksum after decryption.
 //!
 //! `TMoonProtoKeyContainer` is 72 bytes and contains the fixed-size random
-//! marker, filled flag, Delphi `TDateTime`, bot id, version, flags, master key,
-//! MAC key, and checksum.
+//! marker, filled flag, wire date, bot id, version, flags, master key, MAC key,
+//! and checksum.
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use crate::client::TransportMode;
@@ -52,9 +51,9 @@ pub enum ImportedIpVersion {
 
 /// Endpoint and transport metadata carried by current MoonBot key exports.
 ///
-/// `address` can be `None`: Delphi applies the exported port/transport mode
-/// even when the active IP branch contains a zero address, and leaves the
-/// previously configured IP untouched.
+/// `address` can be `None`: current exports can carry port/transport mode even
+/// when the active IP branch contains a zero address; callers may keep their
+/// previously configured IP in that case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ImportedNetworkConfig {
     /// Active IP version in the exported payload.
@@ -80,7 +79,7 @@ pub struct ImportedKeyInfo {
     pub format: ImportedKeyFormat,
     /// `TMoonProtoKeyContainer.rnd`.
     pub rnd: String,
-    /// Raw Delphi `TDateTime` from the key container, retained for diagnostics.
+    /// Raw wire-date value from the key container, retained for diagnostics.
     #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub date: f64,
@@ -99,7 +98,7 @@ impl ImportedKeyInfo {
         MoonTime::from_delphi_days(self.date).unwrap_or(MoonTime::ZERO)
     }
 
-    /// Key container date as typed Delphi `TDateTime`.
+    /// Key container date as typed wire-day value.
     #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub fn date_delphi(&self) -> DelphiTime {
@@ -186,8 +185,7 @@ fn try_decrypt(encrypted: &[u8], password_head: &str, ts: i64, checksum: i64) ->
 }
 
 fn password_bytes(password_head: &str, ts: i64) -> Vec<u8> {
-    // Delphi TCode = string[25], so the short string payload is truncated to
-    // the first 25 bytes after ordinary ANSI assignment.
+    // MoonBot key exports use a fixed 25-byte short-code payload.
     format!("{password_head}{ts}{PWD_TAIL}")
         .bytes()
         .take(25)
@@ -211,7 +209,7 @@ fn imported_key_info(
     format: ImportedKeyFormat,
     network: Option<ImportedNetworkConfig>,
 ) -> ImportedKeyInfo {
-    let display_date = format_delphi_datetime(container.date);
+    let display_date = format_wire_datetime(container.date);
     let display_name = format!("{}  {}", container.rnd, display_date);
     let keys = ImportedKeys {
         master_key: container.master_key,
@@ -332,7 +330,7 @@ fn parse_key_container(plain: &[u8], container_offset: usize) -> Option<KeyConta
     })
 }
 
-fn format_delphi_datetime(value: f64) -> String {
+fn format_wire_datetime(value: f64) -> String {
     if !value.is_finite() {
         return "00.00.0000 00:00".to_string();
     }
@@ -360,7 +358,7 @@ fn civil_from_days(days_since_unix_epoch: i64) -> (i32, u32, u32) {
     (year as i32, month as u32, day as u32)
 }
 
-/// Delphi `sfunc.pas` `CalculateCheckSumW` x64 algorithm.
+/// MoonBot exported-key `CalculateCheckSumW` x64 algorithm.
 fn calculate_checksum_w(buf: &[u8]) -> i64 {
     let mut rax = 0u64;
     for &byte in buf {

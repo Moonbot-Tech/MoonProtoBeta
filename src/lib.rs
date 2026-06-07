@@ -1,7 +1,7 @@
 //! # MoonProto
 //!
 //! Rust client for the MoonProto UDP protocol used by MoonBot servers.
-//! It ports the Delphi client behavior for the wire format, AES-128-GCM
+//! It provides a MoonBot-compatible runtime for the wire format, AES-128-GCM
 //! payload encryption, SipHash transport MAC, handshake, retry, slicing,
 //! ACK handling, PMTU discovery, and payload commands.
 //!
@@ -107,7 +107,7 @@
 //! - [`state`] — Active Lib read models: Orders / OrderBooks / Trades /
 //!   Balances / Strats / Settings / Markets.
 //! - [`key_import`] — parser for base64 MoonBot exported keys.
-//! - [`time`] — `MoonTime` and timestamp helpers. The Delphi-style NTP syncer
+//! - [`time`] — `MoonTime` and timestamp helpers. The process-level NTP syncer
 //!   is owned by the runtime and is not a normal application module.
 //!
 //! The low-level wire layers (compression, crypto, framing, and transport modes

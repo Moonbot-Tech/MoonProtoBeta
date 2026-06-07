@@ -23,8 +23,8 @@ pub(crate) enum AuthStatus {
 /// Error returned when the current session does not yet have the route fields
 /// required for market-level trade commands.
 ///
-/// Trade command wire headers carry two Delphi enum ordinals from the active
-/// server session: `cfg.BaseCurrency` and `cfg.Header.Current`. They are learned
+/// Trade command wire headers carry two route ordinals from the active server
+/// session: base currency and exchange/platform code. They are learned
 /// from `emk_BaseCheck`, so applications that skipped BaseCheck must run it
 /// before sending market-level trade commands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,9 +162,9 @@ pub enum LifecycleEvent {
     ///
     /// Typical causes are mobile background networking restrictions, exhausted
     /// ephemeral ports, OS permission errors, or VPN conflicts. The library keeps
-    /// retrying forever, matching Delphi, but this event lets the application
-    /// show a clear network-permission or bind-failure status instead of an
-    /// endless generic "connecting" indicator.
+    /// retrying forever, but this event lets the application show a clear
+    /// network-permission or bind-failure status instead of an endless generic
+    /// "connecting" indicator.
     ///
     /// `consecutive_failures` counts how many complete 200-port sweeps failed in
     /// a row. The first event is emitted after about 15 seconds of continuous
@@ -192,8 +192,7 @@ pub(crate) type LifecycleFn = Box<dyn FnMut(LifecycleEvent) + Send>;
 /// Configuration for periodic refresh requests owned by the active library.
 ///
 /// Long-running clients need fresh market prices, funding, and token tags. The
-/// Delphi bot does this from background workers, and the Rust active library
-/// mirrors that cadence after domain init succeeds.
+/// active library owns that refresh cadence after domain init succeeds.
 ///
 /// Set a field to `None` when the application intentionally owns that Engine API
 /// refresh manually.
@@ -205,12 +204,13 @@ pub(crate) type LifecycleFn = Box<dyn FnMut(LifecycleEvent) + Send>;
 pub struct RefreshConfig {
     /// Periodically send `emk_UpdateMarketsList` for fresh prices and funding.
     ///
-    /// Default: `Some(2s)`, matching the Delphi full-proxy worker after init.
+    /// Default: `Some(2s)`, matching the production core refresh cadence after
+    /// init.
     pub update_markets_every: Option<Duration>,
     /// Periodically send `emk_CheckBinanceTags`.
     ///
     /// Default: `Some(60s)`. The hourly four-request burst with 200 ms spacing
-    /// is handled automatically, matching Delphi `BHeavyApiWorker`.
+    /// is handled automatically.
     pub check_tags_every: Option<Duration>,
 }
 
@@ -288,8 +288,8 @@ impl std::fmt::Debug for TransportMode {
 /// Configuration for one MoonProto UDP session.
 ///
 /// Use [`ClientConfig::new`] for normal clients. It selects the open base
-/// transport, generates a random client id, enables the Delphi-style
-/// process-level NTP syncer, and enables active-library market refresh after
+/// transport, generates a random client id, enables the process-level NTP
+/// syncer, and enables active-library market refresh after
 /// init. Direct struct literals remain available for test tools and advanced
 /// protocol integrations.
 #[derive(Clone)]
@@ -310,8 +310,8 @@ pub struct ClientConfig {
     pub client_id: u64,
     /// If `Some(host)`, `Client::new` acquires the process-level NTP syncer that
     /// updates `GlobalMPTimeOffset` about every 500 ms in the background. All
-    /// clients in one process share the same worker, matching Delphi
-    /// `TMoonProtoTymeSyncer` and its global offset.
+    /// clients in one process share the same corrected-time worker and global
+    /// offset.
     ///
     /// `None` disables managed NTP. This is useful for tests, offline tools, or
     /// applications that intentionally rely on system time.
@@ -321,8 +321,8 @@ pub struct ClientConfig {
     /// existing worker remains active because the corrected time offset is
     /// process-global, not per-client.
     pub ntp_host: Option<String>,
-    /// Periodic refresh settings. Defaults enable Delphi-worker intervals, but
-    /// Engine API refresh traffic starts only after successful init.
+    /// Periodic refresh settings. Defaults enable production refresh intervals,
+    /// but Engine API refresh traffic starts only after successful init.
     pub refresh: RefreshConfig,
     /// Retained market-history capacity policy used when trades storage becomes
     /// active. Default `Auto` sizes rings from system memory after the market
@@ -335,7 +335,7 @@ impl ClientConfig {
     /// - `transport mode = V0`;
     /// - `client_id = rand::random()`;
     /// - `ntp_host = Some("pool.ntp.org")` (shared process-level syncer);
-    /// - `refresh = RefreshConfig::default()` (Delphi-worker refresh after Init).
+    /// - `refresh = RefreshConfig::default()` (production refresh after Init).
     ///
     /// Tests and offline tools can call [`Self::without_ntp`].
     /// Applications can select V1/V2 with [`Self::with_transport_mode`] when the
@@ -365,7 +365,7 @@ impl ClientConfig {
         self
     }
 
-    /// Override transport mode from a raw Delphi `mask_ver` byte.
+    /// Override transport mode from a raw key-export `mask_ver` byte.
     ///
     /// This is for config importers and protocol tests. Application code should
     /// call [`Self::with_transport_mode`] with a named [`TransportMode`].

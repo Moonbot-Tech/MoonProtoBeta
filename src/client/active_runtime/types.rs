@@ -444,7 +444,7 @@ pub enum MoonClientError {
     StateUnavailable(&'static str),
     /// A user-facing market name could not be resolved to the active market map.
     UnknownMarket(String),
-    /// A UI emulator command cannot fit Delphi's `Word Count` wire field.
+    /// A UI emulator command cannot fit the wire `Word Count` field.
     TooManyEmuTradePoints(usize),
     /// The runtime thread stopped, panicked, or its command channel is closed.
     RuntimeStopped,
@@ -543,7 +543,7 @@ pub struct NewOrderParams {
     pub side: OrderSide,
     pub price: f64,
     pub size: f64,
-    /// `None` sends Delphi `StratID=0`.
+    /// `None` sends `StratID=0`.
     pub strategy_id: Option<u64>,
 }
 
@@ -561,8 +561,8 @@ impl NewOrderParams {
     /// Build new-order params for a retained selected market.
     ///
     /// Terminal UI normally keeps `MarketHandle` after search/chart selection,
-    /// matching Delphi's `TMarket` reference. This constructor avoids turning
-    /// that selected object back into a user-visible lookup problem.
+    /// so this constructor avoids turning that selected object back into a
+    /// user-visible lookup problem.
     pub fn for_market(
         market: &crate::state::MarketHandle,
         side: OrderSide,

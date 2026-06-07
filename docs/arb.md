@@ -23,9 +23,9 @@ if let Some(btc) = state.markets().get("BTCUSDT") {
 }
 ```
 
-Arb slots are keyed by `ArbPlatformCode`. Each slot mirrors the useful parts of
-Delphi `TMarket.ArbSlots` / `TMarket.ArbNow`; the temporary mark-and-sweep
-staging byte is not public API:
+Arb slots are keyed by `ArbPlatformCode`. Each slot is the market-level arb
+state needed by UI code; the temporary mark-and-sweep staging byte is not public
+API:
 
 ```rust
 pub struct MarketArbSlot {
@@ -35,8 +35,9 @@ pub struct MarketArbSlot {
 }
 ```
 
-Isolation snapshots are committed like Delphi: received temporary flags replace
-the current `isolated_flags`, then the temporary staging flags are cleared.
+Isolation snapshots are committed as full replacements: received temporary flags
+replace the current `isolated_flags`, then the temporary staging flags are
+cleared.
 Use `MarketHandle::arb_now(ArbPlatformCode::...)` when the UI only needs the
 latest price/time:
 
@@ -46,7 +47,7 @@ let price = now.price;
 let time_ms = now.unix_millis();
 ```
 
-If the UI needs the 10-point Delphi ring, use
+If the UI needs the retained 10-point arb history, use
 `MarketArbSlot::points_oldest_first()` and each point's `time()` /
 `unix_millis()` helpers. The raw storage ring and cursor are internal.
 

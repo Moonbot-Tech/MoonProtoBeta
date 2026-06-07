@@ -111,9 +111,9 @@ pub struct Order {
 }
 ```
 
-`currency` and `platform` are typed Delphi route values retained from the
-server order state. Normal code does not write them manually; order actions use
-them to build the correct wire header.
+`currency` and `platform` are typed route values retained from the server order
+state. Normal code does not write them manually; order actions use them to build
+the correct wire header.
 
 `buy_order` and `sell_order` are `ExchangeOrder` values. They contain
 exchange-side order values such as
@@ -123,15 +123,15 @@ their `name()` helpers for labels. The local `buy_price` and `sell_price`
 fields are the desired replace prices tracked by the active client, not
 exchange execution prices.
 
-Order timestamps are Delphi `TDateTime` values on the wire, but raw time fields
-are not the normal terminal API. Use `open_time()`, `close_time()`, and
-`create_time()` on `ExchangeOrder`.
+Order timestamps are wire time values, but raw time fields are not the normal
+terminal API. Use `open_time()`, `close_time()`, and `create_time()` on
+`ExchangeOrder`.
 For exchange-order flags, use `is_opened()`, `is_closed()`, `canceled()`, and
 `is_short()` on `ExchangeOrder`; the underlying packed boolean bytes and
 packed-record byte IO are wire details kept inside Active Lib/tests.
 
 `sell_reason` is a typed `SellReason` value. Use
-`order.sell_reason.description()` for a Delphi-compatible UI label.
+`order.sell_reason.description()` for a MoonBot-compatible UI label.
 
 Field groups for terminal UI:
 
@@ -231,7 +231,7 @@ state instead of branching on internal apply-result reasons.
 Server trace points are applied into `buy_trace_line` and `sell_trace_line`.
 These fields are the chart-ready read model; the public order state does not
 expose a raw inbound packet history. Long trace lines are shrunk with the same
-800-line policy as the Delphi chart object.
+800-line chart policy used by the MoonBot core.
 
 For chart timestamps, use `OrderTraceChartPoint::time()` or `unix_millis()`.
 
@@ -244,7 +244,7 @@ automatically.
 
 Terminal order updates are removed after the current receive batch. Sell-done
 orders keep a short grace window so immediately following visual trace packets
-can still attach to the order, matching the Delphi client behavior.
+can still attach to the order, matching the production client behavior.
 
 ## Protocol Data
 

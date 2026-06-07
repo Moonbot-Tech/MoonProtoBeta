@@ -75,7 +75,7 @@ impl MoonOrders {
     ///
     /// Set the stop-loss / trailing / take-profit values you want; the runtime
     /// only sends a command when they differ from the order's current stops
-    /// (Delphi `SendStopsIfChanged`). Build settings with
+    /// (send-if-changed semantics). Build settings with
     /// `StopSettings::disabled().with_stop_loss_percent(...).with_take_profit_price(...)`;
     /// the internal take-profit latch is computed by the runtime on send, so
     /// application code does not maintain it.
@@ -102,7 +102,7 @@ impl MoonOrders {
     ///
     /// The UI passes visible order rows (or their UIDs) plus the desired flag.
     /// Active Lib resolves the live order state and sends only orders that are
-    /// still active, matching Delphi's click-immunity behavior.
+    /// still active.
     pub fn set_immune_for_orders<I, T>(&self, orders: I, value: bool) -> Result<(), MoonClientError>
     where
         I: IntoIterator<Item = T>,
@@ -180,8 +180,8 @@ impl MoonOrders {
 /// These actions create or manage orders by selected market. Terminal UI can
 /// pass its retained `MarketHandle` through `*_for_market` helpers; scripts can
 /// still use market-name helpers. The caller never passes `TradeCtx`; the
-/// runtime owner derives Delphi route bytes from the active session and queues
-/// the same wire commands as the low-level `Client`.
+/// runtime owner derives route bytes from the active session and queues the
+/// same wire commands as the low-level `Client`.
 #[derive(Clone)]
 pub struct MoonTrade {
     pub(super) tx: mpsc::Sender<RuntimeCommand>,
@@ -231,7 +231,7 @@ impl MoonTrade {
     /// Move all matching sell orders.
     ///
     /// Build `params` with `MoveAllSellsParams` named constructors; the runtime
-    /// still performs the Delphi live-order pre-send gate before queuing.
+    /// still performs the live-order pre-send gate before queuing.
     pub fn move_all_sells(
         &self,
         market_name: impl Into<String>,
@@ -255,7 +255,7 @@ impl MoonTrade {
     /// Move all matching buy orders.
     ///
     /// Build `params` with `MoveAllBuysParams` named constructors; the runtime
-    /// still performs the Delphi live-order pre-send gate before queuing.
+    /// still performs the live-order pre-send gate before queuing.
     pub fn move_all_buys(
         &self,
         market_name: impl Into<String>,
@@ -615,10 +615,10 @@ impl MoonSettings<'_> {
 
     /// Exclude globally blacklisted coins from `markets().global_deltas()`.
     ///
-    /// Delphi exposes this as the local checkbox
-    /// "Exclude blacklisted markets from the market delta calculation". It does
-    /// not travel inside `TClientSettingsCommand`; Active Lib applies it locally
-    /// to the retained market analytics state.
+    /// This is the local terminal checkbox "Exclude blacklisted markets from
+    /// the market delta calculation". It does not travel inside
+    /// `TClientSettingsCommand`; Active Lib applies it locally to the retained
+    /// market analytics state.
     pub fn set_exclude_blacklisted_markets_from_exchange_delta(
         &self,
         exclude: bool,
@@ -658,7 +658,7 @@ impl MoonSettings<'_> {
     /// Set the behavioural fields on `cmd` (auto max-order, auto lev-up,
     /// isolated/cross, fix-lev, telegram report, lev-control text). Its `uid`
     /// and `cmd_ver` fields are ignored on send: the runtime assigns a fresh UID
-    /// and always writes Delphi's `LevCmdVer = 1`.
+    /// and always writes the current leverage command version.
     pub fn manage_leverage(
         &self,
         cmd: &crate::commands::ui::LevManage,
@@ -791,8 +791,8 @@ impl MoonChartAlerts<'_> {
 
     /// Upsert a chart alert object for a retained market handle.
     ///
-    /// `blob` must be a Delphi-compatible `TChartObject.Save` payload. The core
-    /// is authoritative: after it accepts the object, clients receive
+    /// `blob` must be the MoonBot chart-object payload. The core is
+    /// authoritative: after it accepts the object, clients receive
     /// `Event::ChartAlert`, and the retained copy is available from
     /// `snapshot().chart_alerts()`.
     pub fn upsert_for_market(
@@ -885,10 +885,9 @@ impl MoonChartText<'_> {
 
 /// Chart-trade emulator command handle.
 ///
-/// This is the high-level path matching Delphi's draw-tool emulator: terminal
-/// code selects a market, builds `EmuTradePoint` values from chart points, and
-/// Active Lib resolves the current server index before sending
-/// `TEmuTradesCommand`.
+/// This is the high-level path for MoonBot's draw-tool emulator: terminal code
+/// selects a market, builds `EmuTradePoint` values from chart points, and Active
+/// Lib resolves the current server index before sending `TEmuTradesCommand`.
 pub struct MoonEmulator<'a> {
     pub(super) client: &'a MoonClient,
 }
@@ -896,10 +895,10 @@ pub struct MoonEmulator<'a> {
 impl MoonEmulator<'_> {
     /// Send chart-pencil points for a retained market handle.
     ///
-    /// This is the Delphi `TChartFrame.TryEmulatePrices` shape: the UI passes
-    /// absolute chart points, Active Lib starts from the market's current
-    /// `LastAsk`, converts falling points to sell ticks, skips points outside
-    /// Delphi's `Word` millisecond window, and queues one `TEmuTradesCommand`.
+    /// The UI passes absolute chart points, Active Lib starts from the market's
+    /// current `LastAsk`, converts falling points to sell ticks, skips points
+    /// outside the wire `Word` millisecond window, and queues one
+    /// `TEmuTradesCommand`.
     pub fn send_pencil_prices_for_market<I>(
         &self,
         market: &crate::state::MarketHandle,
@@ -953,9 +952,9 @@ impl MoonEmulator<'_> {
 
     /// Send emulated trades by terminal market name.
     ///
-    /// Empty `points` is a no-op, matching Delphi UI code which only sends the
-    /// command after a drawn pencil produced at least one valid point. Sell side
-    /// is encoded by `EmuTradePoint::sell`.
+    /// Empty `points` is a no-op: the command is sent only after a drawn pencil
+    /// produced at least one valid point. Sell side is encoded by
+    /// `EmuTradePoint::sell`.
     pub fn send_trades(
         &self,
         market_name: impl AsRef<str>,
@@ -1060,8 +1059,7 @@ impl MoonCandles<'_> {
     /// Request CoinCard deep-history candles for a retained market handle.
     ///
     /// Prefer this in terminal UI code that already keeps a selected
-    /// `MarketHandle`, matching Delphi chart code acting on its current
-    /// `TMarket` reference.
+    /// `MarketHandle` for the current chart.
     pub fn request_coin_card_for(
         &self,
         market: &crate::state::MarketHandle,
@@ -1121,7 +1119,7 @@ impl MoonStrategies<'_> {
         self.client.set_strategy_checked(strategy_id, checked)
     }
 
-    /// Send Delphi checked-state delta if any local strategy changed.
+    /// Send checked-state delta if any local strategy changed.
     pub fn send_checked_delta(&self) -> Result<(), MoonClientError> {
         self.client.send_strategy_checked_delta()
     }

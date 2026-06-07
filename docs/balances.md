@@ -4,8 +4,8 @@ The Active Lib keeps live account and position state for the connected MoonBot
 session. Application code normally does not parse balance packets directly.
 
 For UI attached to a market chart, read position fields from `Market`, not from
-a separate balance row. This mirrors Delphi: balance packets mutate the live
-`TMarket` object, and chart/order UI reads that object.
+a separate balance row. Balance packets mutate the live `Market` state, and
+chart/order UI reads that same retained object.
 
 ## What The Library Maintains
 
@@ -14,7 +14,7 @@ a separate balance row. This mirrors Delphi: balance packets mutate the live
 
 - `initial_balance`, `locked_balance`;
 - `pos_size`, `pos_price`, `liq_price`, `pos_dir` (`OrderType::Sell` /
-  `OrderType::Buy`, matching Delphi `FPosDir`);
+  `OrderType::Buy`);
 - long/short hedge position fields;
 - `asset_balance`, `asset_balance_full`;
 - `total_profit_b`, `total_profit_l`, `total_profit_s`;
@@ -31,13 +31,12 @@ position fields. Use `client.balances().refresh_transfer_assets()` and
 by transfer UI.
 
 Incoming balance rows are applied only for markets already known to
-`MarketsState`. This matches the Delphi client: an unknown market name does not
-create an orphan balance row.
+`MarketsState`. An unknown market name does not create an orphan balance row.
 
 Full snapshots are authoritative for the current known market universe. If a
 known market is missing from a full snapshot, the library resets the live market
 balance/position fields to zero and `leverage_x = 1`, while preserving
-Delphi-preserved protocol bookkeeping such as stale-check hashes/epochs.
+protocol bookkeeping such as stale-check hashes/epochs.
 
 Incremental updates merge only the changed rows and optionally update global
 totals. Stale incremental rows are skipped per market.
@@ -137,9 +136,9 @@ remains valid and UI code does not drive recovery from them.
 
 ## Transferable Assets
 
-Delphi refreshes `Markets.FAssets[EX_Spot]`, `Markets.FAssets[EX_Futures]`,
-and `Markets.FAssets[EX_QFutures]` by starting one worker per wallet kind.
-Rust Active Lib exposes the same user effect without blocking the caller:
+MoonBot refreshes Spot, Futures, and Quarterly transferable wallet assets as
+three independent wallet requests. Active Lib exposes the same user effect
+without blocking the caller:
 
 ```rust
 use moonproto::{Event, ExchangeKind};
@@ -168,19 +167,18 @@ if let Some(snapshot) = client.snapshot() {
 immediately. Each completed response updates the library-owned state and emits a
 per-wallet `Event::TransferAssets::Updated` or `UpdateFailed`. After all three
 requests have answered, Active Lib emits `TransferAssetsEvent::RefreshCompleted`;
-that is the UI-safe point equivalent to Delphi `WaitUpdCount = 0`. Use
+that is the UI-safe point for a complete transfer-assets refresh. Use
 `balances().refresh_transfer_assets_kind(kind)` if the UI only needs one wallet.
 
 ## Diagnostic Rows
 
 Per-market `BalanceItem` rows are a protocol parser input, not the public
 terminal state. Active Lib applies them to `Market` immediately, the same way
-Delphi mutates `TMarket` in `ApplyBalanceItem`. For selected-market UI, keep a
+the MoonBot core mutates live market state. For selected-market UI, keep a
 `MarketHandle` and read `balance_position()`.
 
-Delphi behavior is preserved when applying `max_value`: a zero or near-zero
-incoming value does not erase a previously known non-zero value on the live
-market.
+When applying `max_value`, a zero or near-zero incoming value does not erase a
+previously known non-zero value on the live market.
 
 ## GlobalBalance
 
@@ -196,8 +194,8 @@ pub struct GlobalBalance {
 
 All amounts are BTC equivalents. `special_coin_balance` is the server-selected
 special coin balance, for example USDT on futures servers. `total_pnl` is the
-Delphi `TMarkets.FTotalPNL` equivalent: sum of per-market profit over BTC
-markets after the balance packet has already updated live `Market` objects.
+sum of per-market profit over BTC markets after the balance packet has already
+updated live `Market` objects.
 
 ## API Shape
 

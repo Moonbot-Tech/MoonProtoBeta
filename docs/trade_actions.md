@@ -29,8 +29,8 @@ client.orders().switch_panic_sell_for_market(&market, true)?;
 
 The runtime owner applies the intent to the live `Orders` state first, then
 queues the protocol command only when the current order state allows it. This is
-the Rust Active Lib equivalent of Delphi UI/worker behavior: the application
-does not mutate a snapshot and does not pass `&mut Orders` around.
+the Active Lib order model: the application does not mutate a snapshot and does
+not pass `&mut Orders` around.
 
 ## UI Pattern
 
@@ -80,7 +80,7 @@ client.trade().penalty_for_market(&market)?;
 ```
 
 Bulk buy/sell moves use named constructors for the trader-visible mode. The
-runtime still serializes the exact Delphi packet mode internally:
+runtime still serializes the exact wire packet mode internally:
 
 ```rust
 use moonproto::{BulkMoveKind, MoveAllBuysParams, PositionFilter};
@@ -123,7 +123,7 @@ strategy-piece buttons use `strategy_piece_for_market` or
 `strategy_piece_and_sell_for_market`, so application code does not pass raw
 split-mode booleans.
 
-`ClosePositionParams::for_market` means the Delphi default: place closing limit
+`ClosePositionParams::for_market` means the normal default: place closing limit
 orders for the current position. Use `market_order_for_market` only for the
 explicit force-market-close button.
 
@@ -137,15 +137,15 @@ requested action, the action becomes a no-op. Normal UI code keeps rendering the
 retained order snapshot; low-level rejected-action telemetry is available only
 in `test`/`diagnostics` builds.
 
-After Init, actions append to the Delphi-style unbounded send queues and
-reconnect keeps the session state alive automatically.
+After Init, actions append to unbounded send queues and reconnect keeps the
+session state alive automatically.
 
 ## Command Semantics
 
 - `move_order` derives market route, order type, current status, and dedup key
   from live `Orders`.
 - `cancel` derives the current status from live `Orders`; pending orders use the
-  Delphi replace-then-cancel path.
+  replace-then-cancel path.
 - `update_stops` and `update_vstop` compare against previous local values and
   send only when something changed.
 - `set_immune_for_orders` updates only found active local orders and sends
@@ -155,14 +155,14 @@ reconnect keeps the session state alive automatically.
   `TradeCtx` from the session route and do not require caller-supplied protocol
   ordinals.
 - `move_all_sells` and `move_all_buys` read the live order state and send only
-  when the same Delphi active-client pre-send gates find a candidate order.
+  when the active-client pre-send gates find a candidate order.
 
 Epoch/status/route fields are intentionally not caller-supplied in the normal
 API. They come from BaseCheck and the tracked order state.
 
 ## Retry Counts
 
-Most trade/order actions use the Delphi retry policy for the matching command.
+Most trade/order actions use the MoonBot retry policy for the matching command.
 Position-changing commands that must not be duplicated by retries use the lower
 retry count from the wire command definition. The high-level API selects this
 automatically; applications should not choose retry counts for normal trading

@@ -34,7 +34,8 @@ if let Some(readers) = state.market_history_readers_for(&market) {
 ```
 
 The in-progress candle is exposed through the derived snapshot. It is separate
-from the sealed 5m ring, matching Delphi's live chart bar:
+from the sealed 5m ring and is the live chart bar that incoming trades keep
+updating between sealed 5m rows:
 
 ```rust
 if let Some(derived) = state.market_history_derived_snapshot_now_for(&market) {
@@ -53,8 +54,8 @@ If trades storage is disabled, chunked candles are not kept in market history.
 
 ## Candle Row
 
-`Candle5mRow` stores Delphi-compatible raw fields internally, but application
-code should use the OHLCV/time helpers instead of the raw Delphi field names:
+`Candle5mRow` stores wire-compatible raw fields internally, but application
+code should use the OHLCV/time helpers instead of raw protocol field names:
 
 ```rust
 let open = candle.open();
@@ -65,7 +66,8 @@ let volume = candle.volume();
 let unix_ms = candle.time().unix_millis();
 ```
 
-The raw wire time is Delphi `TDateTime`; the public helper returns `MoonTime`.
+The raw wire time is converted at the packet boundary; the public helper returns
+`MoonTime`.
 
 ## Full Snapshot Refresh
 
@@ -93,10 +95,10 @@ therefore retain fewer markets/candles than the server returned.
 ## CoinCard History
 
 `candles().request_coin_card_for(&market, kind)` is a demand-driven,
-non-blocking UI request for the selected retained market. It mirrors Delphi's
-CoinCard path: UI marks its current `TMarket` as needing deep history, a
-background owner calls blocking `Engine.getDeepHistory`, then
-`TMarket.CoinCardCandles` is updated. The string-keyed
+non-blocking UI request for the selected retained market. It mirrors the core
+CoinCard flow: UI asks for deep history for the current market, the runtime
+performs the blocking history request off the UI path, and the retained
+CoinCard candles are updated only after the response is applied. The string-keyed
 `request_coin_card(market, kind)` variant remains useful for scripts and
 one-shot tools.
 

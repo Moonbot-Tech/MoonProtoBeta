@@ -1,9 +1,9 @@
 //! Time helpers used by MoonProto public API and wire adapters.
 //!
 //! Public API uses [`MoonTime`], a compact Unix-milliseconds timestamp. The
-//! Delphi `TDateTime` day value inherited from MoonBot is a wire-format detail:
-//! packets are converted at the boundary so retained histories and UI-facing
-//! rows do not carry protocol-native floating-point time.
+//! MoonBot wire-day value is a wire-format detail: packets are converted at the
+//! boundary so retained histories and UI-facing rows do not carry
+//! protocol-native floating-point time.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -110,10 +110,10 @@ fn finite_f64_to_i64(value: f64) -> Option<i64> {
         .then_some(value as i64)
 }
 
-/// Delphi `TDateTime` value: days since `1899-12-30`.
+/// MoonBot wire time value: days since `1899-12-30`.
 ///
 /// This type exists only for protocol diagnostics and tests. Normal builds keep
-/// Delphi day values as a wire detail and expose [`MoonTime`] to applications.
+/// raw wire-day values as a wire detail and expose [`MoonTime`] to applications.
 #[cfg(any(test, feature = "diagnostics"))]
 #[repr(transparent)]
 #[derive(Debug, Default, Clone, Copy, PartialEq, PartialOrd)]

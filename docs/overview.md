@@ -87,7 +87,7 @@ for event in client.drain_events() {
 - Blocks indexed streams while market indexes are stale.
 - Sends orderbook full-snapshot requests when diff recovery requires them.
 - Detects trades gaps and sends `TradesResend` requests from the
-  Delphi-equivalent tail check after valid trades packets.
+  MoonBot tail-check contract after valid trades packets.
 - Routes Engine API responses into runtime-owned pending actions and publishes
   typed events/snapshots when the requested state is ready. Applications should
   use the typed `MoonClient` handles; lower-level `api_*` receivers are
@@ -109,7 +109,7 @@ for event in client.drain_events() {
   `snapshot.market_history_readers_for(&market_handle)` when trades storage is
   enabled.
 - Maintains per-client `ServerTimeDelta` for order timestamps.
-- Runs the Delphi-style process-level NTP syncer by default with
+- Runs the process-level NTP syncer by default with
   `ClientConfig::new` (`pool.ntp.org`). Use `with_ntp_host` to override the
   host, or `without_ntp` only for tests and tools that manage corrected time
   themselves.
@@ -122,23 +122,22 @@ for event in client.drain_events() {
 
 ## String Compatibility Notes
 
-String fields sent by public helpers use the Delphi `WriteStringToStreamUtf8`
-shape: UTF-8 bytes, `Word` length prefix, and exactly that declared number of
-bytes in the packet body. If an input string is longer than `65535` bytes, the
-serialized length wraps to the low 16 bits and only that many leading bytes are sent,
-matching Delphi.
+String fields sent by public helpers use the MoonBot wire string shape: UTF-8
+bytes, `Word` length prefix, and exactly that declared number of bytes in the
+packet body. If an input string is longer than `65535` bytes, the serialized
+length wraps to the low 16 bits and only that many leading bytes are sent.
 
-String fields received from the server use Delphi `TEncoding.UTF8.GetString`
-replacement semantics: invalid UTF-8 bytes become ASCII `?`, not Unicode
-replacement character `U+FFFD`.
+String fields received from the server use MoonBot wire replacement semantics:
+invalid UTF-8 bytes become ASCII `?`, not Unicode replacement character
+`U+FFFD`.
 
 Applications use lifecycle events for UI status and alerting, not for recovery.
 
 ## Time Values
 
 MoonProto public API uses `MoonTime`, a Unix-milliseconds timestamp. The
-protocol's Delphi `TDateTime` floats are converted at packet boundaries, so UI
-code should read row helper methods instead of carrying raw protocol time:
+protocol wire-time floats are converted at packet boundaries, so UI code should
+read row helper methods instead of carrying raw protocol time:
 
 ```rust
 let unix_ms = candle.time().unix_millis();
