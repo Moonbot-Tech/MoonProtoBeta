@@ -6,14 +6,14 @@
 
 # MoonProto
 
-MoonProto is the client-side Rust SDK for building MoonBot-compatible terminals,
-dashboards, and control tools.
+MoonProto is the client-side Rust runtime SDK for building MoonBot-compatible
+terminals, dashboards, and control tools over a running MoonBot core.
 
 A running MoonBot core remains the execution engine: it connects to exchanges,
-owns orders, strategies, risk logic, balances, and trading state. This crate
-implements the client runtime over the MoonProto protocol: connection,
-authorization, reconnect, subscriptions, retained state, events, and typed
-commands.
+owns orders, strategies, risk logic, balances, and authoritative trading state.
+MoonProto keeps your terminal or tool connected to that core: transport,
+authorization, reconnect, subscriptions, retained state, events, and typed user
+intents.
 
 Your application provides the UI and product logic. MoonProto provides the live
 client-side bridge to the MoonBot core:
@@ -31,15 +31,51 @@ MoonBot core with MoonProto enabled
 exchange accounts, orders, strategies, balances
 ```
 
-The crate contains the transport layer, handshake, reconnect, reliable sliced
-datagrams, typed command parsers/builders, read-model state, and the owned
-runtime session API. Application code usually works with:
+This is not a thin REST-style wrapper around a dozen commands. A trading
+terminal needs continuously maintained state: markets, balances, orders,
+orderbooks, trades, candles, settings, strategies, reconnect recovery, and
+delivery guarantees. MoonProto keeps that live client-side model for you, so the
+application can focus on UI and product logic.
+
+## Mental Model
+
+Your application does not talk to exchanges directly through this crate. It
+talks to a MoonBot core that is already running with MoonProto enabled.
+
+MoonProto owns the live client runtime:
+
+- connects and authorizes;
+- restores after reconnect;
+- subscribes to streams;
+- applies incoming packets into retained state;
+- publishes snapshots and events;
+- sends typed user intents back to the core.
+
+Your application owns:
+
+- UI;
+- product workflow;
+- local persistence and preferences;
+- presentation of markets, orders, charts, alerts, and settings.
+
+## What The Library Provides
+
+Application code usually works with:
 
 - `MoonClient` as the connection/runtime owner;
 - snapshots and events for current markets, balances, orders, trades,
   orderbooks, candles, strategies, settings, and UI/chart facts;
 - typed intents such as subscribe, place/cancel/move order, refresh assets, and
   update settings.
+
+Internally, the crate contains:
+
+- built-in transport modes V0/V1/V2;
+- handshake, authorization, reconnect, and liveness handling;
+- reliable sliced datagrams and ACK/retry mechanics over UDP;
+- typed binary command parsers/builders;
+- retained read-model state for the terminal;
+- the owned runtime session API.
 
 MoonProto supports built-in transport modes V0, V1, and V2. The selected mode
 must match the server-side connection setting. Unsupported mode values normalize
