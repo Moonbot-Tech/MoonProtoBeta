@@ -21,6 +21,7 @@ impl Client {
     /// command because the Rust main loop is busy. If the client is gone, the
     /// command is rejected and the error is logged.
     #[cfg(any(test, feature = "diagnostics"))]
+    #[allow(dead_code)]
     pub(crate) fn send_cmd(
         &self,
         data: Vec<u8>,

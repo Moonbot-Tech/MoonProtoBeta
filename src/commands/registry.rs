@@ -20,6 +20,7 @@ pub(crate) const UK_ORDER_STATUS_SHORT: u8 = 2;
 /// `UK_OrderMove`: replace/cancel/stops/panic/VStop dedup by order task id.
 pub(crate) const UK_ORDER_MOVE: u8 = 3;
 /// `UK_StopMove`: legacy stop-move dedup ordinal.
+#[allow(dead_code)]
 pub(crate) const UK_STOP_MOVE: u8 = 4;
 /// `UK_StratSnapshot`: singleton strategy snapshot dedup key.
 pub(crate) const UK_STRAT_SNAPSHOT: u8 = 5;
@@ -36,6 +37,7 @@ pub(crate) const UK_IMMUNE_CLICKS: u8 = 10;
 /// `UK_LevManageSettings`: singleton leverage-management settings key.
 pub(crate) const UK_LEV_MANAGE_SETTINGS: u8 = 11;
 /// `UK_ArbPrices`: arbitrage price command key.
+#[allow(dead_code)]
 pub(crate) const UK_ARB_PRICES: u8 = 12;
 /// `UK_DexSwitch`: DEX switch command key.
 pub(crate) const UK_DEX_SWITCH: u8 = 13;
