@@ -1,5 +1,56 @@
-﻿use super::protocol_core::ProtocolCore;
+use super::protocol_core::ProtocolCore;
 use super::*;
+
+fn sliced_retry_round_trip_delay(round_trip_delay: i64) -> i64 {
+    if round_trip_delay <= 0 {
+        UNKNOWN_RTT_SLICED_FLOOR_MS
+    } else {
+        round_trip_delay
+    }
+}
+
+fn sliced_path_delay(round_trip_delay: i64, trip_delay_k: f64) -> i64 {
+    (round_trip_delay as f64 * trip_delay_k + 10.0).round() as i64
+}
+
+fn sliced_cycle_time_ms(actual_sleep_time: f64) -> f64 {
+    5.0f64.max(actual_sleep_time).min(15.0)
+}
+
+fn sliced_client_limit(can_send_rate: i32, actual_sleep_time: f64) -> usize {
+    (can_send_rate as f64 * sliced_cycle_time_ms(actual_sleep_time) * 0.001).round() as usize
+}
+
+fn sliced_used_limit_threshold(client_limit: usize) -> usize {
+    (client_limit as f64 * 0.8).round() as usize
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sliced_retry_round_trip_delay_uses_startup_floor_only_for_unknown_rtt() {
+        assert_eq!(
+            sliced_retry_round_trip_delay(0),
+            UNKNOWN_RTT_SLICED_FLOOR_MS
+        );
+        assert_eq!(
+            sliced_retry_round_trip_delay(-1),
+            UNKNOWN_RTT_SLICED_FLOOR_MS
+        );
+        assert_eq!(sliced_retry_round_trip_delay(37), 37);
+    }
+
+    #[test]
+    fn sliced_path_delay_and_budget_match_delphi_rounding() {
+        assert_eq!(sliced_path_delay(100, 1.1), 120);
+        assert_eq!(sliced_client_limit(262_120, 5.0), 1311);
+        assert_eq!(sliced_client_limit(262_120, 2.0), 1311);
+        assert_eq!(sliced_client_limit(262_120, 20.0), 3932);
+        assert_eq!(sliced_used_limit_threshold(1311), 1049);
+    }
+}
 
 impl ProtocolCore<'_> {
     pub(crate) fn apply_sliced_send_u_key_cleanup(&mut self, sliced: &[SendItem]) {
@@ -186,11 +237,7 @@ impl ProtocolCore<'_> {
             return;
         }
 
-        let retry_round_trip_delay = if client.round_trip_delay <= 0 {
-            UNKNOWN_RTT_SLICED_FLOOR_MS
-        } else {
-            client.round_trip_delay
-        };
+        let retry_round_trip_delay = sliced_retry_round_trip_delay(client.round_trip_delay);
 
         // Outer gate: only check if enough time passed (matches Common.pas:970).
         // Active-lib startup guard: before the first non-zero Ping RTT arrives,
@@ -212,13 +259,11 @@ impl ProtocolCore<'_> {
             }
         }
 
-        let path_delay =
-            (retry_round_trip_delay as f64 * client.trip_delay_k + 10.0).round() as i64;
-        let cycle_time_ms = 5.0f64.max(client.actual_sleep_time).min(15.0);
+        let path_delay = sliced_path_delay(retry_round_trip_delay, client.trip_delay_k);
         // Retry pacing runs every send tick. Use `* 0.001` instead of `/ 1000.0`
         // so the hot budget calculation avoids floating-point division while
         // preserving the same rounded byte limit.
-        let client_limit = (client.can_send_rate as f64 * cycle_time_ms * 0.001).round() as usize;
+        let client_limit = sliced_client_limit(client.can_send_rate, client.actual_sleep_time);
         let mut bytes_sent_at_once: usize = 0;
         client.last_checked_slices = cur_tm;
 
@@ -237,23 +282,17 @@ impl ProtocolCore<'_> {
             let mut sent_on_path_delay = false;
             sliced.last_checked = cur_tm;
 
-            for (block_num, slice_data) in sliced.slices.iter().enumerate() {
-                if sliced.is_block_acked(block_num) {
-                    continue;
-                } // ACK'd
-
-                // Per-piece check (matches :989)
-                if sliced.piece_last_checked[block_num] != prev_last_checked {
-                    continue;
-                }
-                if (cur_tm - sliced.piece_last_checked[block_num]).abs() <= path_delay {
+            for block_num in 0..sliced.slices.len() {
+                if !sliced.block_due_for_retry(block_num, prev_last_checked, cur_tm, path_delay) {
                     continue;
                 }
                 if bytes_sent_at_once >= client_limit {
                     break;
                 }
 
+                let slice_len = sliced.slices[block_num].len();
                 if trace_io_enabled() {
+                    let slice_data = &sliced.slices[block_num];
                     eprintln!(
                         "[mp-sliced-tx] t={} proto_t={} d={} block={}/{} retry_count={} sent_count={} bytes_this_tick={} client_limit={} path_delay={} rtt={} slice_hash={:016X} slice_head={}",
                         trace_elapsed_ms(),
@@ -271,13 +310,9 @@ impl ProtocolCore<'_> {
                         trace_head(slice_data, 16)
                     );
                 }
-                if sliced.piece_last_checked[block_num] > 0 {
-                    sent_on_path_delay = true;
-                }
+                sent_on_path_delay |= sliced.mark_block_sent(block_num, cur_tm);
                 to_send_indices.push((idx, block_num));
-                sliced.piece_last_checked[block_num] = cur_tm;
-                sliced.sent_count += 1;
-                bytes_sent_at_once += slice_data.len();
+                bytes_sent_at_once += slice_len;
             }
 
             // Sliced.LastChecked = Min(remaining Piece.LastChecked) (matches :996
@@ -285,10 +320,12 @@ impl ProtocolCore<'_> {
             sliced.refresh_last_checked_from_unacked(cur_tm);
 
             // Conditional increment (matches :998-999)
-            if prev_last_checked != sliced.last_checked
-                && sent_on_path_delay
-                && (sliced.last_retry_inc - cur_tm).abs() > path_delay
-            {
+            if sliced.should_increment_retry(
+                prev_last_checked,
+                cur_tm,
+                path_delay,
+                sent_on_path_delay,
+            ) {
                 sliced.retry_count += 1;
                 sliced.last_retry_inc = cur_tm;
             }
@@ -313,7 +350,7 @@ impl ProtocolCore<'_> {
         }
 
         // UsedSlicedLimit flag (matches :1009-1011)
-        let used_limit_threshold = (client_limit as f64 * 0.8).round() as usize;
+        let used_limit_threshold = sliced_used_limit_threshold(client_limit);
         if bytes_sent_at_once >= used_limit_threshold {
             client.used_sliced_limit = true;
         }

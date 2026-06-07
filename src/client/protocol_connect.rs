@@ -7,6 +7,43 @@ impl ProtocolCore<'_> {
         self.client.handshake_peer_mix = 0;
     }
 
+    fn next_primary_hello_state(&self) -> HelloWaitState {
+        if self.client.next_primary_hello_new_session
+            || self.client.lifecycle.was_ever_connected
+            || self.client.server_token != 0
+        {
+            HelloWaitState::PrimaryHelloNewSession
+        } else {
+            HelloWaitState::PrimaryHelloCold
+        }
+    }
+
+    fn begin_primary_hello(&mut self, cur_tm: i64) {
+        let state = self.next_primary_hello_state();
+        self.client.soft_reconnect = false;
+        self.client.full_reset();
+        self.client.clear_outbound_session_data();
+        self.client.server_token = 0;
+        self.client.peer_app_token = 0;
+        self.client.authorized = false;
+        self.new_handshake_rnd();
+        self.client.start_hello_wait(state, cur_tm);
+        self.send_hello();
+        self.client.next_primary_hello_new_session = false;
+    }
+
+    fn send_rebind_hello_again(&mut self, cur_tm: i64, new_window: bool) {
+        if new_window {
+            self.new_handshake_rnd();
+            self.client
+                .start_hello_wait(HelloWaitState::RebindHelloAgain, cur_tm);
+        } else {
+            self.client
+                .set_hello_wait_state(HelloWaitState::RebindHelloAgain);
+        }
+        self.send_hello_again();
+    }
+
     pub(crate) fn send_hello(&mut self) {
         self.client.client_token = self.client.client_token.wrapping_add(1);
         let mut hello = handshake::Hello::new(self.client.client_token, self.client.app_token);
@@ -83,29 +120,9 @@ impl ProtocolCore<'_> {
         match self.client.hello_wait_state {
             HelloWaitState::Idle => {
                 if self.client.soft_reconnect && self.client.server_token != 0 {
-                    self.new_handshake_rnd();
-                    self.client
-                        .start_hello_wait(HelloWaitState::RebindHelloAgain, cur_tm);
-                    self.send_hello_again();
+                    self.send_rebind_hello_again(cur_tm, true);
                 } else {
-                    let state = if self.client.next_primary_hello_new_session
-                        || self.client.lifecycle.was_ever_connected
-                        || self.client.server_token != 0
-                    {
-                        HelloWaitState::PrimaryHelloNewSession
-                    } else {
-                        HelloWaitState::PrimaryHelloCold
-                    };
-                    self.client.soft_reconnect = false;
-                    self.client.full_reset();
-                    self.client.clear_outbound_session_data();
-                    self.client.server_token = 0;
-                    self.client.peer_app_token = 0;
-                    self.client.authorized = false;
-                    self.new_handshake_rnd();
-                    self.client.start_hello_wait(state, cur_tm);
-                    self.send_hello();
-                    self.client.next_primary_hello_new_session = false;
+                    self.begin_primary_hello(cur_tm);
                 }
             }
             HelloWaitState::PrimaryHelloCold | HelloWaitState::PrimaryHelloNewSession => {
@@ -147,13 +164,7 @@ impl ProtocolCore<'_> {
         }
 
         self.client.auth_status = AuthStatus::Offline;
-        if !waiting_rebind {
-            self.client.waiting_hello_start = cur_tm;
-            self.new_handshake_rnd();
-        }
-        self.client
-            .set_hello_wait_state(HelloWaitState::RebindHelloAgain);
-        self.send_hello_again();
+        self.send_rebind_hello_again(cur_tm, !waiting_rebind);
         self.client.last_sent_hello = cur_tm;
     }
 

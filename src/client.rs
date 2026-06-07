@@ -170,6 +170,14 @@ impl HelloWaitState {
     pub(crate) fn allows_fine(self) -> bool {
         matches!(self, Self::PrimaryImFriendSent | Self::RebindHelloAgain)
     }
+
+    #[inline]
+    pub(crate) fn allows_wrong_hello(self) -> bool {
+        matches!(
+            self,
+            Self::PrimaryHelloCold | Self::PrimaryHelloNewSession | Self::PrimaryImFriendSent
+        )
+    }
 }
 
 #[derive(Clone)]
@@ -436,6 +444,21 @@ impl Client {
     #[inline]
     pub(crate) fn same_handshake_rnd(&self, rnd: &[u8; 16]) -> bool {
         self.handshake_rnd == *rnd
+    }
+
+    #[inline]
+    pub(crate) fn matches_current_handshake(&self, hello: &handshake::Hello) -> bool {
+        self.same_handshake_rnd(&hello.rnd)
+    }
+
+    #[inline]
+    pub(crate) fn matches_request_bound_reset(&self, hello: &handshake::Hello) -> bool {
+        self.matches_current_handshake(hello) && hello.server_token == 0 && hello.peer_mix == 0
+    }
+
+    #[inline]
+    pub(crate) fn matches_current_fine(&self, hello: &handshake::Hello) -> bool {
+        self.matches_current_handshake(hello) && hello.peer_mix == 0
     }
 
     #[inline]

@@ -76,12 +76,7 @@ impl ProtocolCore<'_> {
         let _ = recv_bytes;
         match cmd {
             Command::WrongHello => {
-                if matches!(
-                    self.client.hello_wait_state,
-                    HelloWaitState::PrimaryHelloCold
-                        | HelloWaitState::PrimaryHelloNewSession
-                        | HelloWaitState::PrimaryImFriendSent
-                ) {
+                if self.client.hello_wait_state.allows_wrong_hello() {
                     self.apply_wrong_hello();
                 }
             }
@@ -99,10 +94,7 @@ impl ProtocolCore<'_> {
                     let _ = timestamp_ms;
                     return;
                 };
-                if !self.client.same_handshake_rnd(&hello.rnd)
-                    || hello.server_token != 0
-                    || hello.peer_mix != 0
-                {
+                if !self.client.matches_request_bound_reset(&hello) {
                     let _ = timestamp_ms;
                     return;
                 }
@@ -130,7 +122,7 @@ impl ProtocolCore<'_> {
             Command::WhoAreYou.to_byte(),
             payload,
         ) {
-            if !self.client.same_handshake_rnd(&hello.rnd) {
+            if !self.client.matches_current_handshake(&hello) {
                 let _ = (recv_bytes, timestamp_ms);
                 return Duration::ZERO;
             }
@@ -177,7 +169,7 @@ impl ProtocolCore<'_> {
                 let _ = (recv_bytes, timestamp_ms);
                 return;
             };
-            if !self.client.same_handshake_rnd(&hello.rnd) || hello.peer_mix != 0 {
+            if !self.client.matches_current_fine(&hello) {
                 let _ = (recv_bytes, timestamp_ms);
                 return;
             }

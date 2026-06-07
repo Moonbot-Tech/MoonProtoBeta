@@ -1395,6 +1395,53 @@ fn primary_hello_wait_does_not_retry_hello_again_before_session_exists() {
 }
 
 #[test]
+fn hard_primary_hello_starts_new_session_window_and_clears_old_session_state() {
+    let mut client = dummy_client();
+    client.lifecycle.was_ever_connected = true;
+    client.next_primary_hello_new_session = true;
+    client.soft_reconnect = false;
+    client.authorized = true;
+    client.server_token = 0xCAFE;
+    client.peer_app_token = 0xBEEF;
+    client.handshake_rnd = [0x31; 16];
+    client.pending_h.push(SendItem {
+        data: vec![0x11],
+        cmd: Command::UI.to_byte(),
+        encrypted: true,
+        priority: SendPriority::High,
+        retry_left: 1,
+        max_retries: 1,
+        msg_num: 42,
+        last_sent_at: 0,
+        u_key: UniqueKey::none(),
+    });
+    let token_before = client.client_token;
+
+    ProtocolCore {
+        client: &mut client,
+    }
+    .check_hello_send(100);
+
+    assert_eq!(
+        client.hello_wait_state,
+        HelloWaitState::PrimaryHelloNewSession
+    );
+    assert!(client.waiting_hello);
+    assert_eq!(client.waiting_hello_start, 100);
+    assert!(!client.soft_reconnect);
+    assert!(!client.authorized);
+    assert_eq!(client.server_token, 0);
+    assert_eq!(client.peer_app_token, 0);
+    assert!(client.pending_h.is_empty());
+    assert_eq!(client.client_token, token_before.wrapping_add(1));
+    assert_ne!(
+        client.handshake_rnd, [0x31; 16],
+        "hard primary Hello must create a fresh request-bound handshake rnd",
+    );
+    assert!(!client.next_primary_hello_new_session);
+}
+
+#[test]
 fn soft_reconnect_waiting_hello_still_retries_hello_again() {
     let mut client = dummy_client();
     install_session_key(&mut client);
@@ -1423,6 +1470,37 @@ fn soft_reconnect_waiting_hello_still_retries_hello_again() {
         token_before + 2,
         "soft reconnect keeps the Delphi HelloAgain retry behavior",
     );
+}
+
+#[test]
+fn rebind_retry_keeps_existing_handshake_window() {
+    let mut client = dummy_client();
+    install_session_key(&mut client);
+    client.server_token = 0x1234;
+    client.authorized = true;
+    client.need_connect = true;
+    client.start_hello_wait(HelloWaitState::RebindHelloAgain, 100);
+    client.handshake_rnd = [0x42; 16];
+    client.last_sent_hello = 100;
+    client.last_online = 0;
+    let token_before = client.client_token;
+
+    ProtocolCore {
+        client: &mut client,
+    }
+    .check_offline_reconnect(350);
+
+    assert_eq!(client.hello_wait_state, HelloWaitState::RebindHelloAgain);
+    assert_eq!(
+        client.waiting_hello_start, 100,
+        "retry of the same rebind window must not restart freshness window",
+    );
+    assert_eq!(
+        client.handshake_rnd, [0x42; 16],
+        "retry of the same HelloAgain window must keep the request-bound rnd",
+    );
+    assert_eq!(client.client_token, token_before.wrapping_add(1));
+    assert_eq!(client.auth_status, AuthStatus::Offline);
 }
 
 #[test]
