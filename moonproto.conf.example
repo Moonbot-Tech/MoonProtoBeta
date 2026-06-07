@@ -1,0 +1,30 @@
+# moonproto.conf.example
+#
+# Example configuration for a moonproto client.
+#
+# Usage:
+#   1. Copy this file to `moonproto.conf` (or any name you prefer).
+#   2. Edit the values.
+#   3. Read the file in your own code and pass the values into the library.
+#      See examples/trading_flow.rs for a minimal connection.
+#
+# Format: `key = value`, one parameter per line.
+# Comments: lines starting with `#` are ignored.
+# Blank lines are ignored.
+#
+# ============================================================================
+# NTP - time synchronization
+# ============================================================================
+#
+# NTP server host used to correct the client's local time.
+# Used for correct display of application-command timestamps (orders, trades)
+# in the UI. NOT used for replay protection or encryption.
+#
+# Default (if omitted): pool.ntp.org
+#
+# Alternatives:
+#   - time.cloudflare.com
+#   - time.google.com
+#   - <moonbot-server-ip>:<port> - if the bot provides its own NTP (depends on the server config)
+#
+ntp_host = pool.ntp.org

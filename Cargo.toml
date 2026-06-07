@@ -1,0 +1,34 @@
+[package]
+name = "moonproto"
+version = "0.1.0"
+edition = "2021"
+description = "Rust client library for the MoonProto UDP protocol used by MoonBot servers."
+repository = "https://github.com/Moonbot-Tech/MoonProtoBeta"
+license = "Apache-2.0"
+publish = false
+
+[features]
+diagnostics = []
+diagnostic-trace = ["diagnostics"]
+
+[[test]]
+name = "fire_test"
+path = "tests/fire_test.rs"
+required-features = ["diagnostics"]
+
+[dependencies]
+aes-gcm = "0.10"
+sha3 = "0.10"
+rand = "0.8"
+base64 = "0.22"
+flate2 = "1"
+socket2 = "0.5"
+log = "0.4"
+zerocopy = { version = "0.8.48", features = ["derive"] }
+polling = "3.11.0"
+parking_lot = { version = "0.12", features = ["arc_lock"] }
+crc32c = "0.6"
+zeroize = "1.8"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

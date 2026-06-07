@@ -1,0 +1,59 @@
+# Arbitrage State
+
+Arbitrage relay packets are low-level transport details. The normal Active Lib
+state is per market.
+
+When the current client settings enable an arbitrage platform, incoming compact
+arb prices are applied to the live `Market` object:
+
+```rust
+use moonproto::ArbPlatformCode;
+
+let Some(state) = client.snapshot() else { return; };
+
+if let Some(btc) = state.markets().get("BTCUSDT") {
+    if let Some(slot) = btc.arb_slot(ArbPlatformCode::ByBit) {
+        println!(
+            "price={} deposit_blocked={} withdraw_blocked={}",
+            slot.now.price,
+            slot.isolated_flags.deposit_blocked(),
+            slot.isolated_flags.withdraw_blocked()
+        );
+    }
+}
+```
+
+Arb slots are keyed by `ArbPlatformCode`. Each slot is the market-level arb
+state needed by UI code; the temporary mark-and-sweep staging byte is not public
+API:
+
+```rust
+pub struct MarketArbSlot {
+    pub enabled: bool,
+    pub isolated_flags: ArbIsolationFlags,
+    pub now: MarketArbNowEntry,
+}
+```
+
+Isolation snapshots are committed as full replacements: received temporary flags
+replace the current `isolated_flags`, then the temporary staging flags are
+cleared.
+Use `MarketHandle::arb_now(ArbPlatformCode::...)` when the UI only needs the
+latest price/time:
+
+```rust
+let Some(now) = btc.arb_now(ArbPlatformCode::ByBit) else { return; };
+let price = now.price;
+let time_ms = now.unix_millis();
+```
+
+If the UI needs the retained 10-point arb history, use
+`MarketArbSlot::points_oldest_first()` and each point's `time()` /
+`unix_millis()` helpers. The raw storage ring and cursor are internal.
+
+## Events
+
+`Event::Arb(ArbEvent)` is a signal/summary that compact arb data was applied.
+It intentionally does not expose raw server `market_index` blocks as the normal
+UI surface. Do not build chart UI around packet indexes; use the selected
+`MarketHandle::arb_slot` / `arb_now` instead.
