@@ -1,10 +1,8 @@
-//! `MPC_Order` channel: Delphi `TBaseTradeCommand` payloads.
-//!
-//! Delphi source: `MoonProto/MoonProtoTradeStruct.pas`.
+//! `MPC_Order` channel payloads.
 //!
 //! ## Channel Shape
 //!
-//! Each command follows the Delphi inheritance layout:
+//! Each command follows the MoonProto wire inheritance layout:
 //! - `TBaseCommand` — `cmd_id(1) + ver(2) + UID(8)` = 11-byte header.
 //! - `TBaseTradeCommand` extends → CmdClass = MPC_Order (CmdId=0).
 //! - `TBaseMarketCommand` extends → + `currency(1) + platform(1) + market_name:UTF8`.
@@ -14,10 +12,9 @@
 //!
 //! ## Packed Records
 //!
-//! `TOrderCompact`, `TStopSettings`, and `TOrderUpdateData` are Delphi
-//! `packed record` values. Public terminal types expose normal fields, while
-//! the private `Wire*` structs mirror the fixed wire layout with compile-time
-//! size checks.
+//! Order legs, stop settings, and order update rows are fixed packed wire
+//! records. Public terminal types expose normal fields, while the private
+//! `Wire*` structs mirror the fixed layout with compile-time size checks.
 
 use super::registry::{read_string, write_string, CURRENT_PROTO_CMD_VER};
 use std::convert::TryInto;
@@ -62,9 +59,10 @@ const MAX_ALL_STATUSES_ORDERS: usize = u16::MAX as usize + 1;
 
 /// Long/short filter for bulk order actions.
 ///
-/// This is the user-facing form of Delphi `TFixedPosition`: terminal code picks
-/// which visible position side the button applies to, while the wire byte stays
-/// inside the serializer.
+/// User-facing long/short/both selector for bulk buttons.
+///
+/// Terminal code picks which visible position side the button applies to, while
+/// the wire byte stays inside the serializer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PositionFilter {
     Both,
@@ -84,9 +82,9 @@ impl PositionFilter {
 
 /// Trader-visible bulk replace mode.
 ///
-/// This is the user-facing form of Delphi `TReplaceMultiKind`. It describes
-/// how MoonBot chooses target orders for the bulk move; the numeric command
-/// mode remains an internal wire detail.
+/// Describes how MoonBot chooses target orders for a bulk move.
+///
+/// The numeric command mode remains an internal wire detail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BulkMoveKind {
     Shift,
@@ -112,11 +110,11 @@ impl BulkMoveKind {
     }
 }
 
-/// Parameters for `TMoveAllSellsCommand`.
+/// Parameters for a sell-side bulk move.
 ///
 /// Applications should create this with the named constructors below. The raw
-/// fields mirror the Delphi packet modes and stay visible to crate internals so
-/// the sender can serialize the exact wire command.
+/// fields mirror packet modes and stay visible to crate internals so the sender
+/// can serialize the exact wire command.
 #[derive(Debug, Clone, Copy)]
 pub struct MoveAllSellsParams {
     pub(crate) cmd_type: MoveAllCmdType,
@@ -127,7 +125,7 @@ pub struct MoveAllSellsParams {
 }
 
 impl MoveAllSellsParams {
-    /// Move all matching sell orders with a Delphi bulk-replace mode.
+    /// Move all matching sell orders with a bulk-replace mode.
     pub fn replace_kind(move_kind: BulkMoveKind, price: f64, side: PositionFilter) -> Self {
         Self {
             cmd_type: MoveAllCmdType::MoveKind,
@@ -152,7 +150,7 @@ impl MoveAllSellsParams {
         }
     }
 
-    /// Delphi `%`/personal mode for sell-side bulk move.
+    /// Percent/personal mode for sell-side bulk move.
     pub fn percent(price: f64, side: PositionFilter) -> Self {
         Self {
             cmd_type: MoveAllCmdType::Pers,
@@ -164,11 +162,11 @@ impl MoveAllSellsParams {
     }
 }
 
-/// Parameters for `TMoveAllBuysCommand`.
+/// Parameters for a buy-side bulk move.
 ///
 /// Applications should create this with the named constructors below. Buy bulk
-/// moves have fewer modes than sell bulk moves: Delphi supports `MoveKind` and
-/// `%` (`Pers`), but not buy-side `PriceZone`.
+/// moves have fewer modes than sell bulk moves: the core supports `MoveKind`
+/// and `%` (`Pers`), but not buy-side `PriceZone`.
 #[derive(Debug, Clone, Copy)]
 pub struct MoveAllBuysParams {
     pub(crate) cmd_type: MoveAllBuysCmdType,
@@ -178,7 +176,7 @@ pub struct MoveAllBuysParams {
 }
 
 impl MoveAllBuysParams {
-    /// Move all matching buy orders with a Delphi bulk-replace mode.
+    /// Move all matching buy orders with a bulk-replace mode.
     pub fn replace_kind(move_kind: BulkMoveKind, price: f64, side: PositionFilter) -> Self {
         Self {
             cmd_type: MoveAllBuysCmdType::MoveKind,
@@ -188,7 +186,7 @@ impl MoveAllBuysParams {
         }
     }
 
-    /// Delphi `%`/personal mode for buy-side bulk move.
+    /// Percent/personal mode for buy-side bulk move.
     pub fn percent(price: f64, side: PositionFilter) -> Self {
         Self {
             cmd_type: MoveAllBuysCmdType::Pers,
@@ -202,7 +200,7 @@ impl MoveAllBuysParams {
 /// Parameters for raw `TVStopUpdate` builders.
 ///
 /// High-level client wrappers derive `status` from the local `Orders` state,
-/// matching Delphi `BOrderWorker.SendVStopIfChanged`. Low-level builders keep
+/// matching the core's local pre-send gate. Low-level builders keep
 /// `epoch` and `status` explicit for protocol tests and replay tools.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct VStopUpdateParams {
@@ -215,12 +213,11 @@ pub(crate) struct VStopUpdateParams {
 
 /// `TClosedSellOrderReportCommand` (TradeStruct.pas:302-313).
 ///
-/// This is not an order-state update. Delphi sends the exact expanded SQL that
-/// was written to the Orders database by `TDBSaver.BuildCommandSql`, so Rust
-/// keeps it as an event payload instead of trying to reconstruct a second
-/// Orders model from individual fields. `DBID` is the MoonBot Orders database
-/// row id used by external mirrors to apply later SQL updates to the same
-/// report record.
+/// This is not an order-state update. The core sends the exact expanded SQL
+/// that was written to the MoonBot Orders database, so Active Lib keeps it as
+/// an event payload instead of trying to reconstruct a second Orders model from
+/// individual fields. `DBID` is the database row id used by external mirrors to
+/// apply later SQL updates to the same report record.
 #[derive(Debug, Clone)]
 pub struct ClosedSellOrderReport {
     pub header: BaseCommandHeader,

@@ -26,13 +26,28 @@ impl ProtocolCore<'_> {
 
         // Delphi `Execute` under `SendLock`:
         // GetCopySendList; GetCopyAcks; FClient.CopyRecvdData.
+        #[cfg(any(test, feature = "diagnostics"))]
+        let send_lock_snapshot_start = Instant::now();
         self.get_copy_send_lock_snapshot(
             &mut copy_send_list,
             &mut copy_send_list_h,
             &mut copy_send_list_l,
             &mut copy_acks,
         );
+        #[cfg(any(test, feature = "diagnostics"))]
+        self.client
+            .metrics
+            .protocol_metrics
+            .record_profile_phase_labeled(
+                ProfilePhase::SendLockSnapshot,
+                send_lock_snapshot_start.elapsed(),
+                u8::MAX,
+                u8::MAX,
+                copy_send_list.len() + copy_send_list_h.len() + copy_send_list_l.len(),
+            );
 
+        #[cfg(any(test, feature = "diagnostics"))]
+        let check_sening_start = Instant::now();
         self.check_sening_data(
             &copy_send_list,
             &mut copy_send_list_h,
@@ -40,6 +55,17 @@ impl ProtocolCore<'_> {
             &mut copy_acks,
             cur_tm,
         );
+        #[cfg(any(test, feature = "diagnostics"))]
+        self.client
+            .metrics
+            .protocol_metrics
+            .record_profile_phase_labeled(
+                ProfilePhase::CheckSeningData,
+                check_sening_start.elapsed(),
+                u8::MAX,
+                u8::MAX,
+                copy_send_list.len() + copy_send_list_h.len() + copy_send_list_l.len(),
+            );
         copy_send_list.clear();
         copy_send_list_h.clear();
         copy_send_list_l.clear();

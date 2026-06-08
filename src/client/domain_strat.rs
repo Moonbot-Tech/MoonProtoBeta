@@ -27,10 +27,9 @@ impl Client {
     ///
     /// `data` is only the `TStratSnapshot.Data` blob. The method adds the required
     /// Delphi fields: `ServerEpoch`, `ClientMaxLastDate`, `Size`, and `Full`.
-    /// Diagnostic/tools path can use [`Client::strat_send_snapshot_batch`] when
-    /// they already hold decoded `StrategySnapshot` values rather than a
-    /// prebuilt serializer payload. Regular applications use
-    /// `MoonClient::strategies().sync_local_strategies(...)`.
+    /// Regular applications use
+    /// `MoonClient::strategies().sync_local_strategies(...)`; the active runtime
+    /// owns the decoded list and reuses its cached serializer payload.
     #[doc(hidden)]
     pub(crate) fn strat_send_snapshot_payload(
         &self,
@@ -46,32 +45,6 @@ impl Client {
             client_max_last_date,
             full,
             data,
-        );
-        self.send_strat_snapshot_command(raw);
-    }
-
-    /// `TStratSnapshot` (Strat CmdId=2, Sliced, UK_StratSnapshot) from typed
-    /// strategy snapshots.
-    ///
-    /// This is the high-level counterpart to Delphi `CreateFromStrats` /
-    /// `CreateFromList`: it serializes the batch, computes `ClientMaxLastDate`,
-    /// and sends a valid CmdId=2 packet. `schema` must be the live
-    /// `TStratSchema` fetched during Init.
-    #[doc(hidden)]
-    pub(crate) fn strat_send_snapshot_batch(
-        &self,
-        server_epoch: u64,
-        full: bool,
-        schema: &crate::commands::strategy_schema::StrategySchema,
-        strategies: &[crate::commands::strategy_serializer::StrategySnapshot],
-    ) {
-        let uid: u64 = rand::random();
-        let raw = crate::commands::strat::build_snapshot_from_strategies(
-            uid,
-            server_epoch,
-            full,
-            schema,
-            strategies,
         );
         self.send_strat_snapshot_command(raw);
     }

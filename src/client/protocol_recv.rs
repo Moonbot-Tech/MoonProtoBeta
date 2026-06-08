@@ -132,18 +132,37 @@ impl ProtocolCore<'_> {
         protocol_metrics.record_recv_packet();
         #[cfg(any(test, feature = "diagnostics"))]
         let protocol_start = Instant::now();
+        #[cfg(any(test, feature = "diagnostics"))]
+        let protocol_cpu_start = crate::client::thread_cpu::ThreadCpuTimer::start();
         let mut protocol_wait = Duration::ZERO;
         #[cfg(any(test, feature = "diagnostics"))]
         let mut metric_cmd = u8::MAX;
         #[cfg(any(test, feature = "diagnostics"))]
         let mut metric_payload_len = datagram.len();
 
-        let continue_recv = if let Some((hdr, payload)) =
-            crate::transport::transport_unpack_with_mac(
-                &self.client.transport.mac_ctx,
-                datagram,
-                self.client.cfg.transport_mode.to_byte(),
-            ) {
+        #[cfg(any(test, feature = "diagnostics"))]
+        let unpack_start = Instant::now();
+        let unpacked = crate::transport::transport_unpack_with_mac(
+            &self.client.transport.mac_ctx,
+            datagram,
+            self.client.cfg.transport_mode.to_byte(),
+        );
+        #[cfg(any(test, feature = "diagnostics"))]
+        {
+            let (cmd, payload_len) = unpacked
+                .as_ref()
+                .map(|(hdr, payload)| (Command::from_byte(hdr.cmd).to_byte(), payload.len()))
+                .unwrap_or((u8::MAX, datagram.len()));
+            protocol_metrics.record_profile_phase_labeled(
+                ProfilePhase::RecvUnpack,
+                unpack_start.elapsed(),
+                cmd,
+                u8::MAX,
+                payload_len,
+            );
+        }
+
+        let continue_recv = if let Some((hdr, payload)) = unpacked {
             #[cfg(any(test, feature = "diagnostics"))]
             {
                 metric_cmd = Command::from_byte(hdr.cmd).to_byte();
@@ -264,6 +283,24 @@ impl ProtocolCore<'_> {
             metric_cmd,
             metric_payload_len,
         );
+        #[cfg(any(test, feature = "diagnostics"))]
+        {
+            let cpu_elapsed = protocol_cpu_start.elapsed();
+            if let Some(cpu_duration) = cpu_elapsed.time {
+                protocol_metrics.record_reader_thread_cpu_labeled(
+                    cpu_duration,
+                    metric_cmd,
+                    metric_payload_len,
+                );
+            }
+            if let Some(cpu_cycles) = cpu_elapsed.cycles {
+                protocol_metrics.record_reader_thread_cycles_labeled(
+                    cpu_cycles,
+                    metric_cmd,
+                    metric_payload_len,
+                );
+            }
+        }
         continue_recv
     }
 
@@ -272,6 +309,45 @@ impl ProtocolCore<'_> {
     // (Named `route_command` to stay distinct from the runtime-loop
     // `handle_command`, which dispatches app-level `RuntimeCommand`s.)
     pub(crate) fn route_command(
+        &mut self,
+        raw_cmd: u8,
+        payload: &[u8],
+        recv_bytes: u64,
+        total_recv_after: u64,
+        timestamp_ms: i64,
+        mode: &mut RunMode<'_>,
+        protocol_wait: &mut Duration,
+    ) -> bool {
+        #[cfg(any(test, feature = "diagnostics"))]
+        let route_start = Instant::now();
+        #[cfg(any(test, feature = "diagnostics"))]
+        let route_wait_before = *protocol_wait;
+        let result = self.route_command_inner(
+            raw_cmd,
+            payload,
+            recv_bytes,
+            total_recv_after,
+            timestamp_ms,
+            mode,
+            protocol_wait,
+        );
+        #[cfg(any(test, feature = "diagnostics"))]
+        self.client
+            .metrics
+            .protocol_metrics
+            .record_profile_phase_labeled(
+                ProfilePhase::RecvRoute,
+                route_start
+                    .elapsed()
+                    .saturating_sub(protocol_wait.saturating_sub(route_wait_before)),
+                raw_cmd,
+                metric_api_method(Command::from_byte(raw_cmd), payload),
+                payload.len(),
+            );
+        result
+    }
+
+    fn route_command_inner(
         &mut self,
         raw_cmd: u8,
         payload: &[u8],
@@ -426,11 +502,24 @@ impl ProtocolCore<'_> {
             }
             return;
         }
+        #[cfg(any(test, feature = "diagnostics"))]
+        let decode_start = Instant::now();
         let decoded = Client::decode_command_payload_shared(
             &mut self.client.recv.data_read_state,
             raw_cmd,
             payload,
         );
+        #[cfg(any(test, feature = "diagnostics"))]
+        self.client
+            .metrics
+            .protocol_metrics
+            .record_profile_phase_labeled(
+                ProfilePhase::DecodeShared,
+                decode_start.elapsed(),
+                raw_cmd,
+                u8::MAX,
+                payload.len(),
+            );
         let Some((cmd, payload)) = decoded else {
             if let Some(stats) = sliced_stats {
                 self.apply_reader_sliced_stats(stats);
@@ -462,6 +551,10 @@ impl ProtocolCore<'_> {
             }
             return;
         }
+        #[cfg(any(test, feature = "diagnostics"))]
+        let payload_len = payload.len();
+        #[cfg(any(test, feature = "diagnostics"))]
+        let decode_start = Instant::now();
         let Some((cmd, payload)) = Client::decode_command_payload_owned(
             &mut self.client.recv.data_read_state,
             raw_cmd,
@@ -469,6 +562,17 @@ impl ProtocolCore<'_> {
         ) else {
             return;
         };
+        #[cfg(any(test, feature = "diagnostics"))]
+        self.client
+            .metrics
+            .protocol_metrics
+            .record_profile_phase_labeled(
+                ProfilePhase::DecodeOwned,
+                decode_start.elapsed(),
+                raw_cmd,
+                u8::MAX,
+                payload_len,
+            );
         self.finish_decoded_command(cmd, payload, timestamp_ms, sliced_stats, mode);
     }
 
@@ -582,6 +686,12 @@ impl ProtocolCore<'_> {
         if let Some(stats) = sliced_stats {
             self.apply_reader_sliced_stats(stats);
         }
+        #[cfg(any(test, feature = "diagnostics"))]
+        let dispatch_api_method = metric_api_method(Command::from_byte(cmd), &payload);
+        #[cfg(any(test, feature = "diagnostics"))]
+        let dispatch_payload_len = payload.len();
+        #[cfg(any(test, feature = "diagnostics"))]
+        let dispatch_start = Instant::now();
         self.client_new_data(
             cmd,
             payload,
@@ -590,5 +700,16 @@ impl ProtocolCore<'_> {
             timestamp_ms,
             mode,
         );
+        #[cfg(any(test, feature = "diagnostics"))]
+        self.client
+            .metrics
+            .protocol_metrics
+            .record_profile_phase_labeled(
+                ProfilePhase::DispatchDecoded,
+                dispatch_start.elapsed(),
+                cmd,
+                dispatch_api_method,
+                dispatch_payload_len,
+            );
     }
 }

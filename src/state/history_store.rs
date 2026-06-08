@@ -103,9 +103,8 @@ pub(crate) struct MarketHistoryStore {
     evicted_futures_for_compaction: Vec<TradeHistoryRow>,
     mini_scratch: Vec<MiniCandle>,
     rolling_volumes: RollingTradeVolumes,
-    /// In-progress 5m candle (Delphi `TMarket.FCandle`) — a separate
-    /// accumulator, NOT stored in the `candles_5m` ring (which holds only
-    /// sealed, end-stamped candles).
+    /// In-progress 5m candle: a separate accumulator, NOT stored in the
+    /// `candles_5m` ring (which holds only sealed, end-stamped candles).
     current_candle: Option<Candle5mRow>,
     candle_deltas_dirty: bool,
     candle_deltas_bucket: Option<i64>,
@@ -234,10 +233,10 @@ impl MarketHistoryStore {
         });
     }
 
-    /// Delphi `TMarket.AddFrom` retained LastPrice row.
+    /// Retained LastPrice row from market-price updates.
     ///
     /// The caller passes `p_last = (Bid + Ask) / 2` from `UpdateMarketsList`.
-    /// Delphi appends only for BTC markets or base-USDT markets, only when a
+    /// Active Lib appends only for BTC markets or base-USDT markets, only when a
     /// real bid/ask was present, and only after the caller checked `pLast`.
     // parity: MoonBot MarketsU.pas:TMarket.AddFrom
     pub(crate) fn append_last_price(

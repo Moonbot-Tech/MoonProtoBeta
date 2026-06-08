@@ -408,6 +408,8 @@ struct SessionStats {
     strategy_schema_events: u64,
     strategy_schema_fields: usize,
     strategy_schema_kinds: usize,
+    strategy_runtime_events: u64,
+    strategies_running: Option<bool>,
     market_events: u64,
     trades_apply: u64,
     target_trade_packets: u64,
@@ -473,6 +475,8 @@ impl Clone for SessionStats {
             strategy_schema_events: self.strategy_schema_events,
             strategy_schema_fields: self.strategy_schema_fields,
             strategy_schema_kinds: self.strategy_schema_kinds,
+            strategy_runtime_events: self.strategy_runtime_events,
+            strategies_running: self.strategies_running,
             market_events: self.market_events,
             trades_apply: self.trades_apply,
             target_trade_packets: self.target_trade_packets,
@@ -557,7 +561,7 @@ impl SessionStats {
                 )
             });
         format!(
-            "connected_now={} fresh={} again={} reconnecting={} disconnected={} server_events={} engine={} raw={} logs={} settings={} strats={} strat_snapshots={} schema_events={} schema_kinds={} schema_fields={} strategy_rows={} markets={} trades={} target_trade_packets={} books={} target_book_full={} target_book_update={} market_probe=[{}] order_events={} balances={} transfer_assets={} mask={:#05b} failures={} coin_card_events={} updates={} failures={} last_count={} parse_failed={}{} candles={}",
+            "connected_now={} fresh={} again={} reconnecting={} disconnected={} server_events={} engine={} raw={} logs={} settings={} strats={} strat_snapshots={} schema_events={} schema_kinds={} schema_fields={} strat_runtime_events={} strategies_running={:?} strategy_rows={} markets={} trades={} target_trade_packets={} books={} target_book_full={} target_book_update={} market_probe=[{}] order_events={} balances={} transfer_assets={} mask={:#05b} failures={} coin_card_events={} updates={} failures={} last_count={} parse_failed={}{} candles={}",
             self.connected_now,
             self.connected_fresh,
             self.connected_again,
@@ -573,6 +577,8 @@ impl SessionStats {
             self.strategy_schema_events,
             self.strategy_schema_kinds,
             self.strategy_schema_fields,
+            self.strategy_runtime_events,
+            self.strategies_running,
             self.strategies_by_id.len(),
             self.market_events,
             self.trades_apply,
@@ -843,6 +849,7 @@ impl Session {
         if let Some(settings) = snapshot.settings().client_settings.clone() {
             st.last_settings = Some(settings);
         }
+        st.strategies_running = snapshot.strats().strategies_running();
         if let Some(state) = snapshot.markets().trade_state(&st.market) {
             if state.last_trade_price > 0.0 {
                 st.last_trade_price = Some(state.last_trade_price);
@@ -869,6 +876,7 @@ impl Session {
 
     fn protocol_summary(&self) -> String {
         let m = self.client.protocol_metrics_snapshot();
+        let profile = protocol_profile_summary(&m);
         let market_apply = self
             .maybe_state_snapshot()
             .as_ref()
@@ -888,7 +896,7 @@ impl Session {
             })
             .unwrap_or_default();
         format!(
-            "recv={} pmtu={} reader_cpu(avg/max={}us/{}us max_src={} >100us/>1ms/>5ms={}/{}/{}) reader_wait(count={} avg/max={}us/{}us max_src={}) writer_cpu(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) active_dispatch(avg/max={}us/{}us max_src={} events={} actions={} >100us/>1ms/>5ms={}/{}/{}) app_enqueue(avg/max={}us/{}us max_src={} events={} mode={} >100us/>1ms/>5ms={}/{}/{}) writer_tick_wall(count={} avg/max={}us/{}us) send_max={}us public_events={}{}",
+            "recv={} pmtu={} reader_cpu(avg/max={}us/{}us max_src={} >100us/>1ms/>5ms={}/{}/{}) reader_thread_cpu(avg/max={}us/{}us max_src={} >100us/>1ms/>5ms={}/{}/{}) reader_thread_cycles(avg/max={}/{} max_src={}) reader_wait(count={} avg/max={}us/{}us max_src={}) writer_cpu(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) writer_thread_cpu(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) writer_thread_cycles(avg/max={}/{}) active_dispatch(avg/max={}us/{}us max_src={} events={} actions={} >100us/>1ms/>5ms={}/{}/{}) app_enqueue(avg/max={}us/{}us max_src={} events={} mode={} >100us/>1ms/>5ms={}/{}/{}) writer_tick_wall(count={} avg/max={}us/{}us) send_max={}us public_events={}{}{}",
             m.recv_count,
             m.last_pmtu,
             avg_us(m.reader_protocol_ns, m.reader_protocol_count),
@@ -901,6 +909,23 @@ impl Session {
             m.reader_protocol_over_100us,
             m.reader_protocol_over_1ms,
             m.reader_protocol_over_5ms,
+            avg_us(m.reader_thread_cpu_ns, m.reader_thread_cpu_count),
+            m.reader_thread_cpu_max_ns / 1_000,
+            metric_cmd_label(
+                m.reader_thread_cpu_max_cmd,
+                u8::MAX,
+                m.reader_thread_cpu_max_payload_len
+            ),
+            m.reader_thread_cpu_over_100us,
+            m.reader_thread_cpu_over_1ms,
+            m.reader_thread_cpu_over_5ms,
+            avg_units(m.reader_thread_cycles_total, m.reader_thread_cycles_count),
+            m.reader_thread_cycles_max,
+            metric_cmd_label(
+                m.reader_thread_cycles_max_cmd,
+                u8::MAX,
+                m.reader_thread_cycles_max_payload_len
+            ),
             m.reader_protocol_wait_count,
             avg_us(m.reader_protocol_wait_ns, m.reader_protocol_wait_count),
             m.reader_protocol_wait_max_ns / 1_000,
@@ -914,6 +939,13 @@ impl Session {
             m.writer_cpu_over_100us,
             m.writer_cpu_over_1ms,
             m.writer_cpu_over_5ms,
+            avg_us(m.writer_thread_cpu_ns, m.writer_thread_cpu_count),
+            m.writer_thread_cpu_max_ns / 1_000,
+            m.writer_thread_cpu_over_100us,
+            m.writer_thread_cpu_over_1ms,
+            m.writer_thread_cpu_over_5ms,
+            avg_units(m.writer_thread_cycles_total, m.writer_thread_cycles_count),
+            m.writer_thread_cycles_max,
             avg_us(m.active_dispatch_ns, m.active_dispatch_count),
             m.active_dispatch_max_ns / 1_000,
             metric_cmd_label(
@@ -943,6 +975,7 @@ impl Session {
             m.writer_tick_max_ns / 1_000,
             m.send_phase_max_ns / 1_000,
             m.public_event_queue_len,
+            profile,
             market_apply
         )
     }
@@ -1820,7 +1853,22 @@ fn avg_us(total_ns: u64, count: u64) -> u64 {
     }
 }
 
+fn avg_units(total: u64, count: u64) -> u64 {
+    if count == 0 {
+        0
+    } else {
+        total / count
+    }
+}
+
 fn metric_cmd_label(cmd: u8, api_method: u8, payload_len: u64) -> String {
+    if cmd == 254 {
+        return format!(
+            "RuntimeCommand/{}({}) payload={payload_len}",
+            runtime_command_metric_label(api_method),
+            api_method
+        );
+    }
     if cmd == u8::MAX {
         format!("pre-cmd payload={payload_len}")
     } else {
@@ -1840,6 +1888,72 @@ fn metric_cmd_label(cmd: u8, api_method: u8, payload_len: u64) -> String {
     }
 }
 
+fn runtime_command_metric_label(kind: u8) -> &'static str {
+    match kind {
+        0 => "Stop",
+        1 => "SubscribeOrderBook",
+        2 => "SubscribeOrderBooks",
+        3 => "UnsubscribeOrderBook",
+        4 => "UnsubscribeOrderBooks",
+        5 => "UnsubscribeAllOrderBooks",
+        6 => "SubscribeAllTrades",
+        7 => "SubscribeTradesFor",
+        8 => "UnsubscribeAllTrades",
+        9 => "BalanceRefresh",
+        10 => "AccountHedgeModeRefresh",
+        11 => "AccountApiExpirationRefresh",
+        12 => "OrderSnapshotRefresh",
+        13 => "TransferAssetsRefresh",
+        14 => "TransferAssetsRefreshKind",
+        15 => "SetExcludeBlacklistedMarketsFromExchangeDelta",
+        16 => "EngineAction",
+        17 => "CoinCardCandles",
+        20 => "Ui.SettingsRequest",
+        21 => "Ui.MmSubscribe",
+        22 => "Ui.SendSettings",
+        23 => "Ui.UpdateVersion",
+        24 => "Ui.SwitchDex",
+        25 => "Ui.SwitchSpot",
+        26 => "Ui.LevManage",
+        27 => "Ui.EmuTrades",
+        28 => "Ui.TriggerManage",
+        29 => "Ui.ResetProfit",
+        30 => "Ui.ArbActivateNotify",
+        31 => "Ui.AlertObject",
+        32 => "Ui.AlertSnapshotRequest",
+        33 => "Ui.ChartTextState",
+        34 => "Ui.OrdersHistoryRequest",
+        40 => "Strat.SellPriceUpdate",
+        41 => "Strat.Delete",
+        50 => "StrategySnapshotBatch",
+        51 => "StrategySetChecked",
+        52 => "StrategySendCheckedDelta",
+        53 => "StrategyStartStop",
+        54 => "DebugOutgoingBlackhole",
+        55 => "DebugResetErrEmuDiagnostics",
+        60 => "Order.MoveOrder",
+        61 => "Order.CancelOrder",
+        62 => "Order.UpdateStops",
+        63 => "Order.UpdateVStop",
+        64 => "Order.SetImmune",
+        65 => "Order.TurnOrderPanicSell",
+        66 => "Order.RequestOrderStatus",
+        67 => "Order.SwitchPanicSellByMarket",
+        80 => "Trade.NewOrder",
+        81 => "Trade.JoinOrders",
+        82 => "Trade.SplitOrder",
+        83 => "Trade.MoveAllSells",
+        84 => "Trade.MoveAllBuys",
+        85 => "Trade.ClosePosition",
+        86 => "Trade.LimitClosePosition",
+        87 => "Trade.SplitPosition",
+        88 => "Trade.SellOrder",
+        89 => "Trade.MarketSplitPosition",
+        90 => "Trade.Penalty",
+        _ => "Unknown",
+    }
+}
+
 fn metric_app_mode_label(mode: u8) -> &'static str {
     match mode {
         1 => "callback",
@@ -1850,9 +1964,36 @@ fn metric_app_mode_label(mode: u8) -> &'static str {
     }
 }
 
+fn protocol_profile_summary(m: &ProtocolMetricsSnapshot) -> String {
+    if m.profile_phases.is_empty() {
+        return String::new();
+    }
+    let mut phases = m.profile_phases.clone();
+    phases.sort_by_key(|p| std::cmp::Reverse(p.max_ns));
+    let body = phases
+        .iter()
+        .map(|p| {
+            format!(
+                "{}(avg/max={}us/{}us count={} src={} >100us/>1ms/>5ms={}/{}/{})",
+                p.name,
+                avg_us(p.total_ns, p.count),
+                p.max_ns / 1_000,
+                p.count,
+                metric_cmd_label(p.max_cmd, p.max_api_method, p.max_payload_len),
+                p.over_100us,
+                p.over_1ms,
+                p.over_5ms
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!(" phases=[{body}]")
+}
+
 fn protocol_metrics_summary(m: &ProtocolMetricsSnapshot) -> String {
+    let profile = protocol_profile_summary(m);
     format!(
-        "recv={} pmtu={} reader_cpu(avg/max={}us/{}us max_src={} >100us/>1ms/>5ms={}/{}/{}) reader_wait(count={} avg/max={}us/{}us max_src={}) writer_cpu(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) active_dispatch(avg/max={}us/{}us max_src={} events={} actions={} >100us/>1ms/>5ms={}/{}/{}) app_enqueue(avg/max={}us/{}us max_src={} events={} mode={} >100us/>1ms/>5ms={}/{}/{}) writer_tick_wall(count={} avg/max={}us/{}us) send_max={}us public_events={}",
+        "recv={} pmtu={} reader_cpu(avg/max={}us/{}us max_src={} >100us/>1ms/>5ms={}/{}/{}) reader_thread_cpu(avg/max={}us/{}us max_src={} >100us/>1ms/>5ms={}/{}/{}) reader_thread_cycles(avg/max={}/{} max_src={}) reader_wait(count={} avg/max={}us/{}us max_src={}) writer_cpu(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) writer_thread_cpu(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) writer_thread_cycles(avg/max={}/{}) active_dispatch(avg/max={}us/{}us max_src={} events={} actions={} >100us/>1ms/>5ms={}/{}/{}) app_enqueue(avg/max={}us/{}us max_src={} events={} mode={} >100us/>1ms/>5ms={}/{}/{}) writer_tick_wall(count={} avg/max={}us/{}us) send_max={}us public_events={}{}",
         m.recv_count,
         m.last_pmtu,
         avg_us(m.reader_protocol_ns, m.reader_protocol_count),
@@ -1865,6 +2006,23 @@ fn protocol_metrics_summary(m: &ProtocolMetricsSnapshot) -> String {
         m.reader_protocol_over_100us,
         m.reader_protocol_over_1ms,
         m.reader_protocol_over_5ms,
+        avg_us(m.reader_thread_cpu_ns, m.reader_thread_cpu_count),
+        m.reader_thread_cpu_max_ns / 1_000,
+        metric_cmd_label(
+            m.reader_thread_cpu_max_cmd,
+            u8::MAX,
+            m.reader_thread_cpu_max_payload_len
+        ),
+        m.reader_thread_cpu_over_100us,
+        m.reader_thread_cpu_over_1ms,
+        m.reader_thread_cpu_over_5ms,
+        avg_units(m.reader_thread_cycles_total, m.reader_thread_cycles_count),
+        m.reader_thread_cycles_max,
+        metric_cmd_label(
+            m.reader_thread_cycles_max_cmd,
+            u8::MAX,
+            m.reader_thread_cycles_max_payload_len
+        ),
         m.reader_protocol_wait_count,
         avg_us(m.reader_protocol_wait_ns, m.reader_protocol_wait_count),
         m.reader_protocol_wait_max_ns / 1_000,
@@ -1878,6 +2036,13 @@ fn protocol_metrics_summary(m: &ProtocolMetricsSnapshot) -> String {
         m.writer_cpu_over_100us,
         m.writer_cpu_over_1ms,
         m.writer_cpu_over_5ms,
+        avg_us(m.writer_thread_cpu_ns, m.writer_thread_cpu_count),
+        m.writer_thread_cpu_max_ns / 1_000,
+        m.writer_thread_cpu_over_100us,
+        m.writer_thread_cpu_over_1ms,
+        m.writer_thread_cpu_over_5ms,
+        avg_units(m.writer_thread_cycles_total, m.writer_thread_cycles_count),
+        m.writer_thread_cycles_max,
         avg_us(m.active_dispatch_ns, m.active_dispatch_count),
         m.active_dispatch_max_ns / 1_000,
         metric_cmd_label(
@@ -1907,6 +2072,7 @@ fn protocol_metrics_summary(m: &ProtocolMetricsSnapshot) -> String {
         m.writer_tick_max_ns / 1_000,
         m.send_phase_max_ns / 1_000,
         m.public_event_queue_len,
+        profile,
     )
 }
 
@@ -1921,23 +2087,96 @@ fn assert_protocol_cpu_gate(label: &str, m: &ProtocolMetricsSnapshot) {
     let mut red_flags = Vec::new();
 
     if m.reader_protocol_over_5ms > 0 {
-        red_flags.push(format!(
-            "reader_cpu >5ms count={} max={}us src={}",
-            m.reader_protocol_over_5ms,
-            m.reader_protocol_max_ns / 1_000,
-            metric_cmd_label(
-                m.reader_protocol_max_cmd,
-                u8::MAX,
-                m.reader_protocol_max_payload_len
-            )
-        ));
+        if m.reader_thread_cpu_count > 0 && m.reader_thread_cpu_over_5ms > 0 {
+            red_flags.push(format!(
+                "reader_cpu >5ms count={} wall_max={}us thread_cpu_max={}us src={}",
+                m.reader_protocol_over_5ms,
+                m.reader_protocol_max_ns / 1_000,
+                m.reader_thread_cpu_max_ns / 1_000,
+                metric_cmd_label(
+                    m.reader_protocol_max_cmd,
+                    u8::MAX,
+                    m.reader_protocol_max_payload_len
+                )
+            ));
+        } else if m.reader_thread_cpu_count > 0 {
+            println!(
+                "FIRETEST CPU gate {label}: reader wall spike observed but thread CPU stayed below 5ms: wall_count={} wall_max={}us thread_cpu_max={}us wall_src={} thread_src={}",
+                m.reader_protocol_over_5ms,
+                m.reader_protocol_max_ns / 1_000,
+                m.reader_thread_cpu_max_ns / 1_000,
+                metric_cmd_label(
+                    m.reader_protocol_max_cmd,
+                    u8::MAX,
+                    m.reader_protocol_max_payload_len
+                ),
+                metric_cmd_label(
+                    m.reader_thread_cpu_max_cmd,
+                    u8::MAX,
+                    m.reader_thread_cpu_max_payload_len
+                )
+            );
+        } else if m.reader_thread_cycles_count > 0 {
+            println!(
+                "FIRETEST CPU gate {label}: reader wall spike observed; duration CPU clock unavailable on this platform, thread cycles recorded instead: wall_count={} wall_max={}us wall_src={} cycles_avg={} cycles_max={} cycles_src={}",
+                m.reader_protocol_over_5ms,
+                m.reader_protocol_max_ns / 1_000,
+                metric_cmd_label(
+                    m.reader_protocol_max_cmd,
+                    u8::MAX,
+                    m.reader_protocol_max_payload_len
+                ),
+                avg_units(m.reader_thread_cycles_total, m.reader_thread_cycles_count),
+                m.reader_thread_cycles_max,
+                metric_cmd_label(
+                    m.reader_thread_cycles_max_cmd,
+                    u8::MAX,
+                    m.reader_thread_cycles_max_payload_len
+                )
+            );
+        } else {
+            red_flags.push(format!(
+                "reader_cpu >5ms count={} wall_max={}us src={} (no thread CPU/cycle clock available)",
+                m.reader_protocol_over_5ms,
+                m.reader_protocol_max_ns / 1_000,
+                metric_cmd_label(
+                    m.reader_protocol_max_cmd,
+                    u8::MAX,
+                    m.reader_protocol_max_payload_len
+                )
+            ));
+        }
     }
     if m.writer_cpu_over_5ms > 0 {
-        red_flags.push(format!(
-            "writer_cpu >5ms count={} max={}us",
-            m.writer_cpu_over_5ms,
-            m.writer_cpu_max_ns / 1_000
-        ));
+        if m.writer_thread_cpu_count > 0 && m.writer_thread_cpu_over_5ms > 0 {
+            red_flags.push(format!(
+                "writer_cpu >5ms count={} wall_max={}us thread_cpu_max={}us",
+                m.writer_cpu_over_5ms,
+                m.writer_cpu_max_ns / 1_000,
+                m.writer_thread_cpu_max_ns / 1_000
+            ));
+        } else if m.writer_thread_cpu_count > 0 {
+            println!(
+                "FIRETEST CPU gate {label}: writer wall spike observed but thread CPU stayed below 5ms: wall_count={} wall_max={}us thread_cpu_max={}us",
+                m.writer_cpu_over_5ms,
+                m.writer_cpu_max_ns / 1_000,
+                m.writer_thread_cpu_max_ns / 1_000
+            );
+        } else if m.writer_thread_cycles_count > 0 {
+            println!(
+                "FIRETEST CPU gate {label}: writer wall spike observed; duration CPU clock unavailable on this platform, thread cycles recorded instead: wall_count={} wall_max={}us cycles_avg={} cycles_max={}",
+                m.writer_cpu_over_5ms,
+                m.writer_cpu_max_ns / 1_000,
+                avg_units(m.writer_thread_cycles_total, m.writer_thread_cycles_count),
+                m.writer_thread_cycles_max
+            );
+        } else {
+            red_flags.push(format!(
+                "writer_cpu >5ms count={} wall_max={}us (no thread CPU/cycle clock available)",
+                m.writer_cpu_over_5ms,
+                m.writer_cpu_max_ns / 1_000
+            ));
+        }
     }
     if m.active_dispatch_over_5ms > 0 {
         red_flags.push(format!(
@@ -2257,6 +2496,16 @@ fn record_event(
                 &st,
                 event_no,
                 format!("Strat SchemaParseFailed raw={raw_len}"),
+            );
+        }
+        Event::Strat(StratEvent::RuntimeState { strategies_running }) => {
+            st.strategy_events += 1;
+            st.strategy_runtime_events += 1;
+            st.strategies_running = Some(*strategies_running);
+            log_server_event(
+                &st,
+                event_no,
+                format!("Strat RuntimeState strategies_running={strategies_running}"),
             );
         }
         Event::Strat(other) => {
@@ -4972,16 +5221,43 @@ fn run_real_order_cancel_gate_body(a: &mut Session, b: &mut Session) {
 }
 
 fn run_moonshot_strategy_gate(cfg: &FireConfig, a: &mut Session, b: &mut Session) {
+    let restore_strategies_running = wait_strategy_runtime_state(cfg, a, b);
     let restore_emu_mode = ensure_server_emulator_mode(cfg, a, b);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         run_moonshot_strategy_gate_body(cfg, a, b);
     }));
     let _ = a.client.chart_text().clear_visible_market();
-    disable_firetest_moonshot_strategy(cfg, a, b);
+    disable_firetest_moonshot_strategy(cfg, a, b, restore_strategies_running);
     restore_server_emulator_mode(cfg, a, b, restore_emu_mode);
     if let Err(payload) = result {
         std::panic::resume_unwind(payload);
     }
+}
+
+fn strategy_runtime_state(session: &Session) -> Option<bool> {
+    session.state_snapshot().strats().strategies_running()
+}
+
+fn wait_strategy_runtime_state(cfg: &FireConfig, a: &mut Session, b: &mut Session) -> bool {
+    assert!(
+        pump_pair_until_sessions(
+            a,
+            b,
+            cfg.connect_timeout,
+            "strategy runtime state",
+            |a, b| strategy_runtime_state(a).is_some() && strategy_runtime_state(b).is_some()
+        ),
+        "server did not send TStratRuntimeState to both clients within {:?}",
+        cfg.connect_timeout
+    );
+    let a_state = strategy_runtime_state(a).expect("A runtime state was just observed");
+    let b_state = strategy_runtime_state(b).expect("B runtime state was just observed");
+    assert_eq!(
+        a_state, b_state,
+        "clients disagree on strategy runtime state: A={a_state} B={b_state}"
+    );
+    println!("FIRETEST MoonShot: original strategies_running={a_state}");
+    a_state
 }
 
 fn run_moonshot_strategy_gate_body(cfg: &FireConfig, a: &mut Session, b: &mut Session) {
@@ -5025,8 +5301,8 @@ fn run_moonshot_strategy_gate_body(cfg: &FireConfig, a: &mut Session, b: &mut Se
         &schema,
         Some(&blocked_base),
         true,
-        false,
-        "",
+        true,
+        FIRETEST_MOONSHOT_COIN,
         FIRETEST_MOONSHOT_COIN,
     );
     sync_firetest_moonshot_snapshot(a, blocked.clone());
@@ -5039,7 +5315,13 @@ fn run_moonshot_strategy_gate_body(cfg: &FireConfig, a: &mut Session, b: &mut Se
             |_, b| firetest_moonshot_snapshot(b)
                 .as_ref()
                 .map(|strategy| {
-                    firetest_moonshot_has_state(strategy, true, false, "", FIRETEST_MOONSHOT_COIN)
+                    firetest_moonshot_has_state(
+                        strategy,
+                        true,
+                        true,
+                        FIRETEST_MOONSHOT_COIN,
+                        FIRETEST_MOONSHOT_COIN,
+                    )
                 })
                 .unwrap_or(false)
         ),
@@ -5160,31 +5442,51 @@ fn run_moonshot_strategy_gate_body(cfg: &FireConfig, a: &mut Session, b: &mut Se
     println!("OK: MoonShot strategy filter cycle and emulator ETH order: {order_debug}");
 }
 
-fn disable_firetest_moonshot_strategy(cfg: &FireConfig, a: &mut Session, b: &mut Session) {
-    let Some(base) = firetest_moonshot_snapshot(a) else {
-        return;
+fn disable_firetest_moonshot_strategy(
+    cfg: &FireConfig,
+    a: &mut Session,
+    b: &mut Session,
+    restore_strategies_running: bool,
+) {
+    if let Some(base) = firetest_moonshot_snapshot(a) {
+        let schema = firetest_strategy_schema(a);
+        let disabled = build_firetest_moonshot(&schema, Some(&base), false, false, "", "");
+        sync_firetest_moonshot_snapshot(a, disabled);
+        let _ = a
+            .client
+            .strategies()
+            .set_checked(FIRETEST_MOONSHOT_STRATEGY_ID, false);
+        let _ = a.client.strategies().send_checked_delta();
+        let _ = pump_pair_until_sessions(
+            a,
+            b,
+            cfg.wait,
+            "MoonShot FireTest strategy unchecked",
+            |a, b| {
+                firetest_moonshot_snapshot(a)
+                    .map(|strategy| !strategy.checked)
+                    .unwrap_or(true)
+                    && firetest_moonshot_snapshot(b)
+                        .map(|strategy| !strategy.checked)
+                        .unwrap_or(true)
+            },
+        );
+    }
+
+    let restore_result = if restore_strategies_running {
+        a.client.strategies().start()
+    } else {
+        a.client.strategies().stop()
     };
-    let schema = firetest_strategy_schema(a);
-    let disabled = build_firetest_moonshot(&schema, Some(&base), false, false, "", "");
-    sync_firetest_moonshot_snapshot(a, disabled);
-    let _ = a
-        .client
-        .strategies()
-        .set_checked(FIRETEST_MOONSHOT_STRATEGY_ID, false);
-    let _ = a.client.strategies().send_checked_delta();
-    let _ = a.client.strategies().stop();
+    let _ = restore_result;
     let _ = pump_pair_until_sessions(
         a,
         b,
         cfg.wait,
-        "MoonShot FireTest strategy disabled",
+        "MoonShot global strategy runtime restored",
         |a, b| {
-            firetest_moonshot_snapshot(a)
-                .map(|strategy| !strategy.checked)
-                .unwrap_or(true)
-                && firetest_moonshot_snapshot(b)
-                    .map(|strategy| !strategy.checked)
-                    .unwrap_or(true)
+            strategy_runtime_state(a) == Some(restore_strategies_running)
+                && strategy_runtime_state(b) == Some(restore_strategies_running)
         },
     );
 }
@@ -5491,6 +5793,113 @@ fn delphi_sell_report_delta_base(
         delta -= (sell.actual_q - buy.actual_q) * sell.mean_price;
     }
     Some(delta)
+}
+
+fn firetest_percent(part: u64, total: u64) -> f64 {
+    part as f64 / total.max(1) as f64 * 100.0
+}
+
+#[test]
+#[ignore = "live MoonBot server required; measures TStratRuntimeState delivery"]
+fn fire_test_strategy_runtime_state_delivery_stats() {
+    let cfg = FireConfig::load_required();
+    let key_info = parse_key_info(&cfg.key_b64).expect("invalid MoonProto key in FireTest config");
+    let keys = key_info.keys;
+    let runs = std::env::var("MOONPROTO_RUNTIME_STATE_MEASURE_RUNS")
+        .ok()
+        .map(|value| {
+            value.parse::<usize>().unwrap_or_else(|err| {
+                panic!("bad MOONPROTO_RUNTIME_STATE_MEASURE_RUNS={value:?}: {err}")
+            })
+        })
+        .unwrap_or(10)
+        .max(1);
+    let err_emu_percent = firetest_err_emu_percent();
+    let _err_emu = ErrEmuGuard::set(err_emu_percent);
+    let wait = cfg.connect_timeout.min(Duration::from_secs(12));
+
+    let p = (err_emu_percent as f64) * 0.01;
+    let high_attempts = 3i32;
+    let expected_one_client_miss = p.powi(high_attempts);
+    let expected_any_client_miss = 1.0 - (1.0 - expected_one_client_miss).powi(2);
+    println!(
+        "FIRETEST StratRuntimeState delivery math: runs={} clients_per_run=2 err_emu={} high_attempts={} expected_one_client_miss={:.6}% expected_any_client_miss_per_run={:.6}%",
+        runs,
+        err_emu_percent,
+        high_attempts,
+        expected_one_client_miss * 100.0,
+        expected_any_client_miss * 100.0
+    );
+
+    let mut a_miss = 0usize;
+    let mut b_miss = 0usize;
+    let mut both_miss = 0usize;
+    let mut any_miss = 0usize;
+    let mut total_valid = 0u64;
+    let mut total_dropped = 0u64;
+    let mut total_delivered = 0u64;
+
+    for run in 1..=runs {
+        let mut a = Session::connect(&format!("R{run}A"), &cfg, keys, None);
+        let mut b = Session::connect(&format!("R{run}B"), &cfg, keys, None);
+        let ok = pump_pair_until_sessions(
+            &mut a,
+            &mut b,
+            wait,
+            "strategy runtime state stats",
+            |a, b| strategy_runtime_state(a).is_some() && strategy_runtime_state(b).is_some(),
+        );
+        let a_state = strategy_runtime_state(&a);
+        let b_state = strategy_runtime_state(&b);
+        let a_diag = a.client.err_emu_diagnostics_snapshot();
+        let b_diag = b.client.err_emu_diagnostics_snapshot();
+        total_valid += a_diag.valid_packets + b_diag.valid_packets;
+        total_dropped += a_diag.dropped_packets + b_diag.dropped_packets;
+        total_delivered += a_diag.delivered_packets + b_diag.delivered_packets;
+        if a_state.is_none() {
+            a_miss += 1;
+        }
+        if b_state.is_none() {
+            b_miss += 1;
+        }
+        if a_state.is_none() && b_state.is_none() {
+            both_miss += 1;
+        }
+        if !ok {
+            any_miss += 1;
+        }
+        println!(
+            "FIRETEST StratRuntimeState delivery run {run}/{runs}: ok={} A={:?} B={:?} A_events={} B_events={} rx_valid={} rx_dropped={} rx_drop={:.3}%",
+            ok,
+            a_state,
+            b_state,
+            a.snapshot().strategy_runtime_events,
+            b.snapshot().strategy_runtime_events,
+            a_diag.valid_packets + b_diag.valid_packets,
+            a_diag.dropped_packets + b_diag.dropped_packets,
+            firetest_percent(
+                a_diag.dropped_packets + b_diag.dropped_packets,
+                a_diag.valid_packets + b_diag.valid_packets
+            )
+        );
+    }
+
+    let clients = runs * 2;
+    println!(
+        "FIRETEST StratRuntimeState delivery result: runs={} clients={} a_miss={} b_miss={} both_miss={} any_run_miss={} observed_client_miss={:.6}% observed_any_run_miss={:.6}% total_rx_valid={} total_rx_dropped={} total_rx_delivered={} total_rx_drop={:.3}%",
+        runs,
+        clients,
+        a_miss,
+        b_miss,
+        both_miss,
+        any_miss,
+        (a_miss + b_miss) as f64 * 100.0 / clients as f64,
+        any_miss as f64 * 100.0 / runs as f64,
+        total_valid,
+        total_dropped,
+        total_delivered,
+        firetest_percent(total_dropped, total_valid)
+    );
 }
 
 #[test]

@@ -1,7 +1,9 @@
 # Strategies
 
-The strategy channel carries full strategy snapshots and compact updates:
-delete, sell-price update, checked-state sync, and snapshot requests.
+Active Lib keeps the terminal's strategy list in sync with the MoonBot core.
+Applications read decoded strategies, edit strategy objects, change checked
+state, and send start/stop intents. They do not parse compressed strategy blobs
+or answer server snapshot requests by hand.
 
 The active runtime maintains `StratsState` and emits `Event::Strat`. Snapshot
 payloads are decoded automatically into both the lightweight `StrategyInfo`
@@ -12,21 +14,20 @@ is not reported as `SnapshotFull` / `SnapshotPartial`.
 
 Before init, user code gives the library its current local strategies through
 `InitConfig::initial_strategies`. The runtime owns that list after that point:
-Init sends it as the post-init strategy snapshot, the runtime answers server
-`TStratSnapshotRequest` automatically, and it
-applies strategy snapshots/deletes/checked updates received from the server. If
-user code provides an explicit empty list, the client has no local strategies;
-the current server snapshot is still available through the same read API.
+Init sends it as the post-init strategy snapshot, answers later server snapshot
+requests automatically, and applies strategy snapshots/deletes/checked updates
+received from the server. If user code provides an explicit empty list, the
+client has no local strategies; the current server snapshot is still available
+through the same read API.
 When the server asks for a client snapshot before Init is complete, the request
 is remembered and answered during post-init resync after the strategy schema and
 owned strategy state are ready.
 
-Init also requests the live strategy schema with
-`TStratSchemaRequest` and stores the decoded `TStratSchema` in
-`StratsState`. This is agreed active-library behavior: Rust consumers read
-strategy field metadata from the server instead of carrying a hardcoded copy of
-server strategy UI metadata. If the schema response is missing, malformed, or
-cannot be decompressed, Init fails and the domain gate does not open.
+Init also requests the live strategy schema and stores the decoded schema in
+`StratsState`. Rust consumers read strategy field metadata from the server
+instead of carrying a hardcoded copy of server strategy UI metadata. If the
+schema response is missing, malformed, or cannot be decompressed, Init fails and
+the domain gate does not open.
 
 Strategy checked state is still synchronized with the core, but detect
 calculation runs on the core. Rust receives ready detect facts through
@@ -88,10 +89,45 @@ applications should read `state.strategy_snapshot(...)` or
 diagnostics-only because terminal code should not depend on compressed protocol
 payloads.
 
-Server `TStratSnapshotRequest` packets are answered by the runtime from the
-library-owned local strategy list. Terminal code does not need to handle that
-packet or build a snapshot reply; the normal `MoonClient` event sink suppresses
-the hidden request event after latching/sending the reply.
+Server snapshot requests are answered by the runtime from the library-owned
+local strategy list. Terminal code does not need to handle that packet or build
+a snapshot reply; the normal `MoonClient` event sink suppresses the hidden
+request event after latching/sending the reply.
+
+## Global Strategy Runtime State
+
+The core also reports whether the global strategy engine is currently running.
+This is retained state, not a log message. A terminal reads it from the snapshot
+and updates its start/stop UI from `StratsState::strategies_running()`:
+
+```rust
+let Some(state) = client.snapshot() else { return; };
+match state.strats().strategies_running() {
+    Some(true) => show_strategies_running(),
+    Some(false) => show_strategies_stopped(),
+    None => show_strategy_runtime_unknown(),
+}
+```
+
+The value is `None` only before the server has reported the first runtime
+state. After that, `Event::Strat(StratEvent::RuntimeState { .. })` is the
+signal to repaint buttons or restore a previous start/stop mode after a
+temporary test/editor operation:
+
+```rust
+let was_running = state.strats().strategies_running().unwrap_or(false);
+
+// mutate checked state or synchronize a test/editor strategy...
+
+if was_running {
+    client.strategies().start()?;
+} else {
+    client.strategies().stop()?;
+}
+```
+
+`start()` and `stop()` are asynchronous intents. They queue the command and the
+next retained runtime-state update confirms what the core actually applied.
 
 ## Strategy Schema
 
@@ -211,26 +247,26 @@ rollback guards; UI labels should use `info.last_edit_time()` /
 `snapshot.last_edit_time()` and new local snapshots can be built with
 `StrategySnapshot::new_at(..., MoonTime, ...)`. `checked` is the direct checked
 state; `prev_checked` is the last server-acknowledged checked state. Checked deltas are
-pending while these fields differ and become acknowledged only after server
-`TStratCheckedEcho` or `TStratCheckedSync`.
+pending while these fields differ and become acknowledged only after the server
+echoes or synchronizes checked state.
 `sell_price` is copied from the decoded snapshot field `SellPrice` when that
-field exists; incoming `TStratSellPriceUpdate` packets are not applied by the
-active client because the core client model has no receive-side state update for
-that command. Incoming `TStratSnapshot` with `Full=true` does not delete local
-strategies that are absent from the payload. The runtime keeps those strategies
-as local "Own" entries.
+field exists; incoming sell-price command echoes are not applied as state
+updates because the core client model has no receive-side branch for that
+command. A full incoming snapshot does not delete local strategies that are
+absent from the payload. The runtime keeps those strategies as local "Own"
+entries.
 
-`TStratDelete` has two independent effects: delete `StrategyID` when it is
+Strategy delete has two independent effects: delete `StrategyID` when it is
 non-zero, then delete `FolderPath` when it names an existing empty non-root
 folder. `StratEvent::Deleted` exposes both result flags. `strategy_deleted` and
 `folder_deleted` tell which parts actually changed state. If both are false,
 Active Lib does not publish a strategy event.
 
 Future-version strat commands, unknown strat command ids, incoming
-`TStratSchemaRequest`, and incoming `TStratSellPriceUpdate` do not emit active
-strategy events. The active runtime treats those as skipped/base commands or as
-commands with no receive-side state branch, so they have no strategy side
-effects. The low-level parser/state APIs still expose `StratCommand::Skipped`,
+schema requests, and incoming sell-price updates do not emit active strategy
+events. The active runtime treats those as skipped/base commands or as commands
+with no receive-side state branch, so they have no strategy side effects. The
+low-level parser/state APIs still expose `StratCommand::Skipped`,
 `StratCommand::Unknown`, and the command parsers under the diagnostics feature
 for explicit protocol diagnostics.
 
@@ -293,11 +329,10 @@ persistence handoff, or offline editing. Rendering code should normally use
 `strategy_snapshots()` / `strategy_snapshot(id)` and borrow the retained state.
 
 The epoch passed to `InitialStrategies::new` is the local strategy-list epoch
-for this client. It is the value written into outgoing
-`TStratSnapshot.ServerEpoch` for both post-init strategy snapshot send and
-answers to `TStratSnapshotRequest`; it is not the remote server epoch learned
-from incoming snapshots. If the application reloads its whole local strategy
-list after `MoonClient::connect`, use
+for this client. It is the value written into outgoing local strategy snapshots
+for both post-init send and future automatic snapshot replies; it is not the
+remote server epoch learned from incoming snapshots. If the application reloads
+its whole local strategy list after `MoonClient::connect`, use
 `client.strategies().sync_local_strategies(strategies)`. The application still
 owns the strategy editor/persistence; this call tells Active Lib that the local
 list changed. Active Lib increments the local strategy epoch, updates the
@@ -435,10 +470,11 @@ client.strategies().sell_price_update(strategy_id, sell_price)?;
 client.strategies().delete(strategy_id, folder_path)?;
 ```
 
-Do not send `TStratSnapshotRequest` from client code. It is a server-to-client
-command, and the server ignores it when received from a client. The real flows
-are: post-init sends the current local strategy list as `TStratSnapshot`, and later the server may send
-`TStratSnapshotRequest`, which the runtime answers automatically.
+Do not send raw strategy-snapshot requests from client code. They are
+server-to-client requests, and the server ignores them when received from a
+client. The real flows are: post-init sends the current local strategy list, and
+later the server may request that list again; the runtime answers
+automatically.
 
 `strat_sell_price_update` is the client-to-server sell-price command. The
 server applies it to its local strategy if the strategy exists; the active
@@ -501,9 +537,9 @@ client
 
 This is still an Active Lib intent, not a raw protocol call: "local strategies
 changed; synchronize them". The runtime advances the local strategy epoch and
-keeps the list used for future `TStratSnapshotRequest` replies. If the call is
-made while Init is still in progress, the command is held in the runtime FIFO
-and serialized only after the live server schema is available.
+keeps the list used for future automatic snapshot replies. If the call is made
+while Init is still in progress, the command is held in the runtime FIFO and
+serialized only after the live server schema is available.
 
 Strategy snapshot serialization mirrors the server serializer lengths:
 field-name and folder-path dictionary entries use a `Byte` length and write
@@ -528,6 +564,6 @@ The runtime owns the local strategy list used for future server snapshot
 requests. If the application reloads strategies after startup, call
 `client.strategies().sync_local_strategies(...)`; do not try to intercept the
 server request path yourself. If the server asks before schema has arrived, the
-runtime requests `TStratSchema` and sends the pending snapshot after
+runtime requests the schema and sends the pending snapshot after
 `SchemaApplied`, so it never serializes a non-empty strategy list from a stale
 Rust field table.

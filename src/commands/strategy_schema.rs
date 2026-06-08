@@ -1,9 +1,9 @@
-//! `StrategySchemaBuilder.pas` schema blob reader.
+//! Live strategy-schema blob reader.
 //!
-//! Delphi builds this blob from live `TStrategy` RTTI plus `GetFieldPickInfo`
-//! and sends it as `TStratSchema.Data`: raw DEFLATE (-15), little-endian body.
-//! The Rust active library stores the decoded schema so consumers do not carry
-//! hardcoded strategy field UI metadata.
+//! The MoonBot core sends the current strategy kinds, visible fields, editor
+//! layout markers, defaults, and picklists as a compressed schema blob during
+//! Init. Active Lib stores the decoded schema so consumers do not carry
+//! hardcoded strategy UI metadata.
 
 use super::inflate::{read_inflate_to_vec, MAX_INFLATE_OUTPUT_SIZE};
 use flate2::read::DeflateDecoder;
@@ -43,11 +43,11 @@ pub struct StrategySchema {
 
 /// One visible editor section for one strategy kind.
 ///
-/// Delphi starts with the `Main` chapter, then `sgComment` starts a new main
-/// chapter and `sgFilterClass` / `sgChapterClass` start nested sections. The
-/// layout marker exists only on the first field of the section; this view
-/// carries the current section over following fields so UI code does not have
-/// to rediscover Delphi's editor grouping rules.
+/// The core starts with the `Main` chapter; comment/filter/chapter layout
+/// markers then split the visible fields into nested editor sections. The
+/// marker exists only on the first field of the section, so this view carries
+/// the current section over following fields and lets UI code render the editor
+/// without rediscovering grouping rules.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StrategySchemaEditorSection<'a> {
     pub main_chapter: &'a str,
@@ -63,7 +63,7 @@ pub enum StrategySchemaEditorSectionKind<'a> {
     ChapterClass { chapter: &'a str, value: &'a str },
 }
 
-/// One `TStrategyKind` entry from the schema kind table.
+/// One strategy-kind entry from the live schema kind table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StrategySchemaKind {
     #[cfg(any(test, feature = "diagnostics"))]
@@ -80,14 +80,14 @@ impl StrategySchemaKind {
         StrategyKind::from_byte(self.ordinal)
     }
 
-    /// Delphi `TStrategyKind` ordinal. Normally UI code should pass
+    /// Raw core strategy-kind ordinal. Normally UI code should pass
     /// [`Self::kind`] into typed schema helpers instead of carrying this value.
     pub fn ordinal(&self) -> u8 {
         self.ordinal
     }
 }
 
-/// UI/wire metadata for one public `TStrategy` field.
+/// UI/wire metadata for one public strategy field.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StrategySchemaField {
     pub name: String,
@@ -108,7 +108,7 @@ pub struct StrategySchemaField {
     /// Internal serializer fast path. Public code should use typed
     /// `visible_strategy_kinds` / `visible_for_strategy_kind`.
     pub(crate) visible_kind_mask: u32,
-    /// Raw pipe string from Delphi `WriteStr16`, when `FLAG_HAS_STATIC` is set.
+    /// Raw pipe-separated static picklist string, when `FLAG_HAS_STATIC` is set.
     pub(crate) static_picklist_raw: Option<String>,
     /// Split view of `static_picklist_raw`.
     pub static_picklist: Vec<String>,
@@ -223,12 +223,12 @@ pub enum StrategyDynamicPicklist {
     HookStrategies,
     /// Fields `ComboStart` / `ComboEnd`: all local strategies.
     AllStrategies,
-    /// Future Delphi field name with dynamic bit set.
+    /// Future field name with dynamic bit set.
     FieldName(String),
 }
 
 impl StrategyDynamicPicklist {
-    /// Build the Delphi dynamic picklist from the current local strategy list.
+    /// Build the dynamic picklist from the current local strategy list.
     ///
     /// `UseHookStrategy` gets an empty item first, then local MoonHook strategy
     /// names. `ComboStart` / `ComboEnd` get all local strategy names. Unknown
@@ -407,7 +407,7 @@ impl StrategySchema {
         self.fields.iter().find(|f| f.name == name)
     }
 
-    /// Visible fields for one raw `TStrategyKind` ordinal in Delphi field order.
+    /// Visible fields for one raw strategy-kind ordinal in core field order.
     #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub fn fields_for_kind(&self, kind: u8) -> impl Iterator<Item = &StrategySchemaField> {
@@ -425,7 +425,7 @@ impl StrategySchema {
             .filter(move |field| field.visible_for_kind(kind))
     }
 
-    /// Visible fields for one typed strategy kind in Delphi field order.
+    /// Visible fields for one typed strategy kind in core field order.
     pub fn fields_for_strategy_kind(
         &self,
         kind: StrategyKind,
@@ -433,7 +433,7 @@ impl StrategySchema {
         self.fields_for_kind(kind.to_byte())
     }
 
-    /// Delphi editor sections for one raw `TStrategyKind` ordinal.
+    /// Editor sections for one raw strategy-kind ordinal.
     ///
     /// This walks every schema field, including hidden layout-marker fields, so
     /// a hidden marker still moves the current section for later visible fields.
@@ -483,7 +483,7 @@ impl StrategySchema {
         sections
     }
 
-    /// Delphi editor sections for one typed strategy kind.
+    /// Editor sections for one typed strategy kind.
     pub fn editor_sections_for_strategy_kind(
         &self,
         kind: StrategyKind,

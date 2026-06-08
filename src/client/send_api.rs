@@ -1,11 +1,16 @@
 ﻿use super::*;
 
 impl Client {
-    /// Public API: queue a command for sending through the owning client loop.
+    /// Diagnostics/test raw send edge for an already-serialized payload.
     ///
-    /// The command is appended directly to the unbounded Delphi-style
-    /// `DataToSend*` queue for its priority, separate from accepted UDP packets
-    /// and receive-decoded delivery. This API has no local capacity-drop branch.
+    /// Normal application code must use `MoonClient` intents or typed `Client`
+    /// wrappers, which resolve priority, encryption, retries, and UKey through
+    /// the command registry. This raw edge is compiled only for tests and
+    /// diagnostics because the caller must already know the exact wire metadata.
+    ///
+    /// The command is appended directly to the unbounded protocol send queue
+    /// for its priority, separate from accepted UDP packets and receive-decoded
+    /// delivery. This helper has no local capacity-drop branch.
     ///
     /// E-V2-06: returns `()`, **but** when the channel is closed (main loop has finished)
     /// it logs an error through the `log` crate. A lost command is a serious signal,
@@ -14,12 +19,11 @@ impl Client {
     /// check the status via the `LifecycleEvent::Disconnected` callback and stop
     /// firing new commands after that.
     ///
-    /// **QUEUE BEHAVIOR:** internal send queues are unbounded. This matches
-    /// Delphi `MoonProtoCommon.pas:765 SendCmdInt`: user commands are appended
-    /// to protocol queues without a fixed capacity cap. `send_cmd` does not
-    /// block on local queue fullness and never silently drops a trading/API
-    /// command because the Rust main loop is busy. If the client is gone, the
-    /// command is rejected and the error is logged.
+    /// **QUEUE BEHAVIOR:** internal send queues are unbounded. User commands
+    /// are appended to protocol queues without a fixed capacity cap. `send_cmd`
+    /// does not block on local queue fullness and never silently drops a
+    /// trading/API command because the Rust main loop is busy. If the client is
+    /// gone, the command is rejected and the error is logged.
     #[cfg(any(test, feature = "diagnostics"))]
     #[allow(dead_code)]
     pub(crate) fn send_cmd(
@@ -40,12 +44,12 @@ impl Client {
         );
     }
 
-    /// Public API: queue a command with an explicit Delphi UKey dedup key.
+    /// Queue a raw command with an explicit UKey dedup key.
     ///
-    /// Use this only for advanced tools that already know the correct UKey
-    /// semantics. Regular applications should use typed `Client` wrappers or
-    /// [`ClientSender`], which choose the correct key, priority, encryption, and
-    /// retry count.
+    /// Use this only from typed wrappers, diagnostics, or protocol tests that
+    /// already know the correct UKey semantics. Regular applications use
+    /// `MoonClient` intents, which choose the correct key, priority, encryption,
+    /// and retry count.
     pub(crate) fn send_cmd_keyed(
         &self,
         data: Vec<u8>,
@@ -66,9 +70,9 @@ impl Client {
             last_sent_at: 0,
             u_key,
         };
-        // Delphi `SendCmdInt`: append into DataToSend/DataToSendH/DataToSendL
-        // under SendLock. The writer tick later copies those lists; raw sends do
-        // not wait behind reader delivery.
+        // Append into the priority send queues under SendLock. The writer tick
+        // later snapshots those queues; raw sends do not wait behind reader
+        // delivery.
         if let Err(err) = self.enqueue_send_item(item) {
             match err {
                 SubscribeError::Disconnected => {

@@ -53,8 +53,8 @@ impl MoonStateSnapshot {
 
     /// Current applied orderbook for a stable market handle.
     ///
-    /// This is the Delphi-shaped chart path: UI resolves a market once, keeps
-    /// the handle, and reads retained state through it instead of repeating
+    /// This is the chart hot path: UI resolves a market once, keeps the handle,
+    /// and reads retained state through it instead of repeating
     /// string/protocol-index lookups in hot render code.
     pub fn order_book_for(
         &self,
@@ -74,7 +74,7 @@ impl MoonStateSnapshot {
         self.top_of_book(market.name(), kind)
     }
 
-    /// Delphi chart "unprotected position" state for a stable market handle.
+    /// Chart "unprotected position" state for a stable market handle.
     ///
     /// This folds `MarketHandle::balance_position()` and
     /// `Orders::TotalSellQuantity` into one user-facing read. A chart can draw
@@ -140,7 +140,7 @@ impl MoonStateSnapshot {
         &self.strats
     }
 
-    /// Delphi `cfg.ServerStratEpoch` analogue used by local strategy snapshots.
+    /// Local strategy-list epoch used by outgoing local strategy snapshots.
     pub fn local_strategy_epoch(&self) -> u64 {
         self.local_strategy_epoch
     }
@@ -150,12 +150,12 @@ impl MoonStateSnapshot {
         self.strats.snapshot(strategy_id)
     }
 
-    /// Iterate full decoded strategy snapshots in Delphi list order.
+    /// Iterate full decoded strategy snapshots in retained list order.
     pub fn strategy_snapshots(&self) -> impl Iterator<Item = &StrategySnapshot> {
         self.strats.snapshots()
     }
 
-    /// Clone the current strategy snapshot list in Delphi list order.
+    /// Clone the current strategy snapshot list in retained list order.
     ///
     /// This is an owned export helper. Normal UI/read paths should prefer
     /// [`Self::strategy_snapshots`] so strategy rows are borrowed from the
@@ -164,7 +164,7 @@ impl MoonStateSnapshot {
         self.strats.snapshot_vec()
     }
 
-    /// Delphi `TStrategies.GetCheckedDelta` over the active-library strategy list.
+    /// Checked-state delta over the active-library strategy list.
     pub fn strategy_checked_delta(&self) -> Vec<crate::commands::strat::StratCheckedItem> {
         self.strats.checked_delta()
     }

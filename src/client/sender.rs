@@ -11,9 +11,9 @@ mod ui;
 
 /// Error returned by fallible [`ClientSender`] queueing methods.
 ///
-/// Send/control queues are intentionally unbounded to preserve the Delphi
-/// no-local-cap behavior of `SendCmdInt`. Queueing can still be rejected if
-/// the owning `Client` is gone, or if the caller tries to bypass the Delphi
+/// Send/control queues are intentionally unbounded: typed application commands
+/// do not fail because of a local queue capacity cap. Queueing can still be
+/// rejected if the owning `Client` is gone, or if the caller tries to bypass the
 /// `InitDone`/domain gate before the one-time init sequence completes.
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,7 +45,7 @@ impl std::error::Error for SubscribeError {}
 /// running `Client`.
 /// Subscription helpers update the
 /// active-library registry. Raw command helpers append already-serialized
-/// command payloads directly into the Delphi-style send queues used by `Client`
+/// command payloads directly into the protocol send queues used by `Client`
 /// wrappers. The sender also mirrors fire-and-forget trade, UI, strategy, and
 /// balance wrappers so terminal UI code can send typed actions without
 /// rebuilding wire priorities, retry counts, or UKey values by hand.
@@ -92,10 +92,10 @@ impl ClientSender {
 
     /// Queue an already-serialized command payload for sending.
     ///
-    /// This is the thread-safe counterpart of [`Client::send_cmd`]. It does not
-    /// build protocol payloads for the caller; use typed builders in
-    /// [`crate::commands`] or prefer high-level `Client` wrappers when the caller
-    /// already owns the client thread.
+    /// This is a raw diagnostics/test edge. It does not consult the command
+    /// registry and therefore requires the caller to pass the exact wire
+    /// priority, encryption flag, retry count, and UKey. Normal code should use
+    /// typed `MoonClient`/`ClientSender` actions instead.
     pub(crate) fn send_cmd(
         &self,
         data: Vec<u8>,
@@ -129,9 +129,9 @@ impl ClientSender {
         )
     }
 
-    /// Queue an already-serialized command payload with a Delphi UKey dedup key.
+    /// Queue an already-serialized command payload with an explicit UKey.
     ///
-    /// This is the thread-safe counterpart of [`Client::send_cmd_keyed`].
+    /// This is the thread-safe raw counterpart of [`Client::send_cmd_keyed`].
     pub(crate) fn send_cmd_keyed(
         &self,
         data: Vec<u8>,

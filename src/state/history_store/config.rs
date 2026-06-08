@@ -19,10 +19,10 @@ const CANDLE_5M_SLOT_BYTES: usize = size_of::<Candle5mRow>();
 
 /// Active-library retained-history scope for the all-trades stream.
 ///
-/// Delphi `SubscribeAllTrades` has no per-market scope: all known markets are
-/// maintained once the stream is enabled. Rust additionally exposes an accepted
-/// API deviation for UI clients that want to retain only a subset locally while
-/// keeping the same wire `emk_SubscribeAllTrades` command.
+/// The wire all-trades subscription is global. Active Lib additionally exposes
+/// an accepted retained-storage scope for UI clients that want to keep only a
+/// subset locally while still using the same wire `emk_SubscribeAllTrades`
+/// command.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) enum TradeStorageScope {
     #[default]
@@ -67,9 +67,8 @@ pub struct MarketHistoryConfig {
     pub spot_trades_capacity: usize,
     pub liquidation_capacity: usize,
     /// Capacity of the MM-order ring. The taker/color companion ring rides this
-    /// same capacity (Delphi `TStreamableRingBuffer<TMMOrder, TMMOrderData>` has a
-    /// single `FSize` for both parallel arrays), so an order and its companion
-    /// always evict together and can never desync.
+    /// same capacity because each MM-order row has a paired companion row, so
+    /// an order and its companion always evict together and can never desync.
     pub mm_orders_capacity: usize,
     pub last_price_capacity: usize,
     pub mini_candles_capacity: usize,

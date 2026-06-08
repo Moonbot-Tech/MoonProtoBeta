@@ -4,7 +4,7 @@ use super::*;
 use std::sync::Arc;
 
 impl MarketsState {
-    /// Iterate stable Delphi-like market handles in current `mIndex` order.
+    /// Iterate stable market handles in current server-index order.
     ///
     /// The returned handles may be kept across listing refreshes. The enclosing
     /// list/dictionaries are COW-replaced, while each handle points at the live
@@ -27,7 +27,7 @@ impl MarketsState {
         self.market_indexes.as_slice()
     }
 
-    /// Get a stable Delphi-like market handle by name.
+    /// Get a stable market handle by name.
     ///
     /// The handle remains valid after listing refresh because the surrounding
     /// list/dictionaries are COW-replaced while the market object itself stays
@@ -38,17 +38,17 @@ impl MarketsState {
 
     /// Find the best market for terminal search-box input.
     ///
-    /// This is the Rust Active Lib analogue of MoonBot's chart search flow:
-    /// users may type a full market name (`BTCUSDT`) or a coin/token symbol
-    /// (`BTC`, `SOL`). The result is a stable [`MarketHandle`] that UI can keep
-    /// like Delphi keeps `TMarket`.
+    /// This is the normal Active Lib chart-search flow: users may type a full
+    /// market name (`BTCUSDT`) or a coin/token symbol (`BTC`, `SOL`). The
+    /// result is a stable [`MarketHandle`] that UI can keep for the selected
+    /// chart instead of re-searching by name on every frame.
     pub fn find(&self, input: &str) -> Option<MarketHandle> {
         self.search(input, 1).into_iter().next()
     }
 
     /// Search markets for popup/autocomplete UI.
     ///
-    /// Ordering is Delphi-shaped and stable in current market-list order:
+    /// Ordering is stable in current market-list order:
     /// exact symbol/name/canonical matches first, then prefix matches, then
     /// contains matches. `limit = 0` returns an empty vector.
     pub fn search(&self, input: &str, limit: usize) -> Vec<MarketHandle> {
@@ -117,8 +117,8 @@ impl MarketsState {
 
     /// Get a market price by `mIndex`.
     ///
-    /// The price lives on the `Market` (Delphi `TMarket`); it is returned as a copy under a
-    /// short read-lock, like [`MarketHandle::balance_position`].
+    /// The price lives on the retained `Market`; it is returned as a copy under
+    /// a short read-lock, like [`MarketHandle::balance_position`].
     #[cfg(test)]
     pub(crate) fn price_by_index(&self, m_index: u16) -> Option<MarketPrice> {
         let idx = self.local_pos_for_server_index(m_index)?;
@@ -132,13 +132,13 @@ impl MarketsState {
             .map(|handle| handle.with(|m| m.price))
     }
 
-    /// Delphi `TMarket.refBTCMarket` analogue for a known market.
+    /// BTC correlation-market reference for a known market.
     pub fn ref_btc_corr_market(&self, market_name: &str) -> Option<&CorrMarket> {
         let corr_name = self.ref_btc_corr_markets.get(market_name)?;
         self.corr_markets.get(corr_name)
     }
 
-    /// Delphi `BaseCurDict` entry for a base currency.
+    /// Base-currency price entry for a base currency.
     pub fn base_currency_price(&self, base_currency: &str) -> Option<&BaseCurrencyPrice> {
         self.base_currency_prices.get(base_currency).or_else(|| {
             self.base_currency_prices
@@ -148,14 +148,14 @@ impl MarketsState {
         })
     }
 
-    /// Delphi `TMarket` live trade tail state for a known market.
+    /// Live trade-tail state for a known market.
     pub fn trade_state(&self, market_name: &str) -> Option<MarketTradeState> {
         self.handles_by_name
             .get(market_name)
             .map(|handle| handle.with(|market| market.trade_tail))
     }
 
-    /// Delphi `TMarket` signed delta state for a known market.
+    /// Signed market-delta state for a known market.
     pub fn delta_state(&self, market_name: &str) -> Option<MarketDeltaState> {
         self.handles_by_name
             .get(market_name)
@@ -170,19 +170,19 @@ impl MarketsState {
     /// Whether blacklisted markets are excluded from `Exchange1hDelta` /
     /// `Exchange24hDelta`.
     ///
-    /// Delphi keeps this as local `cfg.ExcludeBlackListDelta`; it is not a
-    /// MoonProto wire field. Active Lib exposes the same local policy through
+    /// This is local Active Lib policy, not a MoonProto wire field. Active Lib
+    /// exposes it through
     /// `MoonSettings::set_exclude_blacklisted_markets_from_exchange_delta`.
     pub fn exclude_blacklisted_markets_from_exchange_delta(&self) -> bool {
         self.exclude_blacklisted_markets_from_exchange_delta
     }
 
-    /// Apply Delphi `cfg.CoinsBlackListText` to retained `TMarket` objects.
+    /// Apply the coin blacklist text used by retained market analytics.
     ///
     /// `MarketBlackListedCfg` is true whenever the market currency appears in
-    /// the comma-list. Delphi does this even when `UseCoinsBlackList=false`:
-    /// that checkbox controls UI/trading blacklist state, while
-    /// `MarketBlackListedCfg` can still be used by the market-delta filter.
+    /// the comma-list. This is intentionally separate from the UI/trading
+    /// blacklist checkbox: the list can still be used by exchange-delta
+    /// analytics even when trade filtering is disabled.
     // parity: MoonBot MarketsU.pas:TMarket.IsBlackListed
     pub(crate) fn set_coin_blacklist_text(&mut self, text: &str) -> bool {
         let parsed = parse_coin_blacklist_text(text);
@@ -195,7 +195,7 @@ impl MarketsState {
         true
     }
 
-    /// Set Delphi `cfg.ExcludeBlackListDelta` analogue for Active Lib analytics.
+    /// Set whether exchange-delta analytics skip markets from the coin blacklist.
     // parity: MoonBot Bworks.pas Exchange1hDelta filter
     pub(crate) fn set_exclude_blacklisted_markets_from_exchange_delta(
         &mut self,

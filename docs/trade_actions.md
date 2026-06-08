@@ -80,7 +80,7 @@ client.trade().penalty_for_market(&market)?;
 ```
 
 Bulk buy/sell moves use named constructors for the trader-visible mode. The
-runtime still serializes the exact wire packet mode internally:
+runtime still serializes the matching core packet internally:
 
 ```rust
 use moonproto::{BulkMoveKind, MoveAllBuysParams, PositionFilter};
@@ -164,6 +164,6 @@ API. They come from BaseCheck and the tracked order state.
 
 Most trade/order actions use the MoonBot retry policy for the matching command.
 Position-changing commands that must not be duplicated by retries use the lower
-retry count from the wire command definition. The high-level API selects this
+retry count from the core command profile. The high-level API selects this
 automatically; applications should not choose retry counts for normal trading
 actions.

@@ -37,6 +37,8 @@ pub(super) fn runtime_loop(
     let startup_started_at = Instant::now();
     let mut dispatch_buffers = InlineDispatchBuffers::default();
     loop {
+        #[cfg(any(test, feature = "diagnostics"))]
+        let command_drain_start = Instant::now();
         let (stop, changed) = if startup.is_some() {
             drain_commands_during_startup(rx, deferred_commands)
         } else {
@@ -48,8 +50,19 @@ pub(super) fn runtime_loop(
                 deferred_commands,
             )
         };
+        #[cfg(any(test, feature = "diagnostics"))]
+        client
+            .metrics
+            .protocol_metrics
+            .record_profile_phase_labeled(
+                ProfilePhase::RuntimeCommandDrain,
+                command_drain_start.elapsed(),
+                u8::MAX,
+                u8::MAX,
+                0,
+            );
         if changed {
-            publish_snapshot(&dispatcher, &snapshot);
+            publish_snapshot_profiled(&client, &dispatcher, &snapshot);
         }
         if stop {
             break;
@@ -60,7 +73,23 @@ pub(super) fn runtime_loop(
         }
 
         let state_changed = if let Some(startup_machine) = startup.as_mut() {
-            match startup_machine.poll(&mut client, &mut dispatcher) {
+            #[cfg(any(test, feature = "diagnostics"))]
+            let init_poll_start = Instant::now();
+            #[cfg(any(test, feature = "diagnostics"))]
+            let (init_cmd, init_api_method) = startup_machine.profile_source();
+            let init_poll = startup_machine.poll(&mut client, &mut dispatcher);
+            #[cfg(any(test, feature = "diagnostics"))]
+            client
+                .metrics
+                .protocol_metrics
+                .record_profile_phase_labeled(
+                    ProfilePhase::InitStep,
+                    init_poll_start.elapsed(),
+                    init_cmd,
+                    init_api_method,
+                    0,
+                );
+            match init_poll {
                 RuntimeInitPoll::Pending { changed } => changed,
                 RuntimeInitPoll::Ready(_result) => {
                     if client.trades_storage_scope_intent().is_some() {
@@ -75,7 +104,7 @@ pub(super) fn runtime_loop(
                         client.server_info().clone(),
                         client.auth_info().cloned(),
                     );
-                    publish_snapshot(&dispatcher, &snapshot);
+                    publish_snapshot_profiled(&client, &dispatcher, &snapshot);
                     client.fire_lifecycle(LifecycleEvent::InitStepCompleted {
                         step: "StartupSnapshot",
                         elapsed_ms: startup_started_at.elapsed().as_millis() as u64,
@@ -101,31 +130,115 @@ pub(super) fn runtime_loop(
                 }
             }
         } else {
+            #[cfg(any(test, feature = "diagnostics"))]
+            let pending_start = Instant::now();
+            #[cfg(any(test, feature = "diagnostics"))]
+            let auto_candles_start = Instant::now();
             let candles_changed = poll_auto_candles(&mut client, &mut pending, &mut dispatcher);
+            #[cfg(any(test, feature = "diagnostics"))]
+            client
+                .metrics
+                .protocol_metrics
+                .record_profile_phase_labeled(
+                    ProfilePhase::PendingAutoCandles,
+                    auto_candles_start.elapsed(),
+                    u8::MAX,
+                    u8::MAX,
+                    pending.auto_candles.len() + pending.auto_candles_apply.len(),
+                );
             if !pending.auto_candles_requested && client.trades_storage_scope_intent().is_some() {
                 schedule_auto_candles_snapshot(&mut client, &mut pending);
             }
+            #[cfg(any(test, feature = "diagnostics"))]
+            let coin_card_start = Instant::now();
             let coin_card_changed = poll_coin_card_candles(
                 &mut pending.coin_card_candles,
                 &mut dispatcher,
                 &api_pending,
             );
+            #[cfg(any(test, feature = "diagnostics"))]
+            client
+                .metrics
+                .protocol_metrics
+                .record_profile_phase_labeled(
+                    ProfilePhase::PendingCoinCard,
+                    coin_card_start.elapsed(),
+                    u8::MAX,
+                    u8::MAX,
+                    pending.coin_card_candles.len(),
+                );
+            #[cfg(any(test, feature = "diagnostics"))]
+            let transfer_assets_start = Instant::now();
             let transfer_assets_changed =
                 poll_transfer_assets(&mut pending, &mut dispatcher, &api_pending);
+            #[cfg(any(test, feature = "diagnostics"))]
+            client
+                .metrics
+                .protocol_metrics
+                .record_profile_phase_labeled(
+                    ProfilePhase::PendingTransferAssets,
+                    transfer_assets_start.elapsed(),
+                    u8::MAX,
+                    u8::MAX,
+                    pending.transfer_assets.len() + pending.transfer_assets_batches.len(),
+                );
+            #[cfg(any(test, feature = "diagnostics"))]
+            let account_start = Instant::now();
             let account_changed = poll_account_refreshes(
                 &mut pending.account_refreshes,
                 &mut dispatcher,
                 &api_pending,
             );
+            #[cfg(any(test, feature = "diagnostics"))]
+            client
+                .metrics
+                .protocol_metrics
+                .record_profile_phase_labeled(
+                    ProfilePhase::PendingAccount,
+                    account_start.elapsed(),
+                    u8::MAX,
+                    u8::MAX,
+                    pending.account_refreshes.len(),
+                );
+            #[cfg(any(test, feature = "diagnostics"))]
+            let engine_actions_start = Instant::now();
             poll_engine_actions(&mut pending.engine_actions, &mut dispatcher, &api_pending);
+            #[cfg(any(test, feature = "diagnostics"))]
+            client
+                .metrics
+                .protocol_metrics
+                .record_profile_phase_labeled(
+                    ProfilePhase::PendingEngineActions,
+                    engine_actions_start.elapsed(),
+                    u8::MAX,
+                    u8::MAX,
+                    pending.engine_actions.len(),
+                );
+            #[cfg(any(test, feature = "diagnostics"))]
+            client
+                .metrics
+                .protocol_metrics
+                .record_profile_phase_labeled(
+                    ProfilePhase::RuntimePending,
+                    pending_start.elapsed(),
+                    u8::MAX,
+                    u8::MAX,
+                    pending.auto_candles.len()
+                        + pending.auto_candles_apply.len()
+                        + pending.coin_card_candles.len()
+                        + pending.account_refreshes.len()
+                        + pending.transfer_assets.len()
+                        + pending.engine_actions.len(),
+                );
             candles_changed || coin_card_changed || transfer_assets_changed || account_changed
         };
         if state_changed && startup.is_none() {
-            publish_snapshot(&dispatcher, &snapshot);
+            publish_snapshot_profiled(&client, &dispatcher, &snapshot);
         }
 
         if startup.is_none() {
-            let events = take_queued_events_and_publish_snapshot(&mut dispatcher, &snapshot);
+            let events =
+                take_queued_events_and_publish_snapshot(&client, &mut dispatcher, &snapshot);
             // Snapshot was published before events were emitted, while the
             // runtime still held the state that produced those events. Event
             // delivery itself runs after state apply and snapshot publish, not
@@ -133,6 +246,8 @@ pub(super) fn runtime_loop(
             emit_domain_events(events, &event_sink);
         }
 
+        #[cfg(any(test, feature = "diagnostics"))]
+        let command_drain_start = Instant::now();
         let (stop, changed) = if startup.is_some() {
             drain_commands_during_startup(rx, deferred_commands)
         } else {
@@ -144,8 +259,19 @@ pub(super) fn runtime_loop(
                 deferred_commands,
             )
         };
+        #[cfg(any(test, feature = "diagnostics"))]
+        client
+            .metrics
+            .protocol_metrics
+            .record_profile_phase_labeled(
+                ProfilePhase::RuntimeCommandDrain,
+                command_drain_start.elapsed(),
+                u8::MAX,
+                u8::MAX,
+                0,
+            );
         if changed {
-            publish_snapshot(&dispatcher, &snapshot);
+            publish_snapshot_profiled(&client, &dispatcher, &snapshot);
         }
         if stop {
             break;
@@ -190,12 +316,13 @@ pub(super) fn publish_queued_events(
 }
 
 pub(super) fn take_queued_events_and_publish_snapshot(
+    client: &Client,
     dispatcher: &mut crate::events::EventDispatcher,
     snapshot: &RwLock<Option<MoonClientSnapshot>>,
 ) -> Vec<crate::events::Event> {
     let events = dispatcher.take_queued_events();
     if !events.is_empty() {
-        publish_snapshot(dispatcher, snapshot);
+        publish_snapshot_profiled(client, dispatcher, snapshot);
     }
     events
 }
@@ -217,6 +344,29 @@ pub(super) fn publish_snapshot(
         .map(|snapshot| snapshot.revision().saturating_add(1))
         .unwrap_or(1);
     *guard = Some(MoonClientSnapshot::new(revision, next));
+}
+
+fn publish_snapshot_profiled(
+    client: &Client,
+    dispatcher: &crate::events::EventDispatcher,
+    snapshot: &RwLock<Option<MoonClientSnapshot>>,
+) {
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    let _ = client;
+    #[cfg(any(test, feature = "diagnostics"))]
+    let snapshot_start = Instant::now();
+    publish_snapshot(dispatcher, snapshot);
+    #[cfg(any(test, feature = "diagnostics"))]
+    client
+        .metrics
+        .protocol_metrics
+        .record_profile_phase_labeled(
+            ProfilePhase::SnapshotPublish,
+            snapshot_start.elapsed(),
+            u8::MAX,
+            u8::MAX,
+            0,
+        );
 }
 
 #[cfg(test)]

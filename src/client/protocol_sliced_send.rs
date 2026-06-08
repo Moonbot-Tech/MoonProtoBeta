@@ -232,8 +232,23 @@ impl ProtocolCore<'_> {
     }
 
     pub(crate) fn retry_sliced(&mut self, cur_tm: i64) {
+        #[cfg(any(test, feature = "diagnostics"))]
+        let retry_start = Instant::now();
+        #[cfg(any(test, feature = "diagnostics"))]
+        let sending_count = self.client.sending.len();
         let client = &mut self.client;
         if client.sending.is_empty() {
+            #[cfg(any(test, feature = "diagnostics"))]
+            client
+                .metrics
+                .protocol_metrics
+                .record_profile_phase_labeled(
+                    ProfilePhase::RetrySliced,
+                    retry_start.elapsed(),
+                    u8::MAX,
+                    u8::MAX,
+                    sending_count,
+                );
             return;
         }
 
@@ -244,6 +259,17 @@ impl ProtocolCore<'_> {
         // do not let `RoundTripDelay=0` collapse the Sliced retry clock to a
         // 10ms local CPU loop.
         if (cur_tm - client.last_checked_slices).abs() <= retry_round_trip_delay {
+            #[cfg(any(test, feature = "diagnostics"))]
+            client
+                .metrics
+                .protocol_metrics
+                .record_profile_phase_labeled(
+                    ProfilePhase::RetrySliced,
+                    retry_start.elapsed(),
+                    u8::MAX,
+                    u8::MAX,
+                    sending_count,
+                );
             return;
         }
 
@@ -380,5 +406,16 @@ impl ProtocolCore<'_> {
         for idx in to_remove.into_iter().rev() {
             client.sending.remove(idx);
         }
+        #[cfg(any(test, feature = "diagnostics"))]
+        client
+            .metrics
+            .protocol_metrics
+            .record_profile_phase_labeled(
+                ProfilePhase::RetrySliced,
+                retry_start.elapsed(),
+                u8::MAX,
+                u8::MAX,
+                sending_count,
+            );
     }
 }

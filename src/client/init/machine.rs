@@ -569,6 +569,40 @@ impl RuntimeInitMachine {
         }
     }
 
+    #[cfg(any(test, feature = "diagnostics"))]
+    pub(crate) fn profile_source(&self) -> (u8, u8) {
+        use crate::commands::engine_api::EngineMethod;
+
+        match self.phase {
+            RuntimeInitPhase::SendBaseCheck { .. }
+            | RuntimeInitPhase::WaitBaseCheck { .. }
+            | RuntimeInitPhase::BaseUpdateRetryPause { .. } => {
+                (Command::API.to_byte(), EngineMethod::BaseCheck.to_byte())
+            }
+            RuntimeInitPhase::SendAuthCheck { .. }
+            | RuntimeInitPhase::WaitAuthCheck { .. }
+            | RuntimeInitPhase::InitAuthRetryPause { .. } => {
+                (Command::API.to_byte(), EngineMethod::AuthCheck.to_byte())
+            }
+            RuntimeInitPhase::SendGetMarketsList | RuntimeInitPhase::WaitGetMarketsList { .. } => (
+                Command::API.to_byte(),
+                EngineMethod::GetMarketsList.to_byte(),
+            ),
+            RuntimeInitPhase::SendUpdateMarketsList
+            | RuntimeInitPhase::WaitUpdateMarketsList { .. } => (
+                Command::API.to_byte(),
+                EngineMethod::UpdateMarketsList.to_byte(),
+            ),
+            RuntimeInitPhase::WaitStrategySchema => (Command::Strat.to_byte(), u8::MAX),
+            RuntimeInitPhase::PostInit | RuntimeInitPhase::PostInitFlush { .. } => {
+                (Command::Grouped.to_byte(), u8::MAX)
+            }
+            RuntimeInitPhase::WaitAuthorized
+            | RuntimeInitPhase::ServerUpdateAuthWait { .. }
+            | RuntimeInitPhase::Done => (u8::MAX, u8::MAX),
+        }
+    }
+
     fn ensure_strategy_schema_started(
         &mut self,
         client: &mut Client,

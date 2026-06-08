@@ -1,8 +1,8 @@
 //! Fixed packed records used by the `MPC_Order` channel.
 //!
-//! Delphi reads/writes these with `ms.Read(X, SizeOf(X))` / `ms.Write(...)`.
-//! Public Rust structs keep ergonomic fields; private `Wire*` structs mirror
-//! the packed wire layout with compile-time size checks.
+//! The core reads/writes these as fixed-size packed records. Public Rust
+//! structs keep ergonomic fields; private `Wire*` structs mirror the packed
+//! wire layout with compile-time size checks.
 
 use zerocopy::byteorder::little_endian::{F32 as LeF32, F64 as LeF64, I64 as LeI64, U64 as LeU64};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
@@ -12,7 +12,7 @@ use super::enums::{OrderSubType, OrderType};
 use crate::time::DelphiTime;
 use crate::MoonTime;
 
-/// Delphi packed `boolean` byte.
+/// Packed protocol boolean byte.
 ///
 /// `ms.Read(record, SizeOf(record))` preserves the raw byte. The wrapper keeps
 /// that byte for protocol parity while giving UI/API code a named type instead
@@ -120,11 +120,9 @@ impl PriceZone {
 
 /// Exchange-side order leg retained inside a tracked order.
 ///
-/// On the wire this is Delphi `TOrderCompact`
-/// (MarketsU.pas:180), a 117-byte packed record serialized with
-/// `ms.Read/Write(BuyOrder, SizeOf(BuyOrder))`. The public type name describes
-/// the terminal meaning; `OrderCompact` remains only as an internal protocol
-/// alias for parity tests and packet readers.
+/// On the wire this is a 117-byte packed order-leg record. The public type name
+/// describes the terminal meaning; `OrderCompact` remains only as an internal
+/// protocol alias for parity tests and packet readers.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ExchangeOrder {
     pub int_id: i64,
@@ -194,7 +192,7 @@ struct WireOrderCompact {
     is_short: u8,
 }
 
-/// `TOrderCompact` wire size: 13×8 + 4 + 9×1 = 117 bytes.
+/// Compact order-leg wire size: 13×8 + 4 + 9×1 = 117 bytes.
 pub(crate) const ORDER_COMPACT_SIZE: usize = std::mem::size_of::<WireOrderCompact>();
 const _: [(); 117] = [(); ORDER_COMPACT_SIZE];
 
@@ -327,7 +325,7 @@ impl ExchangeOrder {
 
     /// Apply `ServerTimeDelta = InitialTime - Now` to time fields.
     ///
-    /// Delphi adjusts only valid `TDateTime` values (`> 1`).
+    /// Only valid legacy day-count timestamps (`> 1`) are adjusted.
     pub fn adjust_time(&mut self, delta: f64) {
         if self.open_time > 1.0 {
             self.open_time -= delta;
@@ -341,7 +339,7 @@ impl ExchangeOrder {
     }
 }
 
-/// `TStopSettings` (MarketsU.pas:215), 46-byte packed record.
+/// Packed stop-settings record retained inside an order snapshot.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StopSettings {
     pub(crate) stop_loss_on: DelphiBool,
@@ -358,7 +356,7 @@ pub struct StopSettings {
     /// this is the server's value; on outbound stops the runtime computes it (see
     /// `Orders::send_stops_if_changed`) so callers never set it by hand. The
     /// server auto-defaults TP on the SELL transition only while this is false
-    /// (Delphi `Unit1.pas:18760`).
+    /// on the server-side SELL transition.
     pub(crate) take_profit_changed: DelphiBool,
 }
 
@@ -458,8 +456,8 @@ impl StopSettings {
     /// Configure take-profit price.
     ///
     /// The outbound `take_profit_changed` latch is still computed by the
-    /// runtime against the live order state before send, matching Delphi
-    /// `SendStopsIfChanged`.
+    /// runtime against the live order state before send, so callers set the
+    /// desired TP value without hand-maintaining protocol latch bits.
     pub fn with_take_profit_price(self, take_profit: f64) -> Self {
         self.with_take_profit_fields(true, take_profit)
     }

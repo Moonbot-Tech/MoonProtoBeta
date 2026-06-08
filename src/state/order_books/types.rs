@@ -7,9 +7,8 @@ pub type OrderBookReadGuard =
 
 /// Orderbook kind: futures or spot. Wire format is one byte.
 ///
-/// Matches Delphi `TBookKind` (MoonProtoOrderBook.pas:5): 0=`bk_Futures`,
-/// 1=`bk_Spot`. Used in incoming orderbook packets, full-book recovery
-/// requests, and internal state keys.
+/// Wire values are stable: `0` = futures book, `1` = spot book. Used in incoming
+/// orderbook packets, full-book recovery requests, and internal state keys.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum OrderBookKind {
@@ -79,9 +78,8 @@ pub(crate) enum OrderBookControl {
 
 /// One applied orderbook level stored in the client read model.
 ///
-/// Wire packets carry `Single` (`f32`) values for compactness, while Delphi
-/// applies them into `TOrderGlass` (`double`). The public snapshot follows the
-/// applied-state side and stores `f64`.
+/// Wire packets carry compact `f32` values. The retained read-model stores
+/// `f64`, matching the applied-state side used by chart/orderbook UI code.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OrderBookLevel {
     pub rate: f64,

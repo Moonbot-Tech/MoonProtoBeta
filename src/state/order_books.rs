@@ -1,8 +1,5 @@
 //! OrderBook sync state: reordering buffer, gap detection, and auto full-refresh request.
 //!
-//! Delphi source: `MoonProtoOrderBook.pas:32-720`
-//! (`TOrderBookCache` plus `MoonProto_TryApplyCached`).
-//!
 //! What this module does:
 //!
 //! The server sends `MPC_OrderBook` packets with a wrapping `seq: u16`.
@@ -61,9 +58,8 @@ struct OrderBooksInner {
 ///
 /// The public value is a cheap handle. A published `MoonStateSnapshot` keeps a
 /// clone of this handle while the runtime keeps applying packets through the
-/// same inner state. That matches Delphi's shared `TOrderBook`/`TMarket` shape:
-/// a packet mutates only the affected book/cache and does not copy the whole
-/// orderbook domain because a UI snapshot is alive.
+/// same inner state: a packet mutates only the affected book/cache and does not
+/// copy the whole orderbook domain because a UI snapshot is alive.
 #[derive(Debug, Clone)]
 pub struct OrderBooks {
     inner: Arc<RwLock<OrderBooksInner>>,
@@ -322,11 +318,10 @@ impl OrderBooks {
         cache.check_cache_empty();
     }
 
-    /// Delphi `TMoonProtoEngine.ResetOrderBookCaches`: clear out-of-order
-    /// caches and reset per-book sequence state without wiping the visible book
-    /// levels. `BookSubbed` lives in `Client`'s subscription registry, so the
-    /// Rust analogue resets all local cache entries; absent entries will be
-    /// recreated with seq=0 on the next packet.
+    /// Clear out-of-order caches and reset per-book sequence state without
+    /// wiping the visible book levels. Subscription state lives in `Client`, so
+    /// all local cache entries are reset; absent entries will be recreated with
+    /// seq=0 on the next packet.
     pub(crate) fn reset_caches_keep_books(&self) {
         let mut inner = self.inner.write();
         for (_, c) in inner.caches.iter_mut() {

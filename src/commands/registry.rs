@@ -770,6 +770,14 @@ pub(crate) const STRAT_COMMANDS: &[CommandDescriptor] = &[
         priority = High,
         direction = Inbound
     ),
+    cmd_desc!(
+        Command::Strat,
+        10,
+        "TStratRuntimeState",
+        base = Base,
+        priority = High,
+        direction = Inbound
+    ),
 ];
 
 pub(crate) const BALANCE_COMMANDS: &[CommandDescriptor] = &[
@@ -960,7 +968,7 @@ mod tests {
     fn descriptor_map_covers_known_typed_domains() {
         assert_eq!(ORDER_COMMANDS.len(), 32);
         assert_eq!(UI_COMMANDS.len(), 20);
-        assert_eq!(STRAT_COMMANDS.len(), 10);
+        assert_eq!(STRAT_COMMANDS.len(), 11);
         assert_eq!(BALANCE_COMMANDS.len(), 7);
         assert_eq!(API_COMMANDS.len(), 3);
     }
@@ -1018,6 +1026,17 @@ mod tests {
         assert_eq!(desc.max_retries, 3);
         assert_eq!(desc.unique_kind, UK_NONE);
         assert_eq!(desc.ukey, UKeyRule::None);
+    }
+
+    #[test]
+    fn descriptor_map_includes_strat_runtime_state() {
+        let desc = find_descriptor(Command::Strat, 10).unwrap();
+        assert_eq!(desc.name, "TStratRuntimeState");
+        assert_eq!(desc.priority, CommandPriority::High);
+        assert_eq!(desc.max_retries, 3);
+        assert_eq!(desc.unique_kind, UK_NONE);
+        assert_eq!(desc.ukey, UKeyRule::None);
+        assert_eq!(desc.direction, CommandDirection::Inbound);
     }
 
     #[test]

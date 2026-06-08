@@ -1,8 +1,5 @@
 //! Markets sync state maintained from Engine API responses.
 //!
-//! Delphi source: `MarketsU.pas` (`TMarket`, `TCorrMarket`) plus
-//! `MoonProtoEngineServer.pas`.
-//!
 //! Update flow:
 //! - startup sends `emk_GetMarketsList` and receives the full markets plus CorrMarkets list;
 //! - periodic `emk_UpdateMarketsList` updates prices and funding;
@@ -27,6 +24,7 @@ mod tags;
 mod text;
 mod types;
 
+pub(crate) use self::prices::CandleDeltaBaseline;
 use self::text::{contains_text_ascii, same_text_ascii, starts_text_ascii};
 pub(crate) use self::types::MarketLastPriceHistoryInput;
 #[cfg(feature = "diagnostics")]
@@ -37,16 +35,16 @@ pub(crate) use self::types::MarketsListApplyTiming;
 pub use self::types::{
     BaseCurrencyPrice, MarketBalancePosition, MarketGlobalDeltas, MarketHandle, MarketsEvent,
 };
-// The live trade tail and price now live on the `Market` object itself (Delphi
-// `TMarket` shape); re-export them here so the public `state::markets` path is stable.
+// The live trade tail and price live on the retained `Market` object itself;
+// re-export them here so the public `state::markets` path is stable.
 pub use crate::commands::market::{MarketDeltaState, MarketPrice, MarketTradeState};
 
 #[derive(Debug, Clone, Default)]
 pub struct MarketsState {
     /// Markets in `mIndex` order as received from `emk_GetMarketsList`.
     ///
-    /// Each item is a stable `MarketHandle`, matching Delphi `TMarket` object
-    /// references stored in `TMarkets = TSlowSafeList<TMarket>`.
+    /// Each item is a stable `MarketHandle`; listing refresh replaces the
+    /// container, not the live market objects already held by UI code.
     pub(crate) markets: Arc<Vec<MarketHandle>>,
     /// `market_name` -> index in `markets` for internal parallel arrays.
     pub(crate) by_name: Arc<HashMap<String, usize>>,
@@ -54,8 +52,7 @@ pub struct MarketsState {
     pub(crate) handles_by_name: Arc<HashMap<String, MarketHandle>>,
     /// COW `market_name` -> current server mIndex.
     ///
-    /// Delphi rebuilds `SrvMarkets` as an index array of `TMarket` references
-    /// after `GetMarketsIndexes`; this reverse map keeps the public
+    /// After `GetMarketsIndexes`, this reverse map keeps the public
     /// name-to-index helper O(1) instead of scanning the whole index vector.
     pub(crate) market_index_by_name: Arc<HashMap<String, u16>>,
     /// Correlation markets used for BTC/reference calculations, keyed by `bn_market_name`.
@@ -69,40 +66,36 @@ pub struct MarketsState {
     pub(crate) corr_markets: Arc<HashMap<String, CorrMarket>>,
     /// Current CorrMarket prices keyed by `bn_market_name`.
     pub(crate) corr_prices: Arc<HashMap<String, f64>>,
-    /// Delphi `BaseCurDict`: base currency name -> price/ref state.
+    /// Base currency name -> price/reference state.
     pub(crate) base_currency_prices: Arc<HashMap<String, BaseCurrencyPrice>>,
-    /// Delphi `TMarket.refBTCMarket`, represented as market name -> CorrMarket name.
+    /// Market name -> BTC/reference CorrMarket name.
     pub(crate) ref_btc_corr_markets: Arc<HashMap<String, String>>,
     /// Token tags keyed by `market_name`.
     pub(crate) token_tags: Arc<HashMap<String, TokenTags>>,
     /// Canonical `mIndex` -> market name mapping.
     ///
-    /// Cold init fills this from `emk_GetMarketsList`, matching Delphi
-    /// `TMoonProtoEngine.GetMarketsList -> SrvMarkets.Rebuild(IndexMap)`.
+    /// Cold init fills this from `emk_GetMarketsList`.
     /// After reconnect/server restart it is refreshed by `emk_GetMarketsIndexes`.
     pub(crate) market_indexes: Arc<Vec<String>>,
     /// True when the server-index map belongs to the current `PeerAppToken`.
     ///
     /// After a server restart, market indexes may change. Until fresh indexes
     /// arrive, `EventDispatcher` drops `TradesStream` and `OrderBook` packets so
-    /// new server indexes cannot corrupt the old local map. This mirrors Delphi
-    /// `MoonProtoEngine.pas:1580`.
+    /// new server indexes cannot corrupt the old local map.
     pub(crate) indexes_synchronized: bool,
-    /// Delphi `NewMarketFound` analogue: set when a price row points at a server
-    /// market index/name that is not present in the current market list.
+    /// Set when a price row points at a server market index/name that is not
+    /// present in the current market list.
     ///
     /// It is intentionally kept true after scheduling `GetMarketsList` and is
-    /// cleared only by a successful list apply, matching Delphi's synchronous
-    /// `Engine.GetMarketsList()` path.
+    /// cleared only by a successful list apply.
     pub(crate) markets_list_refresh_needed: bool,
-    /// Delphi `ES_MaxLevInGetMarkets in EngineProp`: existing markets copy
-    /// `MaxLeverage` from `GetMarketsList` only for platforms that set this
-    /// support flag. New markets still receive the incoming value because they
-    /// are inserted as whole `TMarket` objects.
+    /// Existing markets copy `MaxLeverage` from `GetMarketsList` only for
+    /// platforms that set this support flag. New markets still receive the
+    /// incoming value because they are inserted as whole market objects.
     copy_max_leverage_from_markets_list: bool,
     /// Count of markets newly added by the last successful `NewMarketFound`
     /// list refresh. Active dispatcher consumes this to request immediate
-    /// `UpdateMarketsList`, like Delphi `Engine.NewMarkets.Count > 0`.
+    /// `UpdateMarketsList`.
     new_markets_pending_price_refresh: usize,
     /// Names of markets inserted by the last successful listing refresh.
     ///
@@ -130,8 +123,7 @@ impl MarketsState {
         Self::default()
     }
 
-    /// Apply the Delphi `ProcessTradesStream` live market tail side effects for
-    /// one already-known trade row.
+    /// Apply the live market-tail side effects for one already-known trade row.
     ///
     /// Gap tracking remains in `TradesState`. This mirrors only the bounded
     /// per-market tail fields: futures trades call the `SetLastTradePrices`
@@ -160,7 +152,7 @@ impl MarketsState {
         // `&self` here is deliberate: the trades datagram must not trigger a
         // copy-on-write clone of the whole `MarketsState`, exactly like the
         // per-market balance apply path. The market objects are structurally
-        // shared with any published snapshot, matching Delphi's shared `TMarket`.
+        // shared with any published snapshot.
         let Some(handle) = self.handles_by_name.get(name) else {
             return;
         };

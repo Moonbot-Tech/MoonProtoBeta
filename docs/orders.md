@@ -73,13 +73,12 @@ the exchange order id. Use it as the stable key when mirroring the report DB:
 the same closed sell can receive more SQL after price changes, partial fills,
 or final execution, and those commands must update the same DB row.
 
-`sql` is the same expanded SQL text built by the core for the legacy MoonCMD
-report path from `TDBSaver.BuildCommandSql`. It is the exact insert/update that
-MoonBot wrote or would write for that Orders row. Active Lib does not parse this
-SQL back into `Order` fields and does not update retained orders from it;
-regular trading UI should keep using `snapshot().orders()`. The report event is
-for external report/DB sync tools that need the exact row operation the core
-wrote.
+`sql` is the same expanded SQL text built by the core for its own Orders report
+writer. It is the exact insert/update that MoonBot wrote or would write for
+that Orders row. Active Lib does not parse this SQL back into `Order` fields and
+does not update retained orders from it; regular trading UI should keep using
+`snapshot().orders()`. The report event is for external report/DB sync tools
+that need the exact row operation the core wrote.
 
 ## Order Fields
 
@@ -124,8 +123,8 @@ pub struct Order {
 ```
 
 `currency` and `platform` are typed route values retained from the server order
-state. Normal code does not write them manually; order actions use them to build
-the correct wire header.
+state. Normal code does not write them manually; order actions use them to route
+the action back to the correct market/exchange context.
 
 `buy_order` and `sell_order` are `ExchangeOrder` values. They contain
 exchange-side order values such as

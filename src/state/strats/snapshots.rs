@@ -70,6 +70,18 @@ impl StratsState {
         }
     }
 
+    /// Replace the application-owned strategy list from an already owned batch.
+    ///
+    /// Runtime commands receive `Vec<StrategySnapshot>` by value. Moving those
+    /// snapshots into state keeps the full-list sync path from paying a second
+    /// deep clone before the serializer builds the outgoing `TStratSnapshot`.
+    pub(crate) fn replace_with_owned_snapshots(&mut self, strategies: Vec<StrategySnapshot>) {
+        self.clear_entries();
+        for strategy in strategies {
+            self.insert_snapshot_unchecked(strategy);
+        }
+    }
+
     /// Insert or replace one application-owned strategy without rollback guard.
     ///
     /// For the local strategy list the application is the source of truth, so an

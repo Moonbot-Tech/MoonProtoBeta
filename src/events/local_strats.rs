@@ -34,6 +34,10 @@ impl EventDispatcher {
         self.strats.replace_with_snapshots(strategies);
     }
 
+    pub(crate) fn set_local_strategies_owned(&mut self, strategies: Vec<StrategySnapshot>) {
+        self.strats.replace_with_owned_snapshots(strategies);
+    }
+
     /// Change one local strategy checked flag like Delphi `TStrategy.Checked`.
     ///
     /// This does not mark the change acknowledged. The delta stays pending

@@ -6,7 +6,7 @@
 
 use super::COMPRESSED_FLAG;
 use crate::commands::engine_api::parse_engine_response;
-use crate::commands::order_book::parse_order_book_packet;
+use crate::commands::order_book::parse_order_book_packet_meta;
 use crate::protocol::{slicing, Command};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -321,13 +321,13 @@ impl ErrEmuDiagnosticsState {
             }
         }
         if Command::from_byte(cmd) == Command::OrderBook {
-            if let Some(pkt) = parse_order_book_packet(payload) {
+            if let Some(pkt) = parse_order_book_packet_meta(payload) {
                 dg.completed_orderbook_market_index = Some(pkt.market_index);
                 dg.completed_orderbook_kind = Some(pkt.book_kind);
                 dg.completed_orderbook_seq = Some(pkt.seq);
                 dg.completed_orderbook_is_full = Some(pkt.is_full);
-                dg.completed_orderbook_buys = Some(pkt.buys.len());
-                dg.completed_orderbook_sells = Some(pkt.sells.len());
+                dg.completed_orderbook_buys = Some(pkt.buy_count);
+                dg.completed_orderbook_sells = Some(pkt.sell_count);
             }
         }
     }

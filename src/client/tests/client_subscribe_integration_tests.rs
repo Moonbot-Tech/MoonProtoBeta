@@ -640,6 +640,44 @@ fn client_set_immune_applies_local_side_effect_before_wire_send() {
 }
 
 #[test]
+fn typed_registry_requires_explicit_ukey_for_context_dependent_unique_commands() {
+    use crate::commands::strat;
+    use crate::commands::trade::{build_set_immune, ImmuneItem};
+
+    let immune = build_set_immune(
+        0x1234,
+        &[ImmuneItem {
+            uid: 0x100,
+            value: true,
+        }],
+    );
+    assert!(
+        typed_send_metadata(Command::Order, &immune, None).is_none(),
+        "TSetImmune UKey is the clicked-items sum; the registry must not guess it from raw bytes"
+    );
+    let immune_key = UniqueKey::immune_clicks(0x100);
+    assert_eq!(
+        typed_send_metadata(Command::Order, &immune, Some(immune_key))
+            .expect("explicit immune UKey must make the command sendable")
+            .u_key,
+        immune_key
+    );
+
+    let sell_price = strat::build_sell_price_update(0x5566, 0x7788, 123.45);
+    assert!(
+        typed_send_metadata(Command::Strat, &sell_price, None).is_none(),
+        "TStratSellPriceUpdate UKey is per strategy; wrappers must pass it explicitly"
+    );
+    let strat_key = UniqueKey::strat_sell_price_update(0x7788);
+    assert_eq!(
+        typed_send_metadata(Command::Strat, &sell_price, Some(strat_key))
+            .expect("explicit strategy UKey must make the command sendable")
+            .u_key,
+        strat_key
+    );
+}
+
+#[test]
 fn client_update_order_stops_uses_delphi_send_if_changed_gate() {
     use crate::commands::trade::{DelphiBool, OrderWorkerStatus, StopSettings, TradeCommand};
 

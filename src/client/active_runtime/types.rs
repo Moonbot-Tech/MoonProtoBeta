@@ -594,7 +594,7 @@ pub struct NewOrderTicket {
     pub request_uid: u64,
 }
 
-/// User-facing parameters for `TSplitOrderCommand`.
+/// User-facing parameters for splitting the selected sell order.
 #[derive(Debug, Clone)]
 pub struct SplitOrderParams {
     pub market: String,
@@ -723,7 +723,7 @@ impl ClosePositionParams {
     }
 }
 
-/// User-facing parameters for `TDoSellOrderCommand`.
+/// User-facing parameters for placing a sell order.
 #[derive(Debug, Clone)]
 pub struct SellOrderParams {
     pub market: String,

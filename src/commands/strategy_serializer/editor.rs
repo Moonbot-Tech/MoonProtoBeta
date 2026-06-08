@@ -1,10 +1,10 @@
 //! Schema-aware strategy editor API.
 //!
 //! `StrategySnapshot` is the retained/wire shape: it preserves the exact field
-//! list used by `TStrategySerializer`. UI and tests should not hand-write that
+//! list used by the core serializer. UI and tests should not hand-write that
 //! list for common edits. `StrategyEditor` validates every changed field against
-//! the live `TStratSchema`, and typed wrappers such as `MoonShotStrategy` expose
-//! the small Delphi-like property surface user code actually wants.
+//! the live schema, and typed wrappers such as `MoonShotStrategy` expose the
+//! small property surface user code actually wants.
 
 use std::error::Error;
 use std::fmt;

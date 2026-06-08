@@ -6,7 +6,7 @@ use super::{
 };
 use crate::MoonTime;
 
-/// Common Delphi `TStrategy` field names.
+/// Common strategy field names used by Active Lib helpers.
 ///
 /// The snapshot remains schema-driven, so this list is intentionally small:
 /// it covers fields the Active Lib itself reads and fields most UI code needs.
@@ -19,7 +19,7 @@ pub mod field_names {
     pub const SELL_FROM_ASSET: &str = "SellFromAsset";
 }
 
-/// Decoded strategy field value, equivalent to Delphi `TValue` after RTTI deserialization.
+/// Decoded strategy field value from the live strategy serializer.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FieldValue {
     Bool(bool),
@@ -116,8 +116,9 @@ impl FieldValue {
         self.matches_type_id_inner(type_id) && self.is_zero()
     }
 
-    /// Compare like Delphi `IsDefaultValue`: floats use `1e-10`, other types
-    /// compare exactly, and both sides must match the given TypeID.
+    /// Compare with core serializer default-value semantics: floats use
+    /// `1e-10`, other types compare exactly, and both sides must match the
+    /// given TypeID.
     #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub fn equals_delphi_value_for_type_id(&self, other: &Self, type_id: u8) -> bool {
@@ -146,14 +147,14 @@ impl FieldValue {
 
 /// Decoded snapshot of one strategy.
 ///
-/// Fields are stored by Delphi field name. Consumers can use `FieldValue::*`
+/// Fields are stored by core field name. Consumers can use `FieldValue::*`
 /// extractors, typed getters on `StrategyFields`, or higher-level convenience
 /// methods on `StrategySnapshot`.
 #[derive(Debug, Clone)]
 pub struct StrategySnapshot {
     pub strategy_id: u64,
     pub strategy_ver: i32,
-    /// Unix epoch milliseconds used by Delphi `FLastEditDate`/rollback guards.
+    /// Unix epoch milliseconds used by core stale-snapshot guards.
     ///
     /// UI code should use [`Self::last_edit_time`] for display and
     /// [`Self::new_at`] when creating snapshots from a typed timestamp. The raw
@@ -170,17 +171,17 @@ pub struct StrategySnapshot {
     ///
     /// `Arc<str>`: many strategies share the same folder path, so the reader
     /// hands out a refcount bump per strategy instead of a fresh heap copy —
-    /// matching Delphi's copy-on-write string assignment.
+    /// matching the core's copy-on-write folder-path behavior.
     pub path: Arc<str>,
     pub fields: StrategyFields,
 }
 
-/// Decoded strategy fields keyed by Delphi `NameDict` field name.
+/// Decoded strategy fields keyed by schema field name.
 ///
-/// This is intentionally a dense vector, not a Rust `HashMap`: Delphi reads a
-/// compact RTTI field stream in order, and each strategy usually has only a
-/// small visible field set. A dense list avoids per-field hashing while keeping
-/// the public ergonomic operations (`get`, `insert`, `iter`).
+/// This is intentionally a dense vector, not a `HashMap`: each strategy usually
+/// has only a small visible field set, and the wire stream is already ordered.
+/// A dense list avoids per-field hashing while keeping ergonomic operations
+/// (`get`, `insert`, `iter`).
 #[derive(Debug, Clone, Default)]
 pub struct StrategyFields {
     entries: Vec<(Arc<str>, FieldValue)>,
@@ -279,7 +280,7 @@ where
     }
 }
 
-/// Raw Delphi `TStrategyKind` ordinal (`Strategies.pas`).
+/// Raw strategy-kind ordinal from the MoonBot core.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StrategyKind(u8);
 
@@ -309,13 +310,13 @@ impl StrategyKind {
     pub const ALERTS: Self = Self(22);
     pub const WATCHER: Self = Self(23);
 
-    /// Build from the Delphi `TStrategyKind` ordinal exposed by
+    /// Build from the raw strategy-kind ordinal exposed by
     /// [`StrategySchemaKind`](crate::StrategySchemaKind).
     pub const fn from_ordinal(value: u8) -> Self {
         Self(value)
     }
 
-    /// Delphi `TStrategyKind` ordinal.
+    /// Raw strategy-kind ordinal.
     pub const fn ordinal(self) -> u8 {
         self.0
     }
@@ -343,7 +344,7 @@ impl StrategyKind {
     }
 }
 
-/// Delphi strategy active-state mode from `TStratForm.CheckActive`.
+/// Strategy active-state mode used when evaluating local strategy snapshots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StrategyActiveMode {
     /// `cfg.MoonProtoConfig.ActiveClient = true`.
@@ -358,7 +359,7 @@ impl StrategySnapshot {
     /// Build one local strategy snapshot for [`InitialStrategies`](crate::InitialStrategies)
     /// or [`MoonStrategies::sync_local_strategies`](crate::MoonStrategies::sync_local_strategies).
     ///
-    /// `kind` is typed so terminal code does not pass raw Delphi ordinals.
+    /// `kind` is typed so terminal code does not pass raw core ordinals.
     pub fn new<P>(
         strategy_id: u64,
         strategy_ver: i32,
@@ -385,7 +386,7 @@ impl StrategySnapshot {
     /// Build one local strategy snapshot from a typed UI timestamp.
     ///
     /// The serializer still stores `last_date` as Unix milliseconds because
-    /// Delphi uses that integer for stale-snapshot guards; this constructor
+    /// the core uses that integer for stale-snapshot guards; this constructor
     /// keeps application code on the normal MoonProto time type.
     pub fn new_at<P>(
         strategy_id: u64,

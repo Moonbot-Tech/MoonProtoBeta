@@ -6,9 +6,9 @@ use super::{write_str, EngineStreamReader};
 #[cfg(test)]
 const MARKET_TOKEN_TAG_MIN_WIRE_SIZE: usize = 2;
 
-/// `TTokenTag` flag set (Vars.pas:64). On the wire it is an i32 bitmask.
+/// Market token-tag flag set. On the wire it is an i32 bitmask.
 ///
-/// Bits correspond to the ordinals of the Delphi `TTokenTag` enum:
+/// Bits correspond to the stable MoonBot tag ordinals:
 /// `(tag_none, tag_Monitoring, tag_Fan, tag_seed, tag_launch, tag_gaming,
 ///   tag_New, tag_OLD, tag_BNB, tag_Alpha, tag_OICapped, tag_TradFi)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

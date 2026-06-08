@@ -28,7 +28,7 @@ impl Orders {
         self.current_snapshot_flag
     }
 
-    /// Delphi `TOrdersWorkers.TotalSellQuantity(m, PositionMode)`.
+    /// Total active closing sell quantity for one market and position side.
     ///
     /// Counts active non-emulator `OS_SellSet` workers for the requested market
     /// and side, summing `pSellOrder.QuantityRemaining`.
@@ -41,7 +41,7 @@ impl Orders {
             .sum()
     }
 
-    /// Delphi chart warning helper built from `TotalSellQuantity`.
+    /// Chart position-protection helper built from retained orders.
     ///
     /// The UI should use this instead of reading a position snapshot and then
     /// manually scanning all orders on every render tick.

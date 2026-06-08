@@ -105,6 +105,10 @@ impl ProtocolCore<'_> {
     }
 
     pub(crate) fn retry_pending_h(&mut self, cur_tm: i64) {
+        #[cfg(any(test, feature = "diagnostics"))]
+        let retry_start = Instant::now();
+        #[cfg(any(test, feature = "diagnostics"))]
+        let pending_count = self.client.pending_h.len();
         let path_delay = pending_h_path_delay(self.client.round_trip_delay);
         let mut to_drop = Vec::new();
         let mut to_resend = Vec::new();
@@ -134,6 +138,17 @@ impl ProtocolCore<'_> {
         for mut item in to_resend {
             self.send_h_item(&mut item, cur_tm);
         }
+        #[cfg(any(test, feature = "diagnostics"))]
+        self.client
+            .metrics
+            .protocol_metrics
+            .record_profile_phase_labeled(
+                ProfilePhase::RetryPendingH,
+                retry_start.elapsed(),
+                u8::MAX,
+                u8::MAX,
+                pending_count,
+            );
     }
 
     pub(crate) fn batch_send_direct(&mut self, item: &SendItem) {

@@ -12,14 +12,11 @@ impl Orders {
         }
     }
 
-    /// Remove orders whose worker would leave `WCache` after the current
-    /// `ProcessCommandOrder`/worker-loop batch, and return removed UID's.
+    /// Remove orders whose worker would leave the core worker cache after the
+    /// current command/worker-loop batch, and return removed UID's.
     ///
-    /// Delphi does not remove the worker from `WCache` inside
-    /// `TMoonProtoNetClient.ProcessCommandOrder` when a terminal status or
-    /// `TOrderNotFound` arrives. It marks/queues the worker command, and
-    /// `BOrderWorker.DoTheJobVirtual` removes it later. This deferred drain is
-    /// the Rust active-library counterpart: callers should run it after a
+    /// Terminal status and `OrderNotFound` do not remove the order immediately.
+    /// They mark it for deferred cleanup. This drain should run after a
     /// reader-decoded batch so visual commands that arrived immediately after
     /// the terminal packet can still target the same order.
     pub fn drain_pending_removals(&mut self) -> Vec<u64> {
@@ -173,10 +170,9 @@ impl Orders {
     /// `build_order_status_request`. Matches
     /// `MoonProtoClient.pas:637-666 CleanupMissingWorkers`.
     ///
-    /// Delphi checks `not Worker.JobIsDone`, but MoonProto virtual workers set
-    /// `JobIsDone` only after `DoTheJobVirtual` returns. While Rust keeps a
-    /// terminal entry for deferred removal, it still mirrors a worker that is
-    /// physically present in `WCache`, so it remains a cleanup candidate.
+    /// While Rust keeps a terminal entry for deferred removal, it still mirrors
+    /// a worker that is physically present in the core worker cache, so it
+    /// remains a cleanup candidate.
     pub fn missing_after_snapshot(&self) -> Vec<u64> {
         let flag = self.current_snapshot_flag;
         self.map

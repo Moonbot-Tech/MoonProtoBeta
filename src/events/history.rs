@@ -1,7 +1,13 @@
-﻿//! Retained-history worker wiring for `EventDispatcher`.
+//! Retained-history worker wiring for `EventDispatcher`.
 
 use super::*;
+#[cfg(any(test, feature = "diagnostics"))]
+use crate::client::metrics::{ProfilePhase, ProtocolMetrics};
+use crate::state::markets::CandleDeltaBaseline;
+use crate::time::MILLIS_PER_HOUR;
 use std::collections::HashSet;
+#[cfg(any(test, feature = "diagnostics"))]
+use std::time::{Duration, Instant};
 
 impl EventDispatcher {
     pub(crate) fn set_market_history_sizing(&mut self, sizing: MarketHistorySizing) {
@@ -54,46 +60,85 @@ impl EventDispatcher {
         &mut self,
         markets: &[crate::commands::candles::RequestCandlesMarket],
         now_ms: i64,
+        #[cfg(any(test, feature = "diagnostics"))] metrics: Option<&ProtocolMetrics>,
     ) -> Option<crate::state::CandlesSnapshotApplySummary> {
+        #[cfg(any(test, feature = "diagnostics"))]
+        let sync_start = Instant::now();
         self.sync_market_history_storage();
+        #[cfg(any(test, feature = "diagnostics"))]
+        record_candles_snapshot_profile(
+            metrics,
+            ProfilePhase::CandlesSnapshotSync,
+            sync_start.elapsed(),
+            markets.len(),
+        );
         let Some(handle) = &self.market_history else {
             return None;
         };
         let received_markets = markets.len();
         let received_candles = markets.iter().map(|market| market.candles_5m.len()).sum();
         let now_time = crate::MoonTime::now();
-        let retained_source = markets
-            .iter()
-            .filter(|market| self.active_trade_storage_allows_market(&market.market_name))
-            .collect::<Vec<_>>();
-        self.markets.apply_candles_delta_baselines(
-            retained_source
-                .iter()
-                .map(|market| (market.market_name.as_str(), market.candles_5m.as_slice())),
-            now_time,
-            now_ms,
-        );
-        let rows = retained_source
-            .iter()
-            .map(|market| MarketHistoryCandlesSnapshot {
+        #[cfg(any(test, feature = "diagnostics"))]
+        let build_rows_start = Instant::now();
+        let mut rows = Vec::new();
+        let mut baselines = Vec::new();
+        rows.try_reserve(markets.len()).ok()?;
+        baselines.try_reserve(markets.len()).ok()?;
+        for market in markets {
+            if !self.active_trade_storage_allows_market(&market.market_name) {
+                continue;
+            }
+            let (candles_5m, baseline) =
+                build_candle_rows_and_baseline(&market.candles_5m, now_time);
+            rows.push(MarketHistoryCandlesSnapshot {
                 market_name: market.market_name.clone(),
-                candles_5m: market
-                    .candles_5m
-                    .iter()
-                    .copied()
-                    .map(Candle5mRow::from_deep_price)
-                    .collect(),
-            })
-            .collect::<Vec<_>>();
+                candles_5m,
+            });
+            baselines.push(baseline);
+        }
         let retained_markets = rows.len();
         let retained_candles = rows.iter().map(|market| market.candles_5m.len()).sum();
+        #[cfg(any(test, feature = "diagnostics"))]
+        record_candles_snapshot_profile(
+            metrics,
+            ProfilePhase::CandlesSnapshotBuildRows,
+            build_rows_start.elapsed(),
+            retained_candles,
+        );
+        #[cfg(any(test, feature = "diagnostics"))]
+        let baselines_start = Instant::now();
+        self.markets.apply_candles_delta_baselines_precomputed(
+            rows.iter()
+                .zip(baselines.iter().copied())
+                .filter_map(|(market, baseline)| {
+                    baseline.map(|baseline| (market.market_name.as_str(), baseline))
+                }),
+            now_ms,
+        );
+        #[cfg(any(test, feature = "diagnostics"))]
+        record_candles_snapshot_profile(
+            metrics,
+            ProfilePhase::CandlesSnapshotBaselines,
+            baselines_start.elapsed(),
+            retained_candles,
+        );
         let summary = crate::state::CandlesSnapshotApplySummary {
             received_markets,
             received_candles,
             retained_markets,
             retained_candles,
         };
-        if rows.is_empty() || handle.apply_candles_snapshot(now_time, rows) {
+        #[cfg(any(test, feature = "diagnostics"))]
+        let queue_start = Instant::now();
+        let queued = rows.is_empty() || handle.apply_candles_snapshot(now_time, rows);
+        #[cfg(any(test, feature = "diagnostics"))]
+        record_candles_snapshot_profile(
+            metrics,
+            ProfilePhase::CandlesSnapshotQueue,
+            queue_start.elapsed(),
+            retained_markets,
+        );
+        if queued {
             Some(summary)
         } else {
             None
@@ -216,5 +261,73 @@ impl EventDispatcher {
         self.trade_storage_scope
             .as_ref()
             .is_none_or(|scope| scope.contains(market_name))
+    }
+}
+
+fn build_candle_rows_and_baseline(
+    candles: &[crate::commands::candles::DeepPrice],
+    now_time: crate::MoonTime,
+) -> (Vec<Candle5mRow>, Option<CandleDeltaBaseline>) {
+    let mut rows = Vec::with_capacity(candles.len());
+    let can_build_baseline = candles.len() >= 3 && candles.last().is_some_and(|c| c.time > 0.0);
+    let now_ms = now_time.unix_millis();
+    let mut coin_1h_sum = 0.0;
+    let mut coin_1h_count = 0usize;
+    let mut coin_24h_sum = 0.0;
+    let mut coin_24h_count = 0usize;
+    let mut btc_72h_sum = 0.0;
+    let mut btc_72h_count = 0usize;
+
+    for source in candles.iter().copied() {
+        let row = Candle5mRow::from_deep_price(source);
+        if can_build_baseline && row.time != crate::MoonTime::ZERO {
+            let age_ms = now_ms - row.time.unix_millis();
+            if age_ms >= 0 {
+                let h = age_ms / MILLIS_PER_HOUR;
+                let mean = f64::from(row.open + row.close + row.high + row.low) * 0.25;
+                if h == 0 {
+                    coin_1h_sum += mean;
+                    coin_1h_count += 1;
+                }
+                if h <= 24 {
+                    coin_24h_sum += mean;
+                    coin_24h_count += 1;
+                }
+                if h < 72 {
+                    btc_72h_sum += mean;
+                    btc_72h_count += 1;
+                }
+            }
+        }
+        rows.push(row);
+    }
+
+    let baseline = can_build_baseline.then(|| CandleDeltaBaseline {
+        coin_1h_avg: avg_or_zero(coin_1h_sum, coin_1h_count),
+        coin_24h_avg: avg_or_zero(coin_24h_sum, coin_24h_count),
+        btc_1h_avg: avg_or_zero(coin_1h_sum, coin_1h_count),
+        btc_24h_avg: avg_or_zero(coin_24h_sum, coin_24h_count),
+        btc_72h_avg: avg_or_zero(btc_72h_sum, btc_72h_count),
+    });
+    (rows, baseline)
+}
+
+fn avg_or_zero(sum: f64, count: usize) -> f64 {
+    if count == 0 {
+        0.0
+    } else {
+        sum / count as f64
+    }
+}
+
+#[cfg(any(test, feature = "diagnostics"))]
+fn record_candles_snapshot_profile(
+    metrics: Option<&ProtocolMetrics>,
+    phase: ProfilePhase,
+    duration: Duration,
+    payload_len: usize,
+) {
+    if let Some(metrics) = metrics {
+        metrics.record_profile_phase_labeled(phase, duration, u8::MAX, u8::MAX, payload_len);
     }
 }

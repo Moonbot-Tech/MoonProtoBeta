@@ -192,11 +192,35 @@ impl ProtocolCore<'_> {
             let _ = (recv_bytes, timestamp_ms);
             return true;
         }
+        #[cfg(any(test, feature = "diagnostics"))]
+        let sliced_start = Instant::now();
         let (assembled, ack) = self
             .client
             .transport
             .recv_slicer
             .on_new_sliced_with_session(payload, self.client.ack_session32_value);
+        #[cfg(any(test, feature = "diagnostics"))]
+        let (profile_cmd, profile_api_method, profile_payload_len) =
+            if let Some((_, cmd, assembled_payload, _, _)) = assembled.as_ref() {
+                (
+                    *cmd,
+                    metric_api_method(Command::from_byte(*cmd), assembled_payload),
+                    assembled_payload.len(),
+                )
+            } else {
+                (Command::Sliced.to_byte(), u8::MAX, payload.len())
+            };
+        #[cfg(any(test, feature = "diagnostics"))]
+        self.client
+            .metrics
+            .protocol_metrics
+            .record_profile_phase_labeled(
+                ProfilePhase::SlicedRecv,
+                sliced_start.elapsed(),
+                profile_cmd,
+                profile_api_method,
+                profile_payload_len,
+            );
 
         if slicing::trace_enabled() {
             if let Some(hdr) = slicing::SliceHeader::from_bytes(payload) {

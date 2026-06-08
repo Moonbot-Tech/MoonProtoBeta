@@ -1,13 +1,13 @@
 //! Transferable asset read model maintained by Active Lib.
 //!
-//! This is a separate entity from per-market balances. Delphi stores it in
-//! `Markets.FAssets[TExchangeKind]` and refreshes Spot/Futures/Quarterly
-//! wallets independently through `emk_UpdateTransferAssets`.
+//! This is a separate entity from per-market balances. Active Lib refreshes
+//! Spot/Futures/Quarterly wallets independently through
+//! `emk_UpdateTransferAssets`.
 
 use crate::commands::engine_api::TransferAsset;
 use std::sync::Arc;
 
-/// Delphi `TExchangeKind = (EX_Spot, EX_Futures, EX_QFutures)`.
+/// Wallet/exchange bucket kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum ExchangeKind {
@@ -115,7 +115,7 @@ impl TransferAssetsState {
         self.by_kind[kind.as_index()].as_slice()
     }
 
-    /// Iterate all wallet lists in Delphi enum order.
+    /// Iterate all wallet lists in wire enum order.
     pub fn iter(&self) -> impl Iterator<Item = (ExchangeKind, &[TransferAsset])> {
         ExchangeKind::ALL
             .into_iter()

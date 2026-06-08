@@ -1,9 +1,8 @@
 //! CoinCard deep-history candles maintained on demand by Active Lib.
 //!
 //! These are not the retained 5m candles loaded by `RequestCandlesData` and
-//! then updated from trades. Delphi stores this demand-driven UI history in
-//! `TMarket.CoinCardCandles` after a background worker calls
-//! `Engine.getDeepHistory(hk_4h, ...)`.
+//! then updated from trades. Active Lib stores this demand-driven UI history
+//! after a background request completes.
 
 use std::collections::HashMap;
 use std::sync::Arc;

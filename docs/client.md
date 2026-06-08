@@ -357,15 +357,14 @@ Cold init does not send a separate `GetMarketsIndexes`: `GetMarketsList` builds
 the server-index map from the server list order and stores the current
 `PeerAppToken`. After reconnect/server-token changes, the library
 refreshes `GetMarketsIndexes` before any `UpdateMarketsList` price refresh that
-depends on server `mIndex` values. Init also sends `TStratSchemaRequest` after
-AuthCheck. The decoded schema is stored in the active strategy state and
-contains strategy kinds, fields,
-TypeIDs, UI kind, picklists, visibility, and chapter/layout markers. This is
-agreed active-library behavior: clients use the live server schema for strategy
-UI metadata and typed `TStrategySerializer` snapshot writes instead of a
-hardcoded Rust copy of core strategy fields/defaults. Only this schema
-request/response is allowed through the pre-Init Strat gate; regular Strat
-commands remain closed until `domain_ready`.
+depends on server `mIndex` values. Init also requests the live strategy schema
+after AuthCheck. The decoded schema is stored in the active strategy state and
+contains strategy kinds, fields, TypeIDs, UI kind, picklists, visibility, and
+chapter/layout markers. This is agreed active-library behavior: clients use the
+live server schema for strategy UI metadata and typed strategy snapshot writes
+instead of a hardcoded Rust copy of core strategy fields/defaults. Only this
+schema request/response is allowed through the pre-Init Strat gate; regular
+strategy commands remain closed until `domain_ready`.
 Periodic market refresh starts only after init opens the domain gate, so
 BaseCheck/AuthCheck are not delayed by early background refresh traffic.
 Critical BaseCheck/AuthCheck waits use the MoonBot core default timeout:
@@ -402,13 +401,12 @@ mode, including internal low-level test pumps. This matches the MoonBot core
 `TradesResendResponse`, `OrderBook`, and `UI` pushes. Engine API responses and
 transport service packets are not part of this domain gate, because Init itself
 depends on Engine API. Once the Engine API init block succeeds, the helper opens
-the domain gate, requests `TStratSchema`, then sends the post-init refresh set:
-order snapshot request, full client strategy snapshot from the runtime-owned
-local strategy list, settings request, MM-orders subscription state, and balance
-refresh request. When the server later sends `TStratSnapshotRequest`, the
-runtime replies from the same current local strategy list; an empty list is a
-valid non-empty serializer payload. Terminal code does not build or send this
-reply manually. Set
+the domain gate, then sends the post-init refresh set: order snapshot request,
+full client strategy snapshot from the runtime-owned local strategy list,
+settings request, MM-orders subscription state, and balance refresh request.
+When the server later asks for the client's current strategy list, the runtime
+replies from the same owned list; an empty list is a valid non-empty serializer
+payload. Terminal code does not build or send this reply manually. Set
 `InitConfig::mm_orders_subscribe` when the UI needs a heat-map MM-orders
 subscription value. If it is `None`, a previously queued
 `set_mm_orders_subscription` intent is used; otherwise the post-init UI command
@@ -426,9 +424,10 @@ such as replace/cancel/stop/VStop/immune also do not mutate the local `Orders`
 cache before Init. The mandatory init primitives (`BaseCheck`, `AuthCheck`,
 `GetMarketsList`, `UpdateMarketsList`, and the strategy schema request) are
 owned by the runtime, not by application code.
-Balance bootstrap uses the post-init `TRequestBalanceRefresh`, matching the
-MoonBot core behavior where `GetMarketsBalanceFull` returns success without a
-serialized balance snapshot.
+Balance bootstrap uses the normal post-init balance refresh intent. It follows
+the MoonBot core behavior where the initial balance API call can report success
+without carrying a serialized balance snapshot; the retained per-market balance
+state is then updated by the regular balance stream.
 
 ## Trade Context
 

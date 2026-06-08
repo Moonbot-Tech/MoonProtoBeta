@@ -45,7 +45,7 @@ mod engine_api;
 mod helpers;
 mod init;
 mod lifecycle;
-mod metrics;
+pub(crate) mod metrics;
 mod protocol_api;
 mod protocol_connect;
 mod protocol_core;
@@ -72,6 +72,8 @@ mod socket;
 mod socket_lifecycle;
 mod subscription_api;
 mod subscriptions;
+#[cfg(any(test, feature = "diagnostics"))]
+mod thread_cpu;
 mod transport_state;
 
 pub use active_runtime::{
@@ -125,6 +127,8 @@ use helpers::*;
 #[cfg(test)]
 pub(crate) use init::{run_base_check_delphi, send_post_init_resync, CriticalInitStatus};
 use lifecycle::ClientLifecycle;
+#[cfg(any(test, feature = "diagnostics"))]
+use metrics::ProfilePhase;
 use metrics::{ClientMetrics, ProtocolMetrics};
 use protocol_core::ProtocolCore;
 use refresh_clocks::{PendingApi, RefreshClocks};

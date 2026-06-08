@@ -35,30 +35,6 @@ impl ClientSender {
         self.send_strat_snapshot_command(raw);
     }
 
-    /// Send `TStratSnapshot` from decoded strategy snapshots.
-    ///
-    /// `schema` must be the live `TStratSchema` fetched during Init; typed
-    /// strategy serialization uses it for Delphi field order, PropMask
-    /// visibility, TypeID checks, and defaults.
-    #[doc(hidden)]
-    pub(crate) fn strat_send_snapshot_batch(
-        &self,
-        server_epoch: u64,
-        full: bool,
-        schema: &crate::commands::strategy_schema::StrategySchema,
-        strategies: &[crate::commands::strategy_serializer::StrategySnapshot],
-    ) {
-        let uid: u64 = rand::random();
-        let raw = crate::commands::strat::build_snapshot_from_strategies(
-            uid,
-            server_epoch,
-            full,
-            schema,
-            strategies,
-        );
-        self.send_strat_snapshot_command(raw);
-    }
-
     /// Send `TStratDelete` for one strategy or folder.
     #[doc(hidden)]
     pub(crate) fn strat_delete(&self, strategy_id: u64, folder_path: &str) {

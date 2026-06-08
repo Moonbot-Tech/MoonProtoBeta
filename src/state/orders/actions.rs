@@ -1,18 +1,17 @@
 //! Local outgoing order-worker actions.
 //!
-//! These methods mirror Delphi worker-side pre-send gates such as
-//! `SendStopsIfChanged`, `SendVStopIfChanged`, and
-//! `DoTheJobVirtual.CheckReplaceFlag`.
+//! These methods keep the local Active Lib pre-send gates next to the retained
+//! order state: stop/VStop dedup, replace throttling, pending-cancel repeats,
+//! panic-sell toggles, and bulk-move candidate checks.
 
 use super::*;
 
 impl Orders {
-    /// Mark an order UID as having a Delphi local `vOrder`.
+    /// Mark an order UID as having a local visual order attached by the UI.
     ///
-    /// This is the public counterpart of UI/local order paths that assign
-    /// `NewOrder.vOrder := vo` before worker-side stop/VStop actions can send.
-    /// If the server order has not arrived yet, the marker is stored and applied
-    /// to the first `TOrderStatus` with the same UID.
+    /// Stop/VStop actions are only meaningful after the UI has attached a
+    /// visual order object. If the server order has not arrived yet, the marker
+    /// is stored and applied to the first status row with the same UID.
     pub fn mark_local_visual_order(&mut self, uid: u64) -> bool {
         if let Some(order) = self.order_mut(uid) {
             order.has_local_visual_order = true;
@@ -35,12 +34,12 @@ impl Orders {
         }
     }
 
-    /// Delphi active-client pre-send gate for
-    /// `TOrdersWorkers.MoveAllSells`.
+    /// Local pre-send gate for bulk moving active sell orders.
     ///
     /// `MoveKind` mode checks side + non-immune and rejects `RM_None`;
     /// `PriceZone` mode checks only market/status/non-immune before sending;
-    /// `%` (`Pers`) mode ignores immunity, matching the separate Delphi overload.
+    /// `%` (`Pers`) mode ignores immunity because it targets the whole sell
+    /// set by percentage.
     pub fn has_move_all_sells_candidate(
         &self,
         market_name: &str,
@@ -67,11 +66,10 @@ impl Orders {
         }
     }
 
-    /// Delphi active-client pre-send gate for
-    /// `TOrdersWorkers.MoveAllBuys`.
+    /// Local pre-send gate for bulk moving active buy orders.
     ///
-    /// Buy bulk move has only `MoveKind` and `%` modes in Delphi; there is no
-    /// buy-side `PriceZone` command.
+    /// Buy bulk move supports only `MoveKind` and `%` modes; there is no
+    /// buy-side `PriceZone` command on the wire.
     pub fn has_move_all_buys_candidate(
         &self,
         market_name: &str,
@@ -95,11 +93,11 @@ impl Orders {
         }
     }
 
-    /// Delphi `TOrdersWorkers.SetImmuneClicks` local side effect.
+    /// Apply the local "immune for clicks" side effect before sending it.
     ///
     /// Returns only items whose local active order was found and mutated. The
-    /// caller should send exactly these items in `TSetImmuneCommand`; an empty
-    /// list means Delphi would not put anything on the wire.
+    /// caller should send exactly these items in the immune-click update
+    /// command; an empty list means there is no valid wire command to send.
     pub fn set_immune_clicks(&mut self, items: &[ImmuneItem]) -> Vec<ImmuneItem> {
         let mut applied = Vec::new();
         for item in items {
@@ -115,11 +113,11 @@ impl Orders {
         applied
     }
 
-    /// Delphi `BOrderWorker.SendStopsIfChanged` local machine effect.
+    /// Deduplicate and prepare an outgoing stop-settings update.
     ///
     /// Returns the wire context only when a local worker exists and the stop
     /// record differs from the last applied/sent value. The comparison uses
-    /// `StopSettings::eq`, which is bit-exact like Delphi `CompareMem`.
+    /// `StopSettings::eq`, which is bit-exact over every packed field.
     pub(crate) fn send_stops_if_changed(
         &mut self,
         uid: u64,
@@ -134,9 +132,9 @@ impl Orders {
         // stops the server auto-defaulting take-profit on the SELL transition
         // (Unit1.pas:18760 `not v.TakeProfitChanged -> v.TakeProfit := DefTakeProfit`).
         // Forgetting to set it silently clobbers the trader's TP, so the runtime
-        // computes it like the Delphi GUI: true when the take-profit value or its
-        // enable flag differs from the order's current stops, and latched true once
-        // it has ever been set.
+        // computes it from the current retained order: true when the take-profit
+        // value or its enable flag differs from the order's current stops, and
+        // latched true once it has ever been set.
         let mut stops = *stops;
         let tp_changed = bool::from(order.stops.take_profit_changed)
             || stops.use_take_profit != order.stops.use_take_profit
@@ -154,11 +152,11 @@ impl Orders {
         ))
     }
 
-    /// Delphi `BOrderWorker.SendVStopIfChanged` local machine effect.
+    /// Deduplicate and prepare an outgoing VStop update.
     ///
     /// The outgoing packet uses the current worker status, not a caller-provided
-    /// status. The local VStop state is updated before queueing, just as Delphi
-    /// updates `FPrevVStop*` before `MClient.SendOrderCmd`.
+    /// status. The local VStop state is updated before queueing, so repeated
+    /// calls do not send unchanged VStop records.
     pub(crate) fn send_vstop_if_changed(
         &mut self,
         uid: u64,
@@ -197,7 +195,7 @@ impl Orders {
         ))
     }
 
-    /// Delphi `BOrderWorker.DoTheJobVirtual.CheckReplaceFlag` replace part.
+    /// Deduplicate and prepare one outgoing replace update.
     ///
     /// This combines the local UI intent (`p*Order.Price` +
     /// `p*Order.OrderReplace := true`) with the worker tick that sends only when
@@ -257,11 +255,12 @@ impl Orders {
         ))
     }
 
-    /// Delphi `BOrderWorker.DoTheJobVirtual.CheckReplaceFlag` cancel part.
+    /// Prepare one outgoing cancel request from retained local order state.
     ///
     /// Active buy/sell orders use local `FOrder.CancelRequest` and clear it
-    /// after queueing. Pending `OS_None` orders use `vOrder.PendingCancel` and
-    /// keep that flag set like Delphi.
+    /// after queueing. Pending `OS_None` orders keep `pending_cancel` set so the
+    /// runtime can repeat the replace-then-cancel pair until the server moves
+    /// the order out of pending state.
     pub(crate) fn send_cancel_if_requested(
         &mut self,
         uid: u64,
@@ -294,10 +293,10 @@ impl Orders {
         Some(out)
     }
 
-    /// Delphi `DoTheJobVirtual.CheckReplaceFlag` pending cancel branch.
+    /// Repeat pending cancel commands while an `OS_None` order is still pending.
     ///
-    /// Once `vOrder.PendingCancel` is true, Delphi keeps sending the
-    /// replace-then-cancel pair from the 32 ms worker loop until status leaves
+    /// Once `pending_cancel` is true, the runtime keeps sending the
+    /// replace-then-cancel pair on the 32 ms worker cadence until status leaves
     /// `OS_None`.
     pub(crate) fn tick_pending_cancel_resends(&mut self, now_ms: i64) -> Vec<OrderCancelSend> {
         let mut sends = Vec::new();
@@ -328,7 +327,7 @@ impl Orders {
         sends
     }
 
-    /// Delphi `CheckReplaceFlag` panic-sell part.
+    /// Deduplicate and prepare one panic-sell toggle.
     ///
     /// Sends only for `OS_SellSet` and only when `FPanicSell` differs from
     /// `PrevPanicSell`; then updates the previous value before queueing.
@@ -353,12 +352,12 @@ impl Orders {
         })
     }
 
-    /// Delphi `TOrdersWorkers.TurnPanicSell(m, AValue)`.
+    /// Set panic-sell state for all active sell workers in one market.
     ///
     /// Sets `FPanicSell := AValue` on all active `OS_SellSet` workers in the
     /// market. The returned sends are exactly the workers whose
-    /// `PrevPanicSell` differs and whose `CheckReplaceFlag` would enqueue
-    /// `TTurnPanicSellCommand` on its next tick.
+    /// `PrevPanicSell` differs and whose worker tick must enqueue a
+    /// `TurnPanicSell` command.
     pub(crate) fn turn_panic_sell_by_market(
         &mut self,
         market_name: &str,
@@ -382,7 +381,7 @@ impl Orders {
         sends
     }
 
-    /// Delphi `TOrdersWorkers.SwitchPanicSellByMarket(m, TurnON)`.
+    /// Toggle panic-sell state for one market.
     ///
     /// If any active sell worker in the market already has `FPanicSell`, the
     /// function turns panic sell off for all active sell workers and returns

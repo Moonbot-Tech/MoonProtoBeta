@@ -201,15 +201,15 @@ impl MoonOrders {
 /// These actions create or manage orders by selected market. Terminal UI can
 /// pass its retained `MarketHandle` through `*_for_market` helpers; scripts can
 /// still use market-name helpers. The caller never passes `TradeCtx`; the
-/// runtime owner derives route bytes from the active session and queues the
-/// same wire commands as the low-level `Client`.
+/// runtime owner derives the active session route and queues the corresponding
+/// trading intent.
 #[derive(Clone)]
 pub struct MoonTrade {
     pub(super) tx: mpsc::Sender<RuntimeCommand>,
 }
 
 impl MoonTrade {
-    /// Send `TNewOrderCommand`.
+    /// Queue a new order intent.
     pub fn new_order(&self, params: NewOrderParams) -> Result<NewOrderTicket, MoonClientError> {
         let request_uid = random_nonzero_u64();
         self.send_intent(RuntimeTradeCommandKind::NewOrder {
@@ -223,7 +223,7 @@ impl MoonTrade {
         })
     }
 
-    /// Send `TJoinOrdersCommand`.
+    /// Join matching orders for a market and side.
     pub fn join_orders(
         &self,
         market_name: impl Into<String>,
@@ -235,7 +235,7 @@ impl MoonTrade {
         })
     }
 
-    /// Send `TJoinOrdersCommand` for a retained selected market.
+    /// Join matching orders for a retained selected market.
     pub fn join_orders_for_market(
         &self,
         market: &crate::state::MarketHandle,
@@ -244,7 +244,7 @@ impl MoonTrade {
         self.join_orders(market.name(), side)
     }
 
-    /// Send `TSplitOrderCommand`.
+    /// Split the selected order according to `params`.
     pub fn split_order(&self, params: SplitOrderParams) -> Result<(), MoonClientError> {
         self.send_intent(RuntimeTradeCommandKind::SplitOrder(params))
     }
@@ -297,7 +297,7 @@ impl MoonTrade {
         self.move_all_buys(market.name(), params)
     }
 
-    /// Send `TDoClosePositionCommand`.
+    /// Close the current position according to `params`.
     pub fn close_position(
         &self,
         params: super::ClosePositionParams,
@@ -305,7 +305,7 @@ impl MoonTrade {
         self.send_intent(RuntimeTradeCommandKind::ClosePosition(params))
     }
 
-    /// Send `TDoLimitClosePositionCommand`.
+    /// Close the current position by placing closing limit orders.
     pub fn limit_close_position(
         &self,
         market_name: impl Into<String>,
@@ -317,7 +317,7 @@ impl MoonTrade {
         })
     }
 
-    /// Send `TDoLimitClosePositionCommand` for a retained selected market.
+    /// Close the current retained selected-market position by limit orders.
     pub fn limit_close_position_for_market(
         &self,
         market: &crate::state::MarketHandle,
@@ -326,7 +326,7 @@ impl MoonTrade {
         self.limit_close_position(market.name(), side)
     }
 
-    /// Send `TDoSplitPositionCommand`.
+    /// Split the current position for a market and side.
     pub fn split_position(
         &self,
         market_name: impl Into<String>,
@@ -338,7 +338,7 @@ impl MoonTrade {
         })
     }
 
-    /// Send `TDoSplitPositionCommand` for a retained selected market.
+    /// Split the current position for a retained selected market.
     pub fn split_position_for_market(
         &self,
         market: &crate::state::MarketHandle,
@@ -347,12 +347,12 @@ impl MoonTrade {
         self.split_position(market.name(), side)
     }
 
-    /// Send `TDoSellOrderCommand`.
+    /// Place a sell order according to `params`.
     pub fn sell_order(&self, params: SellOrderParams) -> Result<(), MoonClientError> {
         self.send_intent(RuntimeTradeCommandKind::SellOrder(params))
     }
 
-    /// Send `TDoMarketSplitPositionCommand`.
+    /// Split the current position using market-order semantics.
     pub fn market_split_position(
         &self,
         market_name: impl Into<String>,
@@ -364,7 +364,7 @@ impl MoonTrade {
         })
     }
 
-    /// Send `TDoMarketSplitPositionCommand` for a retained selected market.
+    /// Split the current retained selected-market position using market-order semantics.
     pub fn market_split_position_for_market(
         &self,
         market: &crate::state::MarketHandle,
@@ -373,14 +373,14 @@ impl MoonTrade {
         self.market_split_position(market.name(), side)
     }
 
-    /// Send `TPenaltyCommand`.
+    /// Apply the core penalty action for a market.
     pub fn penalty(&self, market_name: impl Into<String>) -> Result<(), MoonClientError> {
         self.send_intent(RuntimeTradeCommandKind::Penalty {
             market_name: market_name.into(),
         })
     }
 
-    /// Send `TPenaltyCommand` for a retained selected market.
+    /// Apply the core penalty action for a retained selected market.
     pub fn penalty_for_market(
         &self,
         market: &crate::state::MarketHandle,
@@ -637,9 +637,8 @@ impl MoonSettings<'_> {
     /// Exclude globally blacklisted coins from `markets().global_deltas()`.
     ///
     /// This is the local terminal checkbox "Exclude blacklisted markets from
-    /// the market delta calculation". It does not travel inside
-    /// `TClientSettingsCommand`; Active Lib applies it locally to the retained
-    /// market analytics state.
+    /// the market delta calculation". It is not a server settings field; Active
+    /// Lib applies it locally to the retained market analytics state.
     pub fn set_exclude_blacklisted_markets_from_exchange_delta(
         &self,
         exclude: bool,
@@ -674,7 +673,7 @@ impl MoonSettings<'_> {
         self.client.switch_spot(spot)
     }
 
-    /// Send a leverage-management command (`TLevManageCommand`, CmdId 9).
+    /// Update leverage-management settings.
     ///
     /// Set the behavioural fields on `cmd` (auto max-order, auto lev-up,
     /// isolated/cross, fix-lev, telegram report, lev-control text). Its `uid`
@@ -775,8 +774,7 @@ impl MoonSettings<'_> {
         )
     }
 
-    /// Send a reset-profit command (`TResetProfitCommand`, CmdId 11): reset the
-    /// current-session or all-time profit counter on the server.
+    /// Reset the current-session or all-time profit counter on the server.
     pub fn reset_profit(
         &self,
         kind: crate::commands::ui::ResetProfitKind,
@@ -784,8 +782,7 @@ impl MoonSettings<'_> {
         self.client.reset_profit(kind.to_byte())
     }
 
-    /// Send an arb-activation notify (`TArbActivateNotify`, CmdId 12): tell the
-    /// server arbitrage is valid until `valid_until`.
+    /// Tell the server arbitrage is valid until `valid_until`.
     pub fn notify_arb_activation(
         &self,
         valid_until: crate::MoonTime,
@@ -908,7 +905,7 @@ impl MoonChartText<'_> {
 ///
 /// This is the high-level path for MoonBot's draw-tool emulator: terminal code
 /// selects a market, builds `EmuTradePoint` values from chart points, and Active
-/// Lib resolves the current server index before sending `TEmuTradesCommand`.
+/// Lib resolves the current server index before sending the emulator intent.
 pub struct MoonEmulator<'a> {
     pub(super) client: &'a MoonClient,
 }
@@ -918,8 +915,7 @@ impl MoonEmulator<'_> {
     ///
     /// The UI passes absolute chart points, Active Lib starts from the market's
     /// current `LastAsk`, converts falling points to sell ticks, skips points
-    /// outside the wire `Word` millisecond window, and queues one
-    /// `TEmuTradesCommand`.
+    /// outside the compact millisecond window, and queues one emulator intent.
     pub fn send_pencil_prices_for_market<I>(
         &self,
         market: &crate::state::MarketHandle,

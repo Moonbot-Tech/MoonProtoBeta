@@ -18,10 +18,9 @@ use super::{MarketHandle, MarketsEvent, MarketsState};
 impl MarketsState {
     /// Apply the `emk_GetMarketsList` response.
     ///
-    /// Delphi does not replace the whole market universe on a repeated list
-    /// response. Existing `TMarket` objects are updated through
-    /// `CopyFromMarket`, old live price state is preserved, absent old markets
-    /// stay in `Markets`, and CorrMarkets are add/update-only.
+    /// Repeated list responses update the existing market universe in place:
+    /// live price state is preserved, absent old markets stay available, and
+    /// CorrMarkets are add/update-only.
     pub fn apply_markets_list(&mut self, resp: MarketsListResponse) -> MarketsEvent {
         let first_create_markets = self.markets.is_empty();
         let new_market_found = self.markets_list_refresh_needed;
@@ -117,11 +116,11 @@ impl MarketsState {
         }
     }
 
-    /// Active-library direct counterpart of Delphi `GetMarketsList`.
+    /// Direct Active Lib apply path for `GetMarketsList`.
     ///
-    /// Delphi applies each market inside the read loop, rebuilds server indexes
-    /// after that loop, then applies CorrMarkets. If a CorrMarket read fails,
-    /// already-read markets and rebuilt indexes remain.
+    /// The protocol applies each market inside the read loop, rebuilds server
+    /// indexes after that loop, then applies CorrMarkets. If a CorrMarket read
+    /// fails, already-read markets and rebuilt indexes remain.
     // parity: MoonBot MoonProtoEngine.pas:GetMarketsList
     pub(crate) fn apply_markets_list_payload(
         &mut self,
@@ -355,8 +354,8 @@ fn merge_market_from_list(dst: &mut Market, src: &Market, copy_max_leverage: boo
 }
 
 /// Seed the live `MarketPrice.funding_*` from the market's funding fields when a
-/// market first enters the universe. Delphi `market_price_from_market` analogue:
-/// bid/ask/mark stay zero until the first `UpdateMarketsList`.
+/// market first enters the universe. Bid/ask/mark stay zero until the first
+/// `UpdateMarketsList`.
 fn seed_price_funding_from_market(handle: &MarketHandle) {
     handle.with_mut(|m| {
         m.price.funding_rate = m.funding_rate;

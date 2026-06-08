@@ -1,18 +1,18 @@
 //! Settings sync state — latest UI/settings snapshots received from the server.
 //!
-//! Delphi source: `MoonProto/MoonProtoUIStruct.pas`. The state layer keeps the
-//! latest snapshot for each supported subcommand; applying those settings to an
-//! application UI/engine is the consumer's responsibility.
+//! The state layer keeps the latest snapshot for each supported subcommand;
+//! applying those settings to an application UI/engine is the consumer's
+//! responsibility.
 //!
 //! ## Tracked State
-//! - `ClientSettings` (CmdId=1): full UI settings snapshot.
-//! - `LevManage` (CmdId=9): leverage-management settings snapshot.
-//! - `ArbActivateNotify` (CmdId=12): Delphi `TDateTime` expiration value.
+//! - `ClientSettings`: full UI settings snapshot.
+//! - `LevManage`: leverage-management settings snapshot.
+//! - `ArbActivateNotify`: arbitrage-valid-until timestamp.
 //!
 //! Client->server action commands (`SettingsRequest`, `StratStartStop`,
 //! `MMOrdersSubscribe`, `EmuTrades`, `TriggerManage`, `ResetProfit`,
 //! `SwitchDex`, `SwitchSpot`) are sent through high-level handles and ignored
-//! if they ever arrive inbound, matching the Delphi client receive branch.
+//! if they ever arrive inbound.
 //! `NewMarketNotify` is an internal Active Lib trigger: the dispatcher uses it
 //! to force listing refresh, and user code receives a market event only after
 //! the refreshed list actually inserts new markets.
@@ -20,28 +20,28 @@
 use crate::commands::ui::{ClientSettingsCommand, LevManage, UICommand};
 use crate::time::MoonTime;
 
-/// Synchronized UI/settings state updated by `apply(UICommand)`.
+/// Synchronized UI/settings state updated from inbound UI settings packets.
 ///
 /// Settings are snapshot state, not accumulated history. Every accepted
-/// `TClientSettingsCommand` fully replaces `client_settings`.
+/// full settings snapshot fully replaces `client_settings`.
 #[derive(Debug, Clone, Default)]
 pub struct SettingsState {
     /// Last received client settings snapshot.
     pub client_settings: Option<ClientSettingsCommand>,
-    /// Current `cfg` fallback for append-only `TClientSettingsCommand` tails.
+    /// Current settings fallback for append-only packet tails.
     ///
-    /// Delphi `CreateFromStream` fills missing append-only tail fields from
-    /// current `cfg` when an old packet does not contain them. After every full
-    /// settings snapshot this fallback is refreshed automatically; before the
-    /// first snapshot, low-level dispatcher tests/tools may seed it through
-    /// the hidden fallback helper.
+    /// Old packets may omit append-only tail fields; those fields are filled
+    /// from the current retained settings. After every full settings snapshot
+    /// this fallback is refreshed automatically; before the first snapshot,
+    /// low-level dispatcher tests/tools may seed it through the hidden fallback
+    /// helper.
     client_settings_fallback: ClientSettingsCommand,
     /// Current leverage-management settings, if received.
     pub lev_manage: Option<LevManage>,
     /// Raw `TDateTime` days for diagnostics/parity tests.
     ///
     /// Normal terminal code should use [`Self::arb_valid_until_time`] and
-    /// [`Self::arb_is_active_now`] instead of carrying Delphi day doubles.
+    /// [`Self::arb_is_active_now`] instead of carrying wire day doubles.
     #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub arb_valid_until: Option<f64>,
@@ -55,10 +55,10 @@ pub enum SettingsEvent {
     ClientSettingsUpdated,
     /// Leverage-management snapshot changed.
     LevManageUpdated,
-    /// Remote update command (UI CmdId=6): version name + release/test flag.
+    /// Remote update command: version name + release/test flag.
     ///
-    /// Delphi clients treat this as a request to run their local updater. The
-    /// Rust state layer only surfaces the wire command; application code decides
+    /// Terminal clients treat this as a request to run their local updater. The
+    /// state layer only surfaces the wire command; application code decides
     /// whether/how to update itself.
     VersionUpdate {
         #[cfg(any(test, feature = "diagnostics"))]
@@ -75,7 +75,7 @@ pub enum SettingsEvent {
         arb_valid: MoonTime,
     },
     /// Command from a future protocol version. Low-level diagnostics can surface
-    /// it, while `EventDispatcher` skips it like Delphi registry `FSkipped`.
+    /// it, while `EventDispatcher` skips it without state changes.
     #[cfg(any(test, feature = "diagnostics"))]
     Skipped { cmd_id: u8, uid: u64, ver: u16 },
     /// Unknown subcommand for forward compatibility.
@@ -103,8 +103,8 @@ impl SettingsState {
             .is_some_and(|valid_until| valid_until > now)
     }
 
-    /// Seed Delphi `cfg` fallback used while parsing old `TClientSettingsCommand`
-    /// payloads with missing append-only tail fields.
+    /// Seed settings fallback used while parsing old settings packets with
+    /// missing append-only tail fields.
     #[doc(hidden)]
     #[cfg(test)]
     pub(crate) fn set_client_settings_fallback(&mut self, fallback: ClientSettingsCommand) {

@@ -162,8 +162,8 @@ if let Some(mut lev) = client
 }
 ```
 
-The wire UID and command-version fields are not user input. The runtime writes a
-fresh UID and the current leverage command version when it queues the command.
+Internal command UID/version fields are not user input. The runtime writes fresh
+bookkeeping values when it queues the leverage update.
 
 Leverage-management fields are UI controls, not protocol switches:
 
@@ -185,9 +185,8 @@ emit `SettingsEvent::ArbActivated { arb_valid }`, where `arb_valid` is a
 `MoonTime`.
 
 For UI gating, use `snapshot().settings().arb_is_active_now()` or
-`arb_is_active_at(now)`. This matches MoonBot's `cfg.ArbActive :=
-cfg.ArbValid > Now` meaning without exposing the raw wire-day double as the
-terminal model.
+`arb_is_active_at(now)`. Active Lib exposes the ready boolean/time helpers
+instead of making terminal code compare raw wire-day values.
 
 ### Chart Trade Emulator
 
@@ -251,10 +250,9 @@ code gets the listing signal from the market domain only after the refreshed
 market list actually inserts new markets:
 `Event::Markets(MarketsEvent::NewMarketsAdded { names })`.
 
-Internally, `UICommand::ClientSettings` stores the settings snapshot as
-`Box<ClientSettingsCommand>` to keep the command envelope small. Normal
-application code does not parse `UICommand` directly; it reads the applied
-`SettingsState`.
+Normal application code does not parse inbound UI packets directly. It reads the
+applied `SettingsState` and sends changes through the typed `client.settings()`
+handle.
 
 ## ClientSettings
 
@@ -322,9 +320,8 @@ they write the same fields while hiding the historic `x_tmode` scale flag and
 the scalp-mode `x_sell=0` convention.
 
 `set_exclude_blacklisted_markets_from_exchange_delta` is local Active Lib
-policy, not a `TClientSettingsCommand` wire field. When enabled, markets whose
-currency appears in
-`coins_black_list_text` are skipped from `MarketsState::global_deltas()`
+policy, not a server setting field. When enabled, markets whose currency appears
+in `coins_black_list_text` are skipped from `MarketsState::global_deltas()`
 exchange-delta aggregation.
 
 AutoStart is stored on the wire as two fixed compact blobs, but Active Lib keeps
