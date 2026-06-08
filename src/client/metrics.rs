@@ -178,6 +178,16 @@ pub struct ProtocolMetricsSnapshot {
     pub active_dispatch_over_100us: u64,
     pub active_dispatch_over_1ms: u64,
     pub active_dispatch_over_5ms: u64,
+    /// OS thread CPU time / cycles for active/domain dispatch.
+    pub active_dispatch_thread_cpu_count: u64,
+    pub active_dispatch_thread_cpu_ns: u64,
+    pub active_dispatch_thread_cpu_max_ns: u64,
+    pub active_dispatch_thread_cpu_over_100us: u64,
+    pub active_dispatch_thread_cpu_over_1ms: u64,
+    pub active_dispatch_thread_cpu_over_5ms: u64,
+    pub active_dispatch_thread_cycles_count: u64,
+    pub active_dispatch_thread_cycles_total: u64,
+    pub active_dispatch_thread_cycles_max: u64,
     /// Total nanoseconds spent in the send/maintenance phase.
     pub send_phase_ns: u64,
     /// Maximum single send/maintenance phase duration, in nanoseconds.
@@ -405,6 +415,15 @@ pub(crate) struct ProtocolMetrics {
     active_dispatch_over_100us: AtomicU64,
     active_dispatch_over_1ms: AtomicU64,
     active_dispatch_over_5ms: AtomicU64,
+    active_dispatch_thread_cpu_count: AtomicU64,
+    active_dispatch_thread_cpu_ns: AtomicU64,
+    active_dispatch_thread_cpu_max_ns: AtomicU64,
+    active_dispatch_thread_cpu_over_100us: AtomicU64,
+    active_dispatch_thread_cpu_over_1ms: AtomicU64,
+    active_dispatch_thread_cpu_over_5ms: AtomicU64,
+    active_dispatch_thread_cycles_count: AtomicU64,
+    active_dispatch_thread_cycles_total: AtomicU64,
+    active_dispatch_thread_cycles_max: AtomicU64,
     send_phase_ns: AtomicU64,
     send_phase_max_ns: AtomicU64,
     last_pmtu: AtomicU64,
@@ -541,6 +560,26 @@ impl ProtocolMetrics {
         }
     }
 
+    pub(crate) fn record_active_dispatch_thread_cpu(&self, duration: Duration) {
+        record_timing(
+            &self.active_dispatch_thread_cpu_count,
+            &self.active_dispatch_thread_cpu_ns,
+            &self.active_dispatch_thread_cpu_max_ns,
+            &self.active_dispatch_thread_cpu_over_100us,
+            &self.active_dispatch_thread_cpu_over_1ms,
+            &self.active_dispatch_thread_cpu_over_5ms,
+            duration,
+        );
+    }
+
+    pub(crate) fn record_active_dispatch_thread_cycles(&self, cycles: u64) {
+        self.active_dispatch_thread_cycles_count
+            .fetch_add(1, Ordering::Relaxed);
+        self.active_dispatch_thread_cycles_total
+            .fetch_add(cycles, Ordering::Relaxed);
+        let _ = store_max(&self.active_dispatch_thread_cycles_max, cycles);
+    }
+
     pub(crate) fn snapshot(&self, public_event_queue_len: usize) -> ProtocolMetricsSnapshot {
         ProtocolMetricsSnapshot {
             recv_count: self.recv_count.load(Ordering::Relaxed),
@@ -625,6 +664,33 @@ impl ProtocolMetrics {
             active_dispatch_over_100us: self.active_dispatch_over_100us.load(Ordering::Relaxed),
             active_dispatch_over_1ms: self.active_dispatch_over_1ms.load(Ordering::Relaxed),
             active_dispatch_over_5ms: self.active_dispatch_over_5ms.load(Ordering::Relaxed),
+            active_dispatch_thread_cpu_count: self
+                .active_dispatch_thread_cpu_count
+                .load(Ordering::Relaxed),
+            active_dispatch_thread_cpu_ns: self
+                .active_dispatch_thread_cpu_ns
+                .load(Ordering::Relaxed),
+            active_dispatch_thread_cpu_max_ns: self
+                .active_dispatch_thread_cpu_max_ns
+                .load(Ordering::Relaxed),
+            active_dispatch_thread_cpu_over_100us: self
+                .active_dispatch_thread_cpu_over_100us
+                .load(Ordering::Relaxed),
+            active_dispatch_thread_cpu_over_1ms: self
+                .active_dispatch_thread_cpu_over_1ms
+                .load(Ordering::Relaxed),
+            active_dispatch_thread_cpu_over_5ms: self
+                .active_dispatch_thread_cpu_over_5ms
+                .load(Ordering::Relaxed),
+            active_dispatch_thread_cycles_count: self
+                .active_dispatch_thread_cycles_count
+                .load(Ordering::Relaxed),
+            active_dispatch_thread_cycles_total: self
+                .active_dispatch_thread_cycles_total
+                .load(Ordering::Relaxed),
+            active_dispatch_thread_cycles_max: self
+                .active_dispatch_thread_cycles_max
+                .load(Ordering::Relaxed),
             send_phase_ns: self.send_phase_ns.load(Ordering::Relaxed),
             send_phase_max_ns: self.send_phase_max_ns.load(Ordering::Relaxed),
             public_event_queue_len,

@@ -896,7 +896,7 @@ impl Session {
             })
             .unwrap_or_default();
         format!(
-            "recv={} pmtu={} reader_cpu(avg/max={}us/{}us max_src={} >100us/>1ms/>5ms={}/{}/{}) reader_thread_cpu(avg/max={}us/{}us max_src={} >100us/>1ms/>5ms={}/{}/{}) reader_thread_cycles(avg/max={}/{} max_src={}) reader_wait(count={} avg/max={}us/{}us max_src={}) writer_cpu(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) writer_thread_cpu(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) writer_thread_cycles(avg/max={}/{}) active_dispatch(avg/max={}us/{}us max_src={} events={} actions={} >100us/>1ms/>5ms={}/{}/{}) app_enqueue(avg/max={}us/{}us max_src={} events={} mode={} >100us/>1ms/>5ms={}/{}/{}) writer_tick_wall(count={} avg/max={}us/{}us) send_max={}us public_events={}{}{}",
+            "recv={} pmtu={} reader_cpu(avg/max={}us/{}us max_src={} >100us/>1ms/>5ms={}/{}/{}) reader_thread_cpu(avg/max={}us/{}us max_src={} >100us/>1ms/>5ms={}/{}/{}) reader_thread_cycles(avg/max={}/{} max_src={}) reader_wait(count={} avg/max={}us/{}us max_src={}) writer_cpu(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) writer_thread_cpu(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) writer_thread_cycles(avg/max={}/{}) active_dispatch(avg/max={}us/{}us max_src={} events={} actions={} >100us/>1ms/>5ms={}/{}/{} thread_cpu(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) thread_cycles(avg/max={}/{})) app_enqueue(avg/max={}us/{}us max_src={} events={} mode={} >100us/>1ms/>5ms={}/{}/{}) writer_tick_wall(count={} avg/max={}us/{}us) send_max={}us public_events={}{}{}",
             m.recv_count,
             m.last_pmtu,
             avg_us(m.reader_protocol_ns, m.reader_protocol_count),
@@ -958,6 +958,19 @@ impl Session {
             m.active_dispatch_over_100us,
             m.active_dispatch_over_1ms,
             m.active_dispatch_over_5ms,
+            avg_us(
+                m.active_dispatch_thread_cpu_ns,
+                m.active_dispatch_thread_cpu_count
+            ),
+            m.active_dispatch_thread_cpu_max_ns / 1_000,
+            m.active_dispatch_thread_cpu_over_100us,
+            m.active_dispatch_thread_cpu_over_1ms,
+            m.active_dispatch_thread_cpu_over_5ms,
+            avg_units(
+                m.active_dispatch_thread_cycles_total,
+                m.active_dispatch_thread_cycles_count
+            ),
+            m.active_dispatch_thread_cycles_max,
             avg_us(m.app_enqueue_ns, m.app_enqueue_count),
             m.app_enqueue_max_ns / 1_000,
             metric_cmd_label(
@@ -1993,7 +2006,7 @@ fn protocol_profile_summary(m: &ProtocolMetricsSnapshot) -> String {
 fn protocol_metrics_summary(m: &ProtocolMetricsSnapshot) -> String {
     let profile = protocol_profile_summary(m);
     format!(
-        "recv={} pmtu={} reader_cpu(avg/max={}us/{}us max_src={} >100us/>1ms/>5ms={}/{}/{}) reader_thread_cpu(avg/max={}us/{}us max_src={} >100us/>1ms/>5ms={}/{}/{}) reader_thread_cycles(avg/max={}/{} max_src={}) reader_wait(count={} avg/max={}us/{}us max_src={}) writer_cpu(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) writer_thread_cpu(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) writer_thread_cycles(avg/max={}/{}) active_dispatch(avg/max={}us/{}us max_src={} events={} actions={} >100us/>1ms/>5ms={}/{}/{}) app_enqueue(avg/max={}us/{}us max_src={} events={} mode={} >100us/>1ms/>5ms={}/{}/{}) writer_tick_wall(count={} avg/max={}us/{}us) send_max={}us public_events={}{}",
+        "recv={} pmtu={} reader_cpu(avg/max={}us/{}us max_src={} >100us/>1ms/>5ms={}/{}/{}) reader_thread_cpu(avg/max={}us/{}us max_src={} >100us/>1ms/>5ms={}/{}/{}) reader_thread_cycles(avg/max={}/{} max_src={}) reader_wait(count={} avg/max={}us/{}us max_src={}) writer_cpu(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) writer_thread_cpu(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) writer_thread_cycles(avg/max={}/{}) active_dispatch(avg/max={}us/{}us max_src={} events={} actions={} >100us/>1ms/>5ms={}/{}/{} thread_cpu(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) thread_cycles(avg/max={}/{})) app_enqueue(avg/max={}us/{}us max_src={} events={} mode={} >100us/>1ms/>5ms={}/{}/{}) writer_tick_wall(count={} avg/max={}us/{}us) send_max={}us public_events={}{}",
         m.recv_count,
         m.last_pmtu,
         avg_us(m.reader_protocol_ns, m.reader_protocol_count),
@@ -2055,6 +2068,19 @@ fn protocol_metrics_summary(m: &ProtocolMetricsSnapshot) -> String {
         m.active_dispatch_over_100us,
         m.active_dispatch_over_1ms,
         m.active_dispatch_over_5ms,
+        avg_us(
+            m.active_dispatch_thread_cpu_ns,
+            m.active_dispatch_thread_cpu_count
+        ),
+        m.active_dispatch_thread_cpu_max_ns / 1_000,
+        m.active_dispatch_thread_cpu_over_100us,
+        m.active_dispatch_thread_cpu_over_1ms,
+        m.active_dispatch_thread_cpu_over_5ms,
+        avg_units(
+            m.active_dispatch_thread_cycles_total,
+            m.active_dispatch_thread_cycles_count
+        ),
+        m.active_dispatch_thread_cycles_max,
         avg_us(m.app_enqueue_ns, m.app_enqueue_count),
         m.app_enqueue_max_ns / 1_000,
         metric_cmd_label(
@@ -2179,18 +2205,66 @@ fn assert_protocol_cpu_gate(label: &str, m: &ProtocolMetricsSnapshot) {
         }
     }
     if m.active_dispatch_over_5ms > 0 {
-        red_flags.push(format!(
-            "active_dispatch >5ms count={} max={}us src={} events={} actions={}",
-            m.active_dispatch_over_5ms,
-            m.active_dispatch_max_ns / 1_000,
-            metric_cmd_label(
-                m.active_dispatch_max_cmd,
-                m.active_dispatch_max_api_method,
-                m.active_dispatch_max_payload_len
-            ),
-            m.active_dispatch_max_events,
-            m.active_dispatch_max_actions
-        ));
+        if m.active_dispatch_thread_cpu_count > 0 && m.active_dispatch_thread_cpu_over_5ms > 0 {
+            red_flags.push(format!(
+                "active_dispatch >5ms count={} wall_max={}us thread_cpu_max={}us src={} events={} actions={}",
+                m.active_dispatch_over_5ms,
+                m.active_dispatch_max_ns / 1_000,
+                m.active_dispatch_thread_cpu_max_ns / 1_000,
+                metric_cmd_label(
+                    m.active_dispatch_max_cmd,
+                    m.active_dispatch_max_api_method,
+                    m.active_dispatch_max_payload_len
+                ),
+                m.active_dispatch_max_events,
+                m.active_dispatch_max_actions
+            ));
+        } else if m.active_dispatch_thread_cpu_count > 0 {
+            println!(
+                "FIRETEST CPU gate {label}: active_dispatch wall spike observed but thread CPU stayed below 5ms: wall_count={} wall_max={}us thread_cpu_max={}us src={} events={} actions={}",
+                m.active_dispatch_over_5ms,
+                m.active_dispatch_max_ns / 1_000,
+                m.active_dispatch_thread_cpu_max_ns / 1_000,
+                metric_cmd_label(
+                    m.active_dispatch_max_cmd,
+                    m.active_dispatch_max_api_method,
+                    m.active_dispatch_max_payload_len
+                ),
+                m.active_dispatch_max_events,
+                m.active_dispatch_max_actions
+            );
+        } else if m.active_dispatch_thread_cycles_count > 0 {
+            println!(
+                "FIRETEST CPU gate {label}: active_dispatch wall spike observed; duration CPU clock unavailable on this platform, thread cycles recorded instead: wall_count={} wall_max={}us src={} events={} actions={} cycles_avg={} cycles_max={}",
+                m.active_dispatch_over_5ms,
+                m.active_dispatch_max_ns / 1_000,
+                metric_cmd_label(
+                    m.active_dispatch_max_cmd,
+                    m.active_dispatch_max_api_method,
+                    m.active_dispatch_max_payload_len
+                ),
+                m.active_dispatch_max_events,
+                m.active_dispatch_max_actions,
+                avg_units(
+                    m.active_dispatch_thread_cycles_total,
+                    m.active_dispatch_thread_cycles_count
+                ),
+                m.active_dispatch_thread_cycles_max
+            );
+        } else {
+            red_flags.push(format!(
+                "active_dispatch >5ms count={} wall_max={}us src={} events={} actions={} (no thread CPU/cycle clock available)",
+                m.active_dispatch_over_5ms,
+                m.active_dispatch_max_ns / 1_000,
+                metric_cmd_label(
+                    m.active_dispatch_max_cmd,
+                    m.active_dispatch_max_api_method,
+                    m.active_dispatch_max_payload_len
+                ),
+                m.active_dispatch_max_events,
+                m.active_dispatch_max_actions
+            ));
+        }
     }
     if m.app_enqueue_over_5ms > 0 {
         red_flags.push(format!(

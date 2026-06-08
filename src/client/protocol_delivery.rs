@@ -196,6 +196,9 @@ impl ProtocolCore<'_> {
                 #[cfg(any(test, feature = "diagnostics"))]
                 let active_dispatch_start = Instant::now();
                 #[cfg(any(test, feature = "diagnostics"))]
+                let active_dispatch_thread_cpu_start =
+                    crate::client::thread_cpu::ThreadCpuTimer::start();
+                #[cfg(any(test, feature = "diagnostics"))]
                 let active_dispatch_inner_start = Instant::now();
                 mode.dispatcher.dispatch_into_active_actions(
                     c,
@@ -256,6 +259,22 @@ impl ProtocolCore<'_> {
                         event_count,
                         action_count,
                     );
+                #[cfg(any(test, feature = "diagnostics"))]
+                {
+                    let thread_cpu_elapsed = active_dispatch_thread_cpu_start.elapsed();
+                    if let Some(duration) = thread_cpu_elapsed.time {
+                        self.client
+                            .metrics
+                            .protocol_metrics
+                            .record_active_dispatch_thread_cpu(duration);
+                    }
+                    if let Some(cycles) = thread_cpu_elapsed.cycles {
+                        self.client
+                            .metrics
+                            .protocol_metrics
+                            .record_active_dispatch_thread_cycles(cycles);
+                    }
+                }
                 #[cfg(any(test, feature = "diagnostics"))]
                 let drain_events_start = Instant::now();
                 mode.drain_events(
