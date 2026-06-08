@@ -72,6 +72,8 @@ fn main() {
                             ask
                         );
                     }
+                    #[cfg(any(test, feature = "diagnostics"))]
+                    _ => {}
                 }
             }
         }

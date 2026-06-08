@@ -615,6 +615,59 @@ fn in_place_complete_snapshot_seeds_serialized_reply_cache() {
 }
 
 #[test]
+fn in_place_skipped_old_snapshot_does_not_seed_stale_reply_cache() {
+    use crate::commands::strategy_serializer::{FieldValue, StrategyBatchBuilder};
+
+    let mut current_fields = StrategyFields::new();
+    current_fields.insert("StrategyName", FieldValue::String("Current".to_string()));
+    let mut s = StratsState::new();
+    s.upsert_from_snapshot(&StrategySnapshot {
+        strategy_id: 777,
+        strategy_ver: 7,
+        last_date: 200,
+        checked: true,
+        kind: 5,
+        path: "CurrentPath".into(),
+        fields: current_fields,
+    });
+
+    let schema = schema_for_strategy_name(&[5]);
+    let mut stale_fields = StrategyFields::new();
+    stale_fields.insert("StrategyName", FieldValue::String("Stale".to_string()));
+    let mut b = StrategyBatchBuilder::new(&schema);
+    b.write_strategy(&StrategySnapshot {
+        strategy_id: 777,
+        strategy_ver: 6,
+        last_date: 199,
+        checked: false,
+        kind: 5,
+        path: "StalePath".into(),
+        fields: stale_fields,
+    });
+    let stale_payload = b.finalize();
+
+    let count = s
+        .apply_snapshot_decoded_with_mode_in_place(&stale_payload, false)
+        .unwrap();
+
+    assert_eq!(count, 1);
+    let info = s.get(777).unwrap();
+    assert_eq!(info.strategy_ver, 7);
+    assert_eq!(info.last_date, 200);
+    assert_eq!(&*info.folder_path, "CurrentPath");
+    assert!(info.checked);
+    assert_eq!(
+        s.snapshot(777)
+            .and_then(|snap| snap.fields.get("StrategyName")),
+        Some(&FieldValue::String("Current".to_string()))
+    );
+    assert!(
+        s.snapshot_payload_cache.is_none(),
+        "a skipped-old wire payload must not become the later local snapshot reply"
+    );
+}
+
+#[test]
 fn apply_snapshot_decoded_corrupted_returns_none() {
     let mut s = StratsState::new();
     // Invalid DEFLATE

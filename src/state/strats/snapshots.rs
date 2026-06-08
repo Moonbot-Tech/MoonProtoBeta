@@ -3,9 +3,12 @@
 use super::{StrategySnapshotPayloadCache, StratsState};
 use crate::commands::strat::StratCheckedItem;
 use crate::commands::strategy_serializer::{
-    parse_strategy_batch_for_each_with_schema_field_types, parse_strategy_batch_with_schema,
-    parse_strategy_batch_with_schema_field_types, FieldValue, StrategyBatch, StrategySnapshot,
+    parse_strategy_batch_for_each_with_schema_field_types_skip_old,
+    parse_strategy_batch_with_schema, parse_strategy_batch_with_schema_field_types, FieldValue,
+    StrategyBatch, StrategySnapshot,
 };
+use std::cell::Cell;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 impl StratsState {
@@ -30,7 +33,15 @@ impl StratsState {
         client_max_last_date: u64,
         deflate_data: &[u8],
         changed: bool,
+        skipped_old: bool,
     ) {
+        if skipped_old {
+            if changed {
+                self.invalidate_snapshot_payload_cache();
+            }
+            return;
+        }
+
         if applied_count == self.snapshots_by_id.len() {
             self.set_snapshot_payload_cache_from_wire(client_max_last_date, deflate_data);
         } else if changed {
@@ -149,6 +160,12 @@ impl StratsState {
         true
     }
 
+    fn snapshot_is_old_or_equal(&self, s: &StrategySnapshot) -> bool {
+        self.by_id.get(&s.strategy_id).is_some_and(|entry| {
+            entry.last_date >= s.last_date && entry.strategy_ver >= s.strategy_ver
+        })
+    }
+
     /// Apply the full strategy batch from `TStratSnapshot.data`.
     ///
     /// Returns the decoded `StrategyBatch` so callers can inspect the
@@ -169,9 +186,11 @@ impl StratsState {
         // absent from the incoming payload. They remain local "Own" strategies.
         let count = batch.strategies.len();
         let mut changed = false;
+        let mut skipped_old = false;
         let mut client_max_last_date = 0u64;
         for s in &batch.strategies {
             client_max_last_date = client_max_last_date.max(s.last_date);
+            skipped_old |= self.snapshot_is_old_or_equal(s);
             changed |= self.upsert_from_snapshot(s);
         }
         self.update_snapshot_payload_cache_after_apply(
@@ -179,6 +198,7 @@ impl StratsState {
             client_max_last_date,
             deflate_data,
             changed,
+            skipped_old,
         );
         Some(batch)
     }
@@ -190,21 +210,39 @@ impl StratsState {
     ) -> Option<usize> {
         let _ = full;
         let field_types = self.schema_field_types.clone();
+        let existing_versions: HashMap<u64, (u64, i32)> = self
+            .by_id
+            .iter()
+            .map(|(&strategy_id, info)| (strategy_id, (info.last_date, info.strategy_ver)))
+            .collect();
         let mut changed = false;
-        let mut client_max_last_date = 0u64;
-        let count = parse_strategy_batch_for_each_with_schema_field_types(
+        let client_max_last_date = Cell::new(0u64);
+        let skipped_old = Cell::new(false);
+        let count = parse_strategy_batch_for_each_with_schema_field_types_skip_old(
             deflate_data,
             field_types.as_deref(),
+            |strategy_id, strategy_ver, last_date| {
+                client_max_last_date.set(client_max_last_date.get().max(last_date));
+                let skip = existing_versions.get(&strategy_id).is_some_and(
+                    |(existing_last_date, existing_strategy_ver)| {
+                        *existing_last_date >= last_date && *existing_strategy_ver >= strategy_ver
+                    },
+                );
+                if skip {
+                    skipped_old.set(true);
+                }
+                skip
+            },
             |s| {
-                client_max_last_date = client_max_last_date.max(s.last_date);
                 changed |= self.upsert_snapshot_owned_without_cache_invalidation(s);
             },
         )?;
         self.update_snapshot_payload_cache_after_apply(
             count,
-            client_max_last_date,
+            client_max_last_date.get(),
             deflate_data,
             changed,
+            skipped_old.get(),
         );
         Some(count)
     }

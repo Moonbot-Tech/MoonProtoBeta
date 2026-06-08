@@ -45,13 +45,15 @@ pub(crate) fn parse_strategy_batch_with_schema_field_types(
     parse_strategy_batch_plain_with_schema_field_types(&decompressed, schema_field_types)
 }
 
-pub(crate) fn parse_strategy_batch_for_each_with_schema_field_types<F>(
+pub(crate) fn parse_strategy_batch_for_each_with_schema_field_types_skip_old<F, S>(
     deflate_bytes: &[u8],
     schema_field_types: Option<&HashMap<String, u8>>,
+    mut should_skip_old: S,
     mut on_strategy: F,
 ) -> Option<usize>
 where
     F: FnMut(StrategySnapshot),
+    S: FnMut(u64, i32, u64) -> bool,
 {
     let mut decoder = DeflateDecoder::new(deflate_bytes);
     let decompressed = read_inflate_to_vec(
@@ -63,6 +65,7 @@ where
     parse_strategy_batch_plain_for_each_with_schema_field_types(
         &decompressed,
         schema_field_types,
+        &mut should_skip_old,
         &mut on_strategy,
     )
 }
@@ -126,6 +129,7 @@ fn parse_strategy_batch_plain_with_schema_field_types(
 fn parse_strategy_batch_plain_for_each_with_schema_field_types<F>(
     data: &[u8],
     schema_field_types: Option<&HashMap<String, u8>>,
+    should_skip_old: &mut impl FnMut(u64, i32, u64) -> bool,
     on_strategy: &mut F,
 ) -> Option<usize>
 where
@@ -138,11 +142,18 @@ where
         schema_field_types.map(|field_types| build_reader_fields_arc(&field_names, field_types));
     let strat_count = read_u16(data, &mut pos)? as usize;
     for _ in 0..strat_count {
-        let strategy = read_strategy(
+        let header = read_strategy_header(data, &mut pos, &paths)?;
+        let field_count = read_u16(data, &mut pos)? as usize;
+        if should_skip_old(header.strategy_id, header.strategy_ver, header.last_date) {
+            skip_strategy_fields(data, &mut pos, field_count)?;
+            continue;
+        }
+        let strategy = read_strategy_fields(
             data,
             &mut pos,
+            header,
+            field_count,
             &field_names,
-            &paths,
             reader_fields.as_deref(),
         )?;
         on_strategy(strategy);
@@ -211,13 +222,20 @@ fn build_schema_field_type_map(schema: &StrategySchema) -> HashMap<String, u8> {
         .collect()
 }
 
-fn read_strategy(
+struct StrategyHeader {
+    strategy_id: u64,
+    strategy_ver: i32,
+    last_date: u64,
+    checked: bool,
+    kind: u8,
+    path: Arc<str>,
+}
+
+fn read_strategy_header(
     data: &[u8],
     pos: &mut usize,
-    field_names: &[Arc<str>],
     paths: &[Arc<str>],
-    reader_fields: Option<&[Option<u8>]>,
-) -> Option<StrategySnapshot> {
+) -> Option<StrategyHeader> {
     let strategy_id = read_u64(data, pos)?;
     let strategy_ver = read_i32(data, pos)?;
     let last_date = read_u64(data, pos)?;
@@ -229,7 +247,36 @@ fn read_strategy(
         .cloned()
         .unwrap_or_else(|| Arc::<str>::from(""));
 
+    Some(StrategyHeader {
+        strategy_id,
+        strategy_ver,
+        last_date,
+        checked,
+        kind,
+        path,
+    })
+}
+
+fn read_strategy(
+    data: &[u8],
+    pos: &mut usize,
+    field_names: &[Arc<str>],
+    paths: &[Arc<str>],
+    reader_fields: Option<&[Option<u8>]>,
+) -> Option<StrategySnapshot> {
+    let header = read_strategy_header(data, pos, paths)?;
     let field_count = read_u16(data, pos)? as usize;
+    read_strategy_fields(data, pos, header, field_count, field_names, reader_fields)
+}
+
+fn read_strategy_fields(
+    data: &[u8],
+    pos: &mut usize,
+    header: StrategyHeader,
+    field_count: usize,
+    field_names: &[Arc<str>],
+    reader_fields: Option<&[Option<u8>]>,
+) -> Option<StrategySnapshot> {
     let mut fields = StrategyFields::with_capacity(field_count);
 
     for _ in 0..field_count {
@@ -270,14 +317,23 @@ fn read_strategy(
     }
 
     Some(StrategySnapshot {
-        strategy_id,
-        strategy_ver,
-        last_date,
-        checked,
-        kind,
-        path,
+        strategy_id: header.strategy_id,
+        strategy_ver: header.strategy_ver,
+        last_date: header.last_date,
+        checked: header.checked,
+        kind: header.kind,
+        path: header.path,
         fields,
     })
+}
+
+fn skip_strategy_fields(data: &[u8], pos: &mut usize, field_count: usize) -> Option<()> {
+    for _ in 0..field_count {
+        let _field_idx = read_u16(data, pos)?;
+        let type_id = read_u8(data, pos)?;
+        skip_field_by_type_id(data, pos, type_id)?;
+    }
+    Some(())
 }
 
 /// Reads a value by `type_id`. If type_id is unknown, fall back to skipping 8 bytes
