@@ -54,7 +54,7 @@ mod outer_crypt;
 use log::warn;
 
 pub(crate) use extended::ClientTransportModeState;
-pub(crate) use header::{ClientMsgHeader, ServerMsgHeader, TRANSPORT_VER};
+pub(crate) use header::{ClientMsgHeader, ServerMsgHeader, CLIENT_HDR_SIZE, TRANSPORT_VER};
 pub(crate) use mac::MacContext;
 pub(crate) use outer_crypt::outer_light_crypt;
 

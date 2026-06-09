@@ -47,7 +47,7 @@ impl Client {
             return None;
         }
         let series = data_read_state.update_data_size_ack_series_num(size_test.series_num);
-        Some(control::SizeTestData::ack_bytes(size, series))
+        control::SizeTestData::ack_bytes(size, series)
     }
 
     pub(crate) fn build_probe_mtu_ack_payload(payload: &[u8]) -> Option<Vec<u8>> {
@@ -55,7 +55,7 @@ impl Client {
         if (probe.test_size as usize) < control::PROBE_MTU_ACK_SIZE {
             return None;
         }
-        Some(probe.ack_bytes())
+        probe.ack_bytes()
     }
 
     pub(crate) fn apply_ping_and_build_response(
