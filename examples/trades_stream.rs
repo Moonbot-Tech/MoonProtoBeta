@@ -1,5 +1,10 @@
 //! Subscribe to all-trades through `MoonClient` and print stream signals.
 //!
+//! This is a bounded CLI/demo loop. It uses `drain_events() + sleep(...)` because
+//! the program only prints a stream for a few seconds. A real terminal should
+//! wire `MoonEventSink` into its UI event loop and read snapshots from the UI's
+//! normal update/render cadence instead of creating a polling feed thread.
+//!
 //! Run:
 //!   cargo run --example trades_stream --release -- "<key_base64>" [host:port] [market|all] [watch_seconds]
 
