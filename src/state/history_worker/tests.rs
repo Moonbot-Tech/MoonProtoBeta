@@ -180,6 +180,107 @@ fn worker_stores_last_price_batch_for_enabled_market() {
 }
 
 #[test]
+fn diagnostics_fill_market_history_to_capacity_builds_full_retained_fixture() {
+    let worker = MarketHistoryWorker::spawn(MarketHistoryConfig {
+        futures_trades_capacity: 5,
+        spot_trades_capacity: 4,
+        liquidation_capacity: 3,
+        mm_orders_capacity: 4,
+        last_price_capacity: 6,
+        mini_candles_capacity: 3,
+        candles_5m_capacity: 5,
+    });
+    assert!(worker.configure_markets(vec!["BTCUSDT".to_string()], Some(TradeStorageScope::All)));
+
+    worker
+        .handle()
+        .send_last_price_batch(MarketHistoryLastPriceBatch {
+            now_time: 45_000.25,
+            rows: vec![MarketHistoryLastPriceInput {
+                market_name: Arc::<str>::from("BTCUSDT"),
+                current: 777.0,
+                bid: 776.0,
+                ask: 778.0,
+                mark_price: 778.0,
+                mark_price_found: true,
+                is_btc_market: true,
+                is_base_usdt_market: false,
+            }],
+        });
+    assert!(worker.flush(mt(45_000.25)));
+
+    let now_time = MoonTime::from_unix_millis(1_700_000_000_000);
+    assert!(
+        worker
+            .handle()
+            .diag_fill_market_history_to_capacity("BTCUSDT", now_time, 3_600_000,),
+        "diagnostics fill should complete through the worker owner"
+    );
+
+    let readers = worker.readers("BTCUSDT").unwrap();
+    assert_timed_ring_full(readers.futures_trades.as_ref().unwrap(), 5);
+    assert_timed_ring_full(readers.spot_trades.as_ref().unwrap(), 4);
+    assert_timed_ring_full(readers.liquidations.as_ref().unwrap(), 3);
+    assert_timed_ring_full(readers.mm_orders.as_ref().unwrap(), 4);
+    assert_ring_full(readers.mm_order_companion.as_ref().unwrap(), 4);
+    assert_timed_ring_full(readers.mark_prices.as_ref().unwrap(), 6);
+    assert_timed_ring_full(readers.mini_candles.as_ref().unwrap(), 3);
+    assert_timed_ring_full(readers.candles_5m.as_ref().unwrap(), 5);
+
+    let last_prices = readers.last_prices.as_ref().unwrap();
+    let mut rows = Vec::new();
+    let meta = last_prices.copy_last(6, &mut rows);
+    assert_eq!(meta.copied, 6);
+    assert_eq!(rows.len(), 6);
+    assert_eq!(
+        rows.last().unwrap().price(),
+        777.0,
+        "diagnostics fill keeps existing live tail rows"
+    );
+
+    let mut cursor = last_prices.cursor_from_oldest();
+    let drain = last_prices.drain_new_bounded(&mut cursor, 6, &mut rows);
+    assert_eq!(drain.copied, 6);
+    assert!(drain.caught_up);
+    assert_eq!(rows.len(), 6);
+
+    let derived = worker
+        .handle()
+        .try_derived_snapshot("BTCUSDT", now_time)
+        .expect("filled market should publish derived history state");
+    assert!(
+        derived.deltas.one_hour > 0.0,
+        "synthetic retained rows should be visible to derived readers"
+    );
+}
+
+fn assert_ring_full<T: crate::state::seq_ring::SeqRingRow>(
+    reader: &crate::state::seq_ring::SeqRingReader<T>,
+    capacity: usize,
+) {
+    let bounds = reader.bounds();
+    assert_eq!(bounds.len, capacity);
+    assert_eq!(bounds.capacity, capacity);
+    assert_eq!(bounds.oldest_seq, 0);
+    assert_eq!(bounds.next_seq, capacity as u64);
+}
+
+fn assert_timed_ring_full<T>(reader: &crate::state::seq_ring::SeqRingReader<T>, capacity: usize)
+where
+    T: crate::state::seq_ring::SeqRingTimedRow,
+{
+    assert_ring_full(reader, capacity);
+    let mut rows = Vec::new();
+    reader.copy_last(capacity, &mut rows);
+    assert_eq!(rows.len(), capacity);
+    assert!(
+        rows.windows(2)
+            .all(|pair| pair[0].seq_ring_time_ms() <= pair[1].seq_ring_time_ms()),
+        "diagnostics fill must preserve chronological row order"
+    );
+}
+
+#[test]
 fn worker_flush_compacts_evicted_futures_to_mini_candles() {
     let worker = MarketHistoryWorker::spawn(MarketHistoryConfig {
         futures_trades_capacity: 2,

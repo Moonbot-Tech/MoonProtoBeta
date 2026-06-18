@@ -4,7 +4,7 @@
 //! They intentionally keep the production core's compact storage shape where
 //! the row is a user-visible/history concept rather than only a wire packet.
 
-use crate::state::seq_ring::SeqRingTimedRow;
+use crate::state::seq_ring::{SeqRingPriceRow, SeqRingQtyRow, SeqRingTimedRow};
 use crate::MoonTime;
 
 #[cfg(test)]
@@ -131,6 +131,18 @@ impl SeqRingTimedRow for TradeHistoryRow {
     }
 }
 
+impl SeqRingPriceRow for TradeHistoryRow {
+    fn seq_ring_price_range(&self) -> Option<(f32, f32)> {
+        Some((self.price, self.price))
+    }
+}
+
+impl SeqRingQtyRow for TradeHistoryRow {
+    fn seq_ring_qty(&self) -> Option<f64> {
+        Some(f64::from(self.quantity()))
+    }
+}
+
 /// Main market-maker history row.
 ///
 /// The base row stores time, volume, and quantity. Optional taker address and
@@ -159,6 +171,12 @@ impl MMOrderHistoryRow {
 impl SeqRingTimedRow for MMOrderHistoryRow {
     fn seq_ring_time_ms(&self) -> i64 {
         self.time.unix_millis()
+    }
+}
+
+impl SeqRingQtyRow for MMOrderHistoryRow {
+    fn seq_ring_qty(&self) -> Option<f64> {
+        Some(self.q.abs())
     }
 }
 
@@ -254,6 +272,12 @@ impl SeqRingTimedRow for LastPricePoint {
     }
 }
 
+impl SeqRingPriceRow for LastPricePoint {
+    fn seq_ring_price_range(&self) -> Option<(f32, f32)> {
+        Some((self.current, self.current))
+    }
+}
+
 /// Active Lib retained MarkPrice chart line row.
 ///
 /// The source value is `UpdateMarketsList -> MarketPrice.mark_price`. Unlike
@@ -286,6 +310,12 @@ impl MarkPricePoint {
 impl SeqRingTimedRow for MarkPricePoint {
     fn seq_ring_time_ms(&self) -> i64 {
         self.time.unix_millis()
+    }
+}
+
+impl SeqRingPriceRow for MarkPricePoint {
+    fn seq_ring_price_range(&self) -> Option<(f32, f32)> {
+        Some((self.current, self.current))
     }
 }
 
@@ -360,6 +390,18 @@ impl SeqRingTimedRow for Candle5mRow {
     }
 }
 
+impl SeqRingPriceRow for Candle5mRow {
+    fn seq_ring_price_range(&self) -> Option<(f32, f32)> {
+        Some((self.low, self.high))
+    }
+}
+
+impl SeqRingQtyRow for Candle5mRow {
+    fn seq_ring_qty(&self) -> Option<f64> {
+        Some(f64::from(self.volume))
+    }
+}
+
 /// Mini-candle used to compact evicted detailed trades.
 ///
 /// Compact 24-byte row: time, trade count, min/max price, buy volume, and sell
@@ -410,6 +452,18 @@ impl MiniCandle {
 impl SeqRingTimedRow for MiniCandle {
     fn seq_ring_time_ms(&self) -> i64 {
         self.time.unix_millis()
+    }
+}
+
+impl SeqRingPriceRow for MiniCandle {
+    fn seq_ring_price_range(&self) -> Option<(f32, f32)> {
+        Some((self.min_price, self.max_price))
+    }
+}
+
+impl SeqRingQtyRow for MiniCandle {
+    fn seq_ring_qty(&self) -> Option<f64> {
+        Some(f64::from(self.buy_vol + self.sell_vol))
     }
 }
 

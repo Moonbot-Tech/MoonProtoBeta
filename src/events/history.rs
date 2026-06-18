@@ -149,6 +149,19 @@ impl EventDispatcher {
         self.market_history.as_ref()?.barrier_async()
     }
 
+    #[cfg(any(test, feature = "diagnostics"))]
+    pub(crate) fn diag_fill_market_history_to_capacity(
+        &mut self,
+        market_name: &str,
+        now_time: crate::MoonTime,
+        span_ms: i64,
+    ) -> bool {
+        self.sync_market_history_storage();
+        self.market_history.as_ref().is_some_and(|handle| {
+            handle.diag_fill_market_history_to_capacity(market_name, now_time, span_ms)
+        })
+    }
+
     pub(crate) fn queue_candles_snapshot_event(
         &mut self,
         event: crate::state::CandlesSnapshotEvent,

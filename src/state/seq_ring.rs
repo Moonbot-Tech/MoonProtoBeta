@@ -29,6 +29,71 @@ pub trait SeqRingTimedRow: SeqRingRow {
     fn seq_ring_time_ms(&self) -> i64;
 }
 
+/// Price range over retained history rows.
+///
+/// `count` is the number of rows that contributed at least one finite price to
+/// the range. Empty scans return `None` from the helper methods instead of a
+/// zero-count `PriceRange`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PriceRange {
+    pub min: f32,
+    pub max: f32,
+    pub count: usize,
+}
+
+impl PriceRange {
+    fn empty() -> Self {
+        Self {
+            min: f32::INFINITY,
+            max: f32::NEG_INFINITY,
+            count: 0,
+        }
+    }
+
+    fn push_range(&mut self, low: f32, high: f32) {
+        if !low.is_finite() || !high.is_finite() {
+            return;
+        }
+        self.min = self.min.min(low.min(high));
+        self.max = self.max.max(low.max(high));
+        self.count += 1;
+    }
+
+    fn into_option(self) -> Option<Self> {
+        if self.count == 0 {
+            None
+        } else {
+            Some(self)
+        }
+    }
+}
+
+/// Row that can contribute a price range to retained-history aggregate queries.
+pub trait SeqRingPriceRow: SeqRingTimedRow {
+    fn seq_ring_price_range(&self) -> Option<(f32, f32)>;
+}
+
+/// Quantity/volume sum over retained history rows.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct QtySum {
+    pub sum: f64,
+    pub count: usize,
+}
+
+impl QtySum {
+    fn push(&mut self, qty: f64) {
+        if qty.is_finite() {
+            self.sum += qty;
+            self.count += 1;
+        }
+    }
+}
+
+/// Row that can contribute a quantity/volume value to retained-history queries.
+pub trait SeqRingQtyRow: SeqRingTimedRow {
+    fn seq_ring_qty(&self) -> Option<f64>;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SeqRingError {
     ZeroCapacity,
@@ -45,6 +110,8 @@ pub struct SeqRingBounds {
     pub next_seq: u64,
     #[cfg(not(any(test, feature = "diagnostics")))]
     next_seq: u64,
+    #[cfg(any(test, feature = "diagnostics"))]
+    pub revision: u64,
     pub len: usize,
     pub capacity: usize,
 }
@@ -64,6 +131,8 @@ pub struct SeqRingReadMeta {
     pub next_seq: u64,
     #[cfg(not(any(test, feature = "diagnostics")))]
     next_seq: u64,
+    #[cfg(any(test, feature = "diagnostics"))]
+    pub revision: u64,
     pub copied: usize,
     /// Requested start was older than retention.
     pub clipped: bool,
@@ -184,6 +253,8 @@ struct SeqRingState<T: SeqRingRow> {
     rows: Box<[T]>,
     capacity: usize,
     next_seq: u64,
+    #[cfg(any(test, feature = "diagnostics"))]
+    revision: u64,
     len: usize,
 }
 
@@ -198,6 +269,8 @@ impl<T: SeqRingRow> SeqRingWriter<T> {
                 rows,
                 capacity,
                 next_seq: 0,
+                #[cfg(any(test, feature = "diagnostics"))]
+                revision: 0,
                 len: 0,
             }),
         });
@@ -230,6 +303,7 @@ impl<T: SeqRingRow> SeqRingWriter<T> {
         };
         state.rows[idx] = row;
         state.next_seq = state.next_seq.wrapping_add(1);
+        state.bump_revision();
         (seq, evicted)
     }
 
@@ -256,6 +330,9 @@ impl<T: SeqRingRow> SeqRingWriter<T> {
             state.rows[idx] = row;
             state.next_seq = state.next_seq.wrapping_add(1);
         }
+        if !rows.is_empty() {
+            state.bump_revision();
+        }
     }
 
     #[cfg(test)]
@@ -266,11 +343,15 @@ impl<T: SeqRingRow> SeqRingWriter<T> {
         }
         let idx = state.slot_index(seq);
         state.rows[idx] = row;
+        state.bump_revision();
         true
     }
 
     pub(crate) fn clear(&mut self) {
         let mut state = self.inner.state.write();
+        if state.len != 0 || state.next_seq != 0 {
+            state.bump_revision();
+        }
         state.next_seq = 0;
         state.len = 0;
     }
@@ -502,7 +583,7 @@ impl<T: SeqRingTimedRow> SeqRingReader<T> {
         time: MoonTime,
         limit: usize,
         out: &mut Vec<T>,
-    ) -> Option<SeqRingReadMeta> {
+    ) -> SeqRingReadMeta {
         let state = self.inner.state.read();
         let (start_seq, time_clipped) =
             state.first_seq_at_or_after_time_with_clip_ms(time.unix_millis());
@@ -513,7 +594,7 @@ impl<T: SeqRingTimedRow> SeqRingReader<T> {
         out.reserve(meta.copied);
         out.extend_from_slice(first);
         out.extend_from_slice(second);
-        Some(meta)
+        meta
     }
 
     /// Millisecond-domain variant of [`Self::copy_from_time`].
@@ -522,7 +603,7 @@ impl<T: SeqRingTimedRow> SeqRingReader<T> {
         time_ms: i64,
         limit: usize,
         out: &mut Vec<T>,
-    ) -> Option<SeqRingReadMeta> {
+    ) -> SeqRingReadMeta {
         self.copy_from_time(MoonTime::from_unix_millis(time_ms), limit, out)
     }
 
@@ -533,39 +614,19 @@ impl<T: SeqRingTimedRow> SeqRingReader<T> {
         to_time: MoonTime,
         limit: usize,
         out: &mut Vec<T>,
-    ) -> Option<SeqRingReadMeta> {
-        let state = self.inner.state.read();
-        let bounds = state.bounds();
-        let from_ms = from_time.unix_millis();
-        let to_ms = to_time.unix_millis();
-        let (start_seq, time_clipped) = state.first_seq_at_or_after_time_with_clip_ms(from_ms);
-        let start_seq = start_seq.max(bounds.oldest_seq).min(bounds.next_seq);
-
+    ) -> SeqRingReadMeta {
         out.clear();
-        out.reserve(limit.min(bounds.len));
-        let mut end_seq = start_seq;
-        let mut slot = state.slot_index(start_seq);
-        while end_seq < bounds.next_seq && out.len() < limit {
-            let row = state.rows[slot];
-            let row_time_ms = row.seq_ring_time_ms();
-            if row_time_ms >= from_ms && row_time_ms < to_ms {
-                out.push(row);
-            }
-            end_seq += 1;
-            slot += 1;
-            if slot == state.capacity {
-                slot = 0;
-            }
-        }
-
-        Some(SeqRingReadMeta {
-            requested_start_seq: start_seq,
-            actual_start_seq: start_seq,
-            next_seq: bounds.next_seq,
-            copied: out.len(),
-            clipped: time_clipped,
-            concurrent_miss: false,
-        })
+        out.reserve(limit.min(self.capacity()));
+        let ((), meta) = self.fold_time_range(
+            from_time.unix_millis(),
+            to_time.unix_millis(),
+            limit,
+            (),
+            |(), row| {
+                out.push(*row);
+            },
+        );
+        meta
     }
 
     /// Millisecond-domain variant of [`Self::copy_time_range`].
@@ -575,13 +636,164 @@ impl<T: SeqRingTimedRow> SeqRingReader<T> {
         to_ms: i64,
         limit: usize,
         out: &mut Vec<T>,
-    ) -> Option<SeqRingReadMeta> {
+    ) -> SeqRingReadMeta {
         self.copy_time_range(
             MoonTime::from_unix_millis(from_ms),
             MoonTime::from_unix_millis(to_ms),
             limit,
             out,
         )
+    }
+
+    fn fold_time_range<R, F>(
+        &self,
+        from_ms: i64,
+        to_ms: i64,
+        limit: usize,
+        init: R,
+        mut f: F,
+    ) -> (R, SeqRingReadMeta)
+    where
+        F: FnMut(R, &T) -> R,
+    {
+        let state = self.inner.state.read();
+        let bounds = state.bounds();
+        let (start_seq, time_clipped) = state.first_seq_at_or_after_time_with_clip_ms(from_ms);
+        let start_seq = start_seq.max(bounds.oldest_seq).min(bounds.next_seq);
+        let mut acc = Some(init);
+        let mut copied = 0usize;
+
+        if limit > 0 && from_ms < to_ms {
+            let mut seq = start_seq;
+            let mut slot = state.slot_index(start_seq);
+            while seq < bounds.next_seq && copied < limit {
+                let row = state.rows[slot];
+                let row_time_ms = row.seq_ring_time_ms();
+                if row_time_ms >= from_ms && row_time_ms < to_ms {
+                    let current = acc.take().expect("time-range accumulator must be present");
+                    acc = Some(f(current, &row));
+                    copied += 1;
+                }
+                seq += 1;
+                slot += 1;
+                if slot == state.capacity {
+                    slot = 0;
+                }
+            }
+        }
+
+        (
+            acc.expect("time-range accumulator must be present after scan"),
+            SeqRingReadMeta {
+                requested_start_seq: start_seq,
+                actual_start_seq: start_seq,
+                next_seq: bounds.next_seq,
+                #[cfg(any(test, feature = "diagnostics"))]
+                revision: bounds.revision,
+                copied,
+                clipped: time_clipped,
+                concurrent_miss: false,
+            },
+        )
+    }
+}
+
+impl<T: SeqRingPriceRow> SeqRingReader<T> {
+    /// Return the finite price range for a retained cursor window.
+    ///
+    /// The aggregate is computed inside MoonProto with a tight bounded scan, so
+    /// callers do not need to run arbitrary user code under the ring read lock
+    /// for common min/max queries.
+    pub fn price_range_from_cursor(
+        &self,
+        cursor: SeqRingCursor,
+        limit: usize,
+    ) -> (Option<PriceRange>, SeqRingReadMeta) {
+        self.with_from_cursor(cursor, limit, |view| {
+            let mut range = PriceRange::empty();
+            view.for_each(|row| {
+                if let Some((low, high)) = row.seq_ring_price_range() {
+                    range.push_range(low, high);
+                }
+            });
+            (range.into_option(), view.meta())
+        })
+    }
+
+    /// Return the finite price range for `from_time <= row.time < to_time`.
+    pub fn price_range_time(
+        &self,
+        from_time: MoonTime,
+        to_time: MoonTime,
+        limit: usize,
+    ) -> (Option<PriceRange>, SeqRingReadMeta) {
+        self.price_range_time_ms(from_time.unix_millis(), to_time.unix_millis(), limit)
+    }
+
+    /// Millisecond-domain variant of [`Self::price_range_time`].
+    pub fn price_range_time_ms(
+        &self,
+        from_ms: i64,
+        to_ms: i64,
+        limit: usize,
+    ) -> (Option<PriceRange>, SeqRingReadMeta) {
+        let (range, meta) = self.fold_time_range(
+            from_ms,
+            to_ms,
+            limit,
+            PriceRange::empty(),
+            |mut range, row| {
+                if let Some((low, high)) = row.seq_ring_price_range() {
+                    range.push_range(low, high);
+                }
+                range
+            },
+        );
+        (range.into_option(), meta)
+    }
+}
+
+impl<T: SeqRingQtyRow> SeqRingReader<T> {
+    /// Sum finite quantity/volume values for a retained cursor window.
+    pub fn qty_sum_from_cursor(
+        &self,
+        cursor: SeqRingCursor,
+        limit: usize,
+    ) -> (QtySum, SeqRingReadMeta) {
+        self.with_from_cursor(cursor, limit, |view| {
+            let mut sum = QtySum::default();
+            view.for_each(|row| {
+                if let Some(qty) = row.seq_ring_qty() {
+                    sum.push(qty);
+                }
+            });
+            (sum, view.meta())
+        })
+    }
+
+    /// Sum finite quantity/volume values for `from_time <= row.time < to_time`.
+    pub fn qty_sum_time(
+        &self,
+        from_time: MoonTime,
+        to_time: MoonTime,
+        limit: usize,
+    ) -> (QtySum, SeqRingReadMeta) {
+        self.qty_sum_time_ms(from_time.unix_millis(), to_time.unix_millis(), limit)
+    }
+
+    /// Millisecond-domain variant of [`Self::qty_sum_time`].
+    pub fn qty_sum_time_ms(
+        &self,
+        from_ms: i64,
+        to_ms: i64,
+        limit: usize,
+    ) -> (QtySum, SeqRingReadMeta) {
+        self.fold_time_range(from_ms, to_ms, limit, QtySum::default(), |mut sum, row| {
+            if let Some(qty) = row.seq_ring_qty() {
+                sum.push(qty);
+            }
+            sum
+        })
     }
 }
 
@@ -591,6 +803,8 @@ impl<T: SeqRingRow> SeqRingState<T> {
         SeqRingBounds {
             oldest_seq,
             next_seq: self.next_seq,
+            #[cfg(any(test, feature = "diagnostics"))]
+            revision: self.revision,
             len: self.len,
             capacity: self.capacity,
         }
@@ -608,6 +822,8 @@ impl<T: SeqRingRow> SeqRingState<T> {
                 requested_start_seq: start_seq,
                 actual_start_seq,
                 next_seq: bounds.next_seq,
+                #[cfg(any(test, feature = "diagnostics"))]
+                revision: bounds.revision,
                 copied,
                 clipped: actual_start_seq != start_seq,
                 concurrent_miss: false,
@@ -625,6 +841,14 @@ impl<T: SeqRingRow> SeqRingState<T> {
     fn slot_index(&self, seq: u64) -> usize {
         (seq % self.capacity as u64) as usize
     }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    fn bump_revision(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    fn bump_revision(&mut self) {}
 
     #[cfg(any(test, feature = "diagnostics"))]
     fn row_at_seq(&self, seq: u64) -> T {

@@ -114,7 +114,7 @@ fn trade_history_row_roundtrips_through_seq_ring() {
     });
 
     let mut out = Vec::new();
-    reader.copy_from_time(mt(45_000.2), 10, &mut out).unwrap();
+    reader.copy_from_time(mt(45_000.2), 10, &mut out);
 
     assert_eq!(
         out,

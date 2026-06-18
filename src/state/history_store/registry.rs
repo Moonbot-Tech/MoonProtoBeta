@@ -178,4 +178,18 @@ impl MarketHistoryRegistry {
             store.refresh_derived_analytics(now_time);
         }
     }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    pub(crate) fn diag_fill_market_history_to_capacity(
+        &mut self,
+        market_name: &str,
+        now_time: MoonTime,
+        span_ms: i64,
+    ) -> bool {
+        let Some(store) = self.stores.get_mut(market_name) else {
+            return false;
+        };
+        store.diag_fill_to_capacity(now_time, span_ms);
+        true
+    }
 }

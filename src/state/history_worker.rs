@@ -140,6 +140,13 @@ enum MarketHistoryCommand {
         now_time: MoonTime,
         markets: Vec<MarketHistoryCandlesSnapshot>,
     },
+    #[cfg(any(test, feature = "diagnostics"))]
+    DiagFillMarketHistoryToCapacity {
+        market_name: String,
+        now_time: MoonTime,
+        span_ms: i64,
+        reply: mpsc::SyncSender<bool>,
+    },
     Barrier {
         reply: mpsc::SyncSender<()>,
     },
@@ -366,6 +373,29 @@ impl MarketHistoryHandle {
             .is_ok()
     }
 
+    #[cfg(any(test, feature = "diagnostics"))]
+    pub(crate) fn diag_fill_market_history_to_capacity(
+        &self,
+        market_name: impl Into<String>,
+        now_time: MoonTime,
+        span_ms: i64,
+    ) -> bool {
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        if self
+            .tx
+            .send(MarketHistoryCommand::DiagFillMarketHistoryToCapacity {
+                market_name: market_name.into(),
+                now_time,
+                span_ms,
+                reply: reply_tx,
+            })
+            .is_err()
+        {
+            return false;
+        }
+        reply_rx.recv().unwrap_or(false)
+    }
+
     /// Queue a pure worker barrier. When the returned receiver yields, every
     /// command sent before the barrier has been processed by the worker.
     pub(crate) fn barrier_async(&self) -> Option<mpsc::Receiver<()>> {
@@ -495,6 +525,18 @@ fn handle_worker_command(
         }
         Ok(MarketHistoryCommand::CandlesSnapshot { now_time, markets }) => {
             process_candles_snapshot(registry, now_time, markets);
+        }
+        #[cfg(any(test, feature = "diagnostics"))]
+        Ok(MarketHistoryCommand::DiagFillMarketHistoryToCapacity {
+            market_name,
+            now_time,
+            span_ms,
+            reply,
+        }) => {
+            *last_now_time = now_time;
+            let filled =
+                registry.diag_fill_market_history_to_capacity(&market_name, now_time, span_ms);
+            let _ = reply.send(filled);
         }
         Ok(MarketHistoryCommand::Barrier { reply }) => {
             let _ = reply.send(());

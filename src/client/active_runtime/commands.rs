@@ -46,6 +46,13 @@ pub(super) enum RuntimeCommand {
     DebugOutgoingBlackhole(bool),
     #[cfg(any(test, feature = "diagnostics"))]
     DebugResetErrEmuDiagnostics,
+    #[cfg(any(test, feature = "diagnostics"))]
+    DiagFillMarketHistoryToCapacity {
+        market_name: String,
+        now_time: crate::MoonTime,
+        span_ms: i64,
+        reply: mpsc::SyncSender<bool>,
+    },
     OrderAction(RuntimeCommandKind),
     TradeAction(RuntimeTradeCommandKind),
 }
@@ -192,6 +199,8 @@ impl RuntimeCommand {
             Self::DebugOutgoingBlackhole(_) => (54, 0),
             #[cfg(any(test, feature = "diagnostics"))]
             Self::DebugResetErrEmuDiagnostics => (55, 0),
+            #[cfg(any(test, feature = "diagnostics"))]
+            Self::DiagFillMarketHistoryToCapacity { .. } => (56, 1),
             Self::OrderAction(kind) => kind.profile_source(),
             Self::TradeAction(kind) => kind.profile_source(),
         }

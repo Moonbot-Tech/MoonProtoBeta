@@ -13,6 +13,18 @@ impl SeqRingTimedRow for TimedRow {
     }
 }
 
+impl SeqRingPriceRow for TimedRow {
+    fn seq_ring_price_range(&self) -> Option<(f32, f32)> {
+        Some((self.value as f32, self.value as f32))
+    }
+}
+
+impl SeqRingQtyRow for TimedRow {
+    fn seq_ring_qty(&self) -> Option<f64> {
+        Some(self.value as f64)
+    }
+}
+
 #[test]
 fn rejects_zero_capacity() {
     assert_eq!(
@@ -36,6 +48,7 @@ fn copies_last_rows_in_sequence_order() {
             requested_start_seq: 0,
             actual_start_seq: 0,
             next_seq: 3,
+            revision: 1,
             copied: 3,
             clipped: false,
             concurrent_miss: false,
@@ -67,6 +80,7 @@ fn wrap_retains_only_capacity_tail() {
         SeqRingBounds {
             oldest_seq: 2,
             next_seq: 6,
+            revision: 1,
             len: 4,
             capacity: 4,
         }
@@ -222,6 +236,92 @@ fn scan_from_cursor_visits_retained_range_without_copying_rows() {
 }
 
 #[test]
+fn price_range_from_cursor_aggregates_without_user_scan_callback() {
+    let (mut writer, reader) = SeqRingWriter::<TimedRow>::new(8).unwrap();
+    for (idx, value) in [10, 40, 20, 30].into_iter().enumerate() {
+        writer.push(TimedRow {
+            time_ms: 1_000 + idx as u64,
+            value,
+        });
+    }
+
+    let (range, meta) = reader.price_range_from_cursor(reader.cursor_from_oldest(), 3);
+
+    assert_eq!(
+        range,
+        Some(PriceRange {
+            min: 10.0,
+            max: 40.0,
+            count: 3,
+        })
+    );
+    assert_eq!(meta.copied, 3);
+}
+
+#[test]
+fn price_range_time_filters_time_window_in_sequence_order() {
+    let (mut writer, reader) = SeqRingWriter::<TimedRow>::new(8).unwrap();
+    for i in 0..6 {
+        writer.push(TimedRow {
+            time_ms: 1_000 + i * 250,
+            value: i,
+        });
+    }
+
+    let (range, meta) = reader.price_range_time_ms(1_250, 2_000, 10);
+
+    assert_eq!(
+        range,
+        Some(PriceRange {
+            min: 1.0,
+            max: 3.0,
+            count: 3,
+        })
+    );
+    assert_eq!(meta.copied, 3);
+    assert!(!meta.clipped);
+}
+
+#[test]
+fn qty_sum_time_aggregates_without_copying_rows() {
+    let (mut writer, reader) = SeqRingWriter::<TimedRow>::new(8).unwrap();
+    for i in 0..6 {
+        writer.push(TimedRow {
+            time_ms: 1_000 + i * 250,
+            value: i,
+        });
+    }
+
+    let (sum, meta) = reader.qty_sum_time_ms(1_250, 2_000, 10);
+
+    assert_eq!(sum, QtySum { sum: 6.0, count: 3 });
+    assert_eq!(meta.copied, 3);
+}
+
+#[test]
+fn aggregate_time_helpers_return_empty_when_window_is_empty() {
+    let (mut writer, reader) = SeqRingWriter::<TimedRow>::new(8).unwrap();
+    writer.push_batch(&[
+        TimedRow {
+            time_ms: 1_000,
+            value: 10,
+        },
+        TimedRow {
+            time_ms: 2_000,
+            value: 20,
+        },
+    ]);
+
+    let (range, range_meta) = reader.price_range_time_ms(2_000, 1_000, 10);
+    let (sum, sum_meta) = reader.qty_sum_time_ms(2_000, 1_000, 10);
+
+    assert_eq!(range, None);
+    assert_eq!(range_meta.copied, 0);
+    assert_eq!(sum, QtySum::default());
+    assert_eq!(sum_meta.copied, 0);
+}
+
+#[test]
 fn copy_from_time_hides_sequence_coordinates() {
     let (mut writer, reader) = SeqRingWriter::<TimedRow>::new(8).unwrap();
     for i in 0..6 {
@@ -232,9 +332,7 @@ fn copy_from_time_hides_sequence_coordinates() {
     }
 
     let mut out = Vec::new();
-    let meta = reader
-        .copy_from_time(MoonTime::from_unix_millis(1_700), 3, &mut out)
-        .unwrap();
+    let meta = reader.copy_from_time(MoonTime::from_unix_millis(1_700), 3, &mut out);
 
     assert_eq!(meta.actual_start_seq, 3);
     assert_eq!(
@@ -267,9 +365,7 @@ fn millisecond_time_range_helper_returns_rows_in_sequence_order() {
     }
 
     let mut out = Vec::new();
-    reader
-        .copy_time_range_ms(1_250, 2_000, 10, &mut out)
-        .unwrap();
+    reader.copy_time_range_ms(1_250, 2_000, 10, &mut out);
 
     assert_eq!(
         out,
@@ -301,14 +397,12 @@ fn copy_time_range_stops_at_exclusive_end() {
     }
 
     let mut out = Vec::new();
-    reader
-        .copy_time_range(
-            MoonTime::from_unix_millis(1_250),
-            MoonTime::from_unix_millis(2_000),
-            10,
-            &mut out,
-        )
-        .unwrap();
+    reader.copy_time_range(
+        MoonTime::from_unix_millis(1_250),
+        MoonTime::from_unix_millis(2_000),
+        10,
+        &mut out,
+    );
 
     assert_eq!(
         out,
@@ -355,9 +449,7 @@ fn timed_reads_scan_append_order_when_times_are_not_monotonic() {
     );
 
     let mut out = Vec::new();
-    let meta = reader
-        .copy_from_time(MoonTime::from_unix_millis(1_750), 10, &mut out)
-        .unwrap();
+    let meta = reader.copy_from_time(MoonTime::from_unix_millis(1_750), 10, &mut out);
     assert_eq!(meta.actual_start_seq, 1);
     assert_eq!(
         out,
@@ -377,14 +469,12 @@ fn timed_reads_scan_append_order_when_times_are_not_monotonic() {
         ]
     );
 
-    reader
-        .copy_time_range(
-            MoonTime::from_unix_millis(1_750),
-            MoonTime::from_unix_millis(2_500),
-            10,
-            &mut out,
-        )
-        .unwrap();
+    reader.copy_time_range(
+        MoonTime::from_unix_millis(1_750),
+        MoonTime::from_unix_millis(2_500),
+        10,
+        &mut out,
+    );
     assert_eq!(
         out,
         vec![
@@ -411,9 +501,7 @@ fn copy_from_time_reports_retention_clip() {
     }
 
     let mut out = Vec::new();
-    let meta = reader
-        .copy_from_time(MoonTime::from_unix_millis(1_000), 10, &mut out)
-        .unwrap();
+    let meta = reader.copy_from_time(MoonTime::from_unix_millis(1_000), 10, &mut out);
 
     assert!(meta.clipped);
     assert_eq!(
