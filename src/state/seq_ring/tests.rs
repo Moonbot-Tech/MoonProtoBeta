@@ -149,6 +149,30 @@ fn copy_new_since_uses_per_consumer_cursor() {
 }
 
 #[test]
+fn copy_new_since_bounded_all_reports_ui_drain_state() {
+    let (mut writer, reader) = SeqRingWriter::<u64>::new(4).unwrap();
+    writer.push_batch(&[0, 1, 2, 3]);
+
+    let mut cursor = reader.cursor_from_oldest();
+    writer.push_batch(&[4, 5, 6]);
+
+    let mut out = Vec::new();
+    let meta = reader.copy_new_since_bounded_all(&mut cursor, reader.capacity(), &mut out);
+
+    assert_eq!(out, vec![3, 4, 5, 6]);
+    assert_eq!(
+        meta,
+        SeqRingDrainMeta {
+            copied: 4,
+            clipped: true,
+            caught_up: true,
+            concurrent_miss: false,
+        }
+    );
+    assert_eq!(cursor.next_seq(), 7);
+}
+
+#[test]
 fn copy_from_time_hides_sequence_coordinates() {
     let (mut writer, reader) = SeqRingWriter::<TimedRow>::new(8).unwrap();
     for i in 0..6 {

@@ -72,6 +72,43 @@ pub struct SeqRingReadMeta {
     pub concurrent_miss: bool,
 }
 
+impl SeqRingReadMeta {
+    pub fn requested_start_seq(self) -> u64 {
+        self.requested_start_seq
+    }
+
+    pub fn actual_start_seq(self) -> u64 {
+        self.actual_start_seq
+    }
+
+    pub fn next_seq(self) -> u64 {
+        self.next_seq
+    }
+
+    pub fn caught_up(self) -> bool {
+        self.actual_start_seq.saturating_add(self.copied as u64) >= self.next_seq
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SeqRingDrainMeta {
+    pub copied: usize,
+    pub clipped: bool,
+    pub caught_up: bool,
+    pub concurrent_miss: bool,
+}
+
+impl From<SeqRingReadMeta> for SeqRingDrainMeta {
+    fn from(meta: SeqRingReadMeta) -> Self {
+        Self {
+            copied: meta.copied,
+            clipped: meta.clipped,
+            caught_up: meta.caught_up(),
+            concurrent_miss: meta.concurrent_miss,
+        }
+    }
+}
+
 /// Per-consumer "read only new rows" cursor.
 ///
 /// The cursor deliberately belongs to the caller. Each UI/user/strategy thread
@@ -341,6 +378,15 @@ impl<T: SeqRingRow> SeqRingReader<T> {
         let meta = self.copy_from_seq_internal(cursor.next_seq, limit, out);
         cursor.next_seq = meta.actual_start_seq + meta.copied as u64;
         meta
+    }
+
+    pub fn copy_new_since_bounded_all(
+        &self,
+        cursor: &mut SeqRingCursor,
+        limit: usize,
+        out: &mut Vec<T>,
+    ) -> SeqRingDrainMeta {
+        self.copy_new_since(cursor, limit, out).into()
     }
 
     fn with_from_seq_internal<R, F>(&self, start_seq: u64, limit: usize, f: F) -> R
