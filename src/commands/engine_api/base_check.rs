@@ -100,12 +100,12 @@ pub(crate) mod exchange_type_flags {
 /// Wire payload order:
 /// 1. `bot_id` — i64 LE (`cfg.UniqueBotID`);
 /// 2. `server_name` — u16-length UTF-8 string;
-/// 3. `exchange_code` — Delphi `TBotPlatform` ordinal;
+/// 3. `exchange_code` — MoonBot exchange/platform ordinal;
 /// 4. `exchange_name` — UI name such as "Binance Futures";
 /// 5. `exchange_type_mask` — bitmask, see `exchange_type_flags`;
 /// 6. `dex_name` — HIP-3 DEX name for Hyperliquid futures, otherwise empty;
 /// 7. `base_currency_name` — "USDT", "BTC", etc.;
-/// 8. `base_currency_code` — Delphi `TBaseCurrency` ordinal;
+/// 8. `base_currency_code` — MoonBot base-currency ordinal;
 /// 9. `server_version` — MoonBot version number;
 /// 10. `moonproto_version` — MoonProto protocol version.
 ///
@@ -116,7 +116,7 @@ pub struct ServerInfo {
     pub bot_id: Option<i64>,
     /// Human-readable server name for UI.
     pub server_name: Option<String>,
-    /// Delphi `TBotPlatform` ordinal.
+    /// MoonBot exchange/platform ordinal.
     pub exchange_code: Option<ExchangeCode>,
     /// Human-readable exchange name.
     pub exchange_name: Option<String>,
@@ -127,7 +127,7 @@ pub struct ServerInfo {
     pub dex_name: Option<String>,
     /// Base currency name such as "USDT", "USD", or "BTC".
     pub base_currency_name: Option<String>,
-    /// Delphi `TBaseCurrency` ordinal.
+    /// MoonBot base-currency ordinal.
     pub base_currency_code: Option<BaseCurrency>,
     /// MoonBot version number.
     pub server_version: Option<u32>,
@@ -154,7 +154,8 @@ impl ServerInfo {
 ///
 /// Empty payload is valid for old servers and returns `ServerInfo::default()`.
 /// Truncated optional tails keep fields parsed before the truncation and leave
-/// the rest as `None`, matching Delphi's `if not EOF` optional-field pattern.
+/// the rest as `None`, matching the protocol's append-only optional-field
+/// pattern.
 pub(crate) fn parse_base_check_response(data: &[u8]) -> ServerInfo {
     let mut info = ServerInfo::default();
     let mut pos = 0usize;

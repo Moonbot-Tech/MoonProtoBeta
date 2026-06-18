@@ -93,8 +93,8 @@ fn check_pkcs7_padding(buf: &[u8]) -> Option<usize> {
 /// server uses the mORMot `TAesGcm` AVX fast path, which requires block-aligned
 /// input; PKCS7 keeps encrypted packets on that fast path instead of falling
 /// back to the slower arbitrary-length engine. RustCrypto handles tails, but it
-/// is not the same 8x interleaved AES/GHASH backend. TODO: benchmark and wire-
-/// keep a faster Rust backend (`aws-lc-rs`/`ring`) after the Delphi-parity pass.
+/// is not the same 8x interleaved AES/GHASH backend. A future backend benchmark
+/// can compare `aws-lc-rs`/`ring` while keeping this wire shape unchanged.
 pub(crate) fn encrypt_with_cipher(cipher: &Aes128Gcm, plaintext: &[u8], aad: &[u8]) -> Vec<u8> {
     // Build IV: (counter XOR mask)(8) + RDTSC[low 32 bits](4)
     let counter = IV_COUNTER.fetch_add(1, Ordering::Relaxed);

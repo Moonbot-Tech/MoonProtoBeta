@@ -58,7 +58,7 @@ pub(crate) struct MarketHistoryLastPriceInput {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct MarketHistoryLastPriceBatch {
-    /// Delphi `NowTimeX := Now` captured in `UpdateMarketsList`.
+    /// Packet-boundary timestamp captured in `UpdateMarketsList`.
     pub(crate) now_time: f64,
     pub(crate) rows: Vec<MarketHistoryLastPriceInput>,
 }
@@ -82,7 +82,7 @@ pub(crate) enum MarketHistoryStreamSectionKind {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct MarketHistoryStreamBatch {
     pub(crate) base_time: f64,
-    /// Delphi `NowTimeX := Now` captured at the packet-processing boundary.
+    /// Packet-processing boundary timestamp.
     pub(crate) now_time: f64,
     /// Section order from the original `TradesStream` packet. Trade sections
     /// index `trade_rows`; MM sections index `mm_order_rows`.

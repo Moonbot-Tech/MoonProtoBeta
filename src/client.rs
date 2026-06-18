@@ -130,7 +130,7 @@ use protocol_core::ProtocolCore;
 use refresh_clocks::{PendingApi, RefreshClocks};
 #[cfg(test)]
 pub(crate) use send_queue::SendQueues;
-pub(crate) use send_queue::{initial_retry_left, SendItem, SendLockState};
+pub(crate) use send_queue::{initial_retry_left, typed_send_metadata, SendItem, SendLockState};
 pub(crate) use sender::ClientSenderShared;
 use socket::{set_dont_fragment_for_socket, set_socket_buffers, ClientTransport};
 pub(crate) use subscriptions::{

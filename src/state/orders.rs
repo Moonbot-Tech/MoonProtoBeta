@@ -1,17 +1,11 @@
 //! Orders sync state — applies inbound `TBaseTradeCommand` values to the local
 //! active order read-model.
 //!
-//! Delphi sources: `MoonProtoClient.pas:513-666`
-//! (`ProcessCommandOrder` + `CleanupMissingWorkers`),
-//! `TaskWorkers.pas:1428-1509`
-//! (`AcceptServerCommand` + `HandleServerCommand`), and `DoTheJobVirtual`.
-//!
 //! ## Module Role
 //!
 //! This is the client-side mirror of server order workers: inbound commands are
-//! applied to retained order state and produce typed events. It replaces the
-//! Delphi client-side `BOrderWorker.DoTheJobVirtual` + `WCache` +
-//! `CleanupMissingWorkers` behavior inside the Rust Active Lib.
+//! applied to retained order state and produce typed events. Active Lib keeps
+//! the retained order cache and cleanup/status-recovery behavior internally.
 //!
 //! Supported behavior:
 //! - Epoch protection (per-status `server_latest_epoch`).
@@ -70,7 +64,7 @@ const ORDER_TRACE_LINE_SHRINK_INTERVAL_MS: i64 = 30_000;
 // `MoonProtoFunc.pas:188-203`.
 use super::epoch::epoch_is_ok;
 
-/// Mapping from worker status to Delphi phase number.
+/// Mapping from worker status to phase number.
 /// Matches TaskWorkers.pas:546-555 `StatusPhase`:
 ///   OS_BuySet              → 1
 ///   OS_BuyDone             → 2
@@ -150,10 +144,10 @@ pub struct Orders {
     /// Local/UI visual-order markers registered before the first server
     /// `TOrderStatus` creates the read-model entry.
     pending_local_visual_orders: HashSet<u64>,
-    /// UID's that Delphi worker would already mark as finishing, but would not
-    /// remove from `WCache` inside `ProcessCommandOrder` yet.
+    /// UID's already marked as finishing, but not removed from retained order
+    /// state yet.
     pending_removals: Vec<PendingRemoval>,
-    /// Incremented on every `TAllStatuses` (`CurrentSnapshotFlag` in Delphi).
+    /// Incremented on every `TAllStatuses`.
     current_snapshot_flag: u8,
     /// `ServerTimeDelta = InitialTime(server) - Now(client)`, applied to
     /// command `TDateTime` fields.
@@ -190,7 +184,7 @@ impl Orders {
             .map(|order| Arc::try_unwrap(order).unwrap_or_else(|order| (*order).clone()))
     }
 
-    /// Delphi `Inc(CurrentSnapshotFlag)` before `TAllStatuses` item loop.
+    /// Advance snapshot flag before a `TAllStatuses` item loop.
     pub(crate) fn begin_snapshot(&mut self) -> u8 {
         self.current_snapshot_flag = self.current_snapshot_flag.wrapping_add(1);
         self.current_snapshot_flag

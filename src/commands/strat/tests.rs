@@ -131,6 +131,25 @@ fn detect_signal_conditional_row_and_alert_fields_roundtrip() {
 }
 
 #[test]
+fn parse_runtime_state() {
+    let mut payload = vec![CMD_RUNTIME_STATE, 0x03, 0x00];
+    payload.extend_from_slice(&1u64.to_le_bytes());
+    payload.push(1);
+
+    match StratCommand::parse(&payload).unwrap() {
+        StratCommand::RuntimeState(state) => assert!(state.strategies_running),
+        _ => panic!("wrong variant"),
+    }
+
+    let mut payload = vec![CMD_RUNTIME_STATE, 0x03, 0x00];
+    payload.extend_from_slice(&1u64.to_le_bytes());
+    match StratCommand::parse(&payload).unwrap() {
+        StratCommand::RuntimeState(state) => assert!(!state.strategies_running),
+        _ => panic!("wrong variant"),
+    }
+}
+
+#[test]
 fn parse_sell_price_update() {
     // CmdId=4 + ver=3 + UID=1 + strategy_id=99 + sell_price=123.45
     let mut payload = vec![CMD_SELL_PRICE_UPDATE, 0x03, 0x00];

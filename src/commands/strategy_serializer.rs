@@ -80,10 +80,12 @@ pub(crate) const TID_SINGLE: u8 = 10;
 #[doc(hidden)]
 pub(crate) const TID_ZERO_FLAG: u8 = 0x80;
 
+mod editor;
 mod reader;
 mod types;
 mod writer;
 
+pub use self::editor::{MoonShotStrategy, StrategyEditError, StrategyEditor};
 #[doc(hidden)]
 #[cfg(any(test, feature = "diagnostics"))]
 pub use self::reader::parse_strategy_batch;

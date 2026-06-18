@@ -362,11 +362,11 @@ Correlation market definitions from `GetMarketsList` are inserted only when
 their `base_currency_name` is non-empty. Repeated definitions for an existing
 correlation market update tick size and `base_currency_name`, but keep the
 original exchange market currency. After a successful list, the active state
-also rebuilds `refBTCMarket` equivalents and base-currency references. `refBTCMarket`
-uses the current server base currency from `BaseCheck`: for a non-BTC base,
-the library replaces that base currency text in the market name with `BTC` and
-looks up the resulting CorrMarket name. For a BTC base it does nothing, like
-the core correlation-market check.
+also rebuilds BTC-correlation references and base-currency references. The
+BTC-correlation reference uses the current server base currency from
+`BaseCheck`: for a non-BTC base, the library replaces that base currency text in
+the market name with `BTC` and looks up the resulting CorrMarket name. For a BTC
+base it does nothing, matching the core correlation-market check.
 Correlation market price updates are merge-style for known correlation markets
 only: prices present in `UpdateMarketsList` overwrite their entries, unknown
 names are ignored, and absent known

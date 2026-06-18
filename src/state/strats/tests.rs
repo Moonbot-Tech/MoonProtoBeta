@@ -1,6 +1,6 @@
 use super::*;
 use crate::commands::strat::{
-    StratCheckedEcho, StratCheckedSync, StratDelete, StratSellPriceUpdate,
+    StratCheckedEcho, StratCheckedSync, StratDelete, StratRuntimeState, StratSellPriceUpdate,
 };
 use crate::commands::strategy_schema::{
     StrategyFieldLayout, StrategyFieldType, StrategyFieldUiKind, StrategySchemaField,
@@ -168,6 +168,33 @@ fn incoming_schema_request_is_ignored() {
     let mut s = StratsState::new();
     let ev = s.apply(StratCommand::SchemaRequest { uid: 77 });
     assert!(ev.is_none());
+}
+
+#[test]
+fn runtime_state_tracks_server_strategy_run_flag() {
+    let mut s = StratsState::new();
+    assert_eq!(s.strategies_running(), None);
+
+    let ev = s
+        .apply(StratCommand::RuntimeState(StratRuntimeState {
+            strategies_running: true,
+        }))
+        .expect("runtime state must emit an event");
+    assert!(matches!(
+        ev,
+        StratEvent::RuntimeState {
+            strategies_running: true
+        }
+    ));
+    assert_eq!(s.strategies_running(), Some(true));
+
+    let _ = s.apply(StratCommand::RuntimeState(StratRuntimeState {
+        strategies_running: false,
+    }));
+    assert_eq!(s.strategies_running(), Some(false));
+
+    s.clear();
+    assert_eq!(s.strategies_running(), None);
 }
 
 #[test]

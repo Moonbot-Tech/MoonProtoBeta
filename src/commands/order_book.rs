@@ -45,17 +45,24 @@ pub struct OrderBookUpdate {
     pub sells: Vec<OrderLevel>,
 }
 
+/// Lightweight order book metadata used by diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OrderBookPacketMeta {
+    pub(crate) market_index: u16,
+    pub(crate) seq: u16,
+    pub(crate) is_full: bool,
+    pub(crate) book_kind: u8,
+    pub(crate) buy_count: usize,
+    pub(crate) sell_count: usize,
+}
+
 /// Wrapping-safe sequence comparison (matches Delphi CompareSeq)
 pub(crate) fn compare_seq(a: u16, b: u16) -> i16 {
     a.wrapping_sub(b) as i16
 }
 
-/// Parse a raw MPC_OrderBook payload (SynLZ compressed).
-pub(crate) fn parse_order_book_packet(raw: &[u8]) -> Option<OrderBookUpdate> {
-    // Decompress (OrderBook is always compressed)
-    let data = compression::mp_decompress(raw)?;
-
-    if data.len() < 5 {
+fn parse_order_book_decompressed_meta(data: &[u8]) -> Option<OrderBookPacketMeta> {
+    if data.len() < 7 {
         return None;
     }
 
@@ -64,6 +71,39 @@ pub(crate) fn parse_order_book_packet(raw: &[u8]) -> Option<OrderBookUpdate> {
     let flags = data[4];
     let is_full = (flags & 1) != 0;
     let book_kind = (flags >> 1) & 1;
+    let buy_count = u16::from_le_bytes([data[5], data[6]]) as usize;
+    let buy_bytes = buy_count.checked_mul(ORDER_LEVEL_SIZE)?;
+    let sell_start = 7usize.checked_add(buy_bytes)?;
+    if sell_start > data.len() {
+        return None;
+    }
+    let remaining = data.len() - sell_start;
+    if remaining % ORDER_LEVEL_SIZE != 0 {
+        return None;
+    }
+
+    Some(OrderBookPacketMeta {
+        market_index,
+        seq,
+        is_full,
+        book_kind,
+        buy_count,
+        sell_count: remaining / ORDER_LEVEL_SIZE,
+    })
+}
+
+/// Parse only MPC_OrderBook metadata, without allocating level vectors.
+pub(crate) fn parse_order_book_packet_meta(raw: &[u8]) -> Option<OrderBookPacketMeta> {
+    let data = compression::mp_decompress(raw)?;
+    parse_order_book_decompressed_meta(&data)
+}
+
+/// Parse a raw MPC_OrderBook payload (SynLZ compressed).
+pub(crate) fn parse_order_book_packet(raw: &[u8]) -> Option<OrderBookUpdate> {
+    // Decompress (OrderBook is always compressed)
+    let data = compression::mp_decompress(raw)?;
+
+    let meta = parse_order_book_decompressed_meta(&data)?;
 
     let mut pos = 5;
 
@@ -71,7 +111,7 @@ pub(crate) fn parse_order_book_packet(raw: &[u8]) -> Option<OrderBookUpdate> {
     if pos + 2 > data.len() {
         return None;
     }
-    let buy_count_raw = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
+    let buy_count_raw = meta.buy_count;
     pos += 2;
 
     let buy_bytes = buy_count_raw.checked_mul(ORDER_LEVEL_SIZE)?;
@@ -103,10 +143,10 @@ pub(crate) fn parse_order_book_packet(raw: &[u8]) -> Option<OrderBookUpdate> {
     }
 
     Some(OrderBookUpdate {
-        market_index,
-        seq,
-        is_full,
-        book_kind,
+        market_index: meta.market_index,
+        seq: meta.seq,
+        is_full: meta.is_full,
+        book_kind: meta.book_kind,
         buys,
         sells,
     })
@@ -148,6 +188,21 @@ mod tests {
         assert_eq!(pkt.buys[0].rate, 10.0);
         assert_eq!(pkt.buys[1].quantity, 2.0);
         assert_eq!(pkt.sells[0].rate, 11.0);
+    }
+
+    #[test]
+    fn order_book_meta_parser_matches_full_parser_without_level_vecs() {
+        let raw = compressed_packet(2, &[(10.0, 1.0), (9.0, 2.0), (11.0, 3.0), (12.0, 4.0)]);
+
+        let full = parse_order_book_packet(&raw).expect("valid orderbook packet");
+        let meta = parse_order_book_packet_meta(&raw).expect("valid orderbook metadata");
+
+        assert_eq!(meta.market_index, full.market_index);
+        assert_eq!(meta.seq, full.seq);
+        assert_eq!(meta.is_full, full.is_full);
+        assert_eq!(meta.book_kind, full.book_kind);
+        assert_eq!(meta.buy_count, full.buys.len());
+        assert_eq!(meta.sell_count, full.sells.len());
     }
 
     #[test]

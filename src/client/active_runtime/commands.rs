@@ -77,6 +77,7 @@ pub(super) enum UiRuntimeCommand {
     AlertObject(crate::commands::ui::AlertObjectCommand),
     AlertSnapshotRequest,
     ChartTextState(crate::commands::ui::ChartTextStateCommand),
+    OrdersHistoryRequest(String),
 }
 
 pub(super) enum StratRuntimeCommand {

@@ -1,8 +1,5 @@
 /// `MPC_API` Engine RPC helpers.
 ///
-/// This module is a byte-exact port of Delphi `MoonProtoEngineStruct.pas`.
-/// Source: MoonProtoEngineStruct.pas:364-403 (TEngineResponse.CreateFromStream)
-///
 /// Request: client → server (CmdId=002)
 /// Response: server → client (CmdId=001)
 use std::time::{Duration, SystemTime};
@@ -56,9 +53,8 @@ fn read_u64_zero_tail(data: &[u8], pos: &mut usize) -> u64 {
 /// Parse `EngineResponse.data` for `emk_QueryHedgeMode`
 /// (`EngineMethod::QueryHedgeMode`).
 ///
-/// The Delphi server writes one `Boolean` byte on success:
-/// `MoonProtoEngineServer.pas:341-344` (`resp.WriteBool(hedgeMode)`). Extra
-/// trailing bytes are ignored for forward compatibility.
+/// The server writes one boolean byte on success. Extra trailing bytes are
+/// ignored for forward compatibility.
 pub(crate) fn parse_query_hedge_mode_response(data: &[u8]) -> Option<bool> {
     let mut pos = 0usize;
     Some(read_u8_zero_tail(data, &mut pos) != 0)
@@ -66,9 +62,9 @@ pub(crate) fn parse_query_hedge_mode_response(data: &[u8]) -> Option<bool> {
 
 /// API-key expiration time returned by `emk_CheckAPIExpirationTime`.
 ///
-/// The raw wire value is Delphi `TDateTime`: days since 1899-12-30 with a
-/// fractional day part. A value of `0.0` means that the server did not report
-/// an expiration time.
+/// The raw wire value is a legacy day-count timestamp: days since 1899-12-30
+/// with a fractional day part. A value of `0.0` means that the server did not
+/// report an expiration time.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ApiExpirationTime {
     delphi_time: f64,
@@ -81,7 +77,7 @@ impl ApiExpirationTime {
         }
     }
 
-    /// Build from the raw Delphi `TDateTime` value.
+    /// Build from the raw legacy day-count timestamp.
     pub(crate) fn from_delphi_time(delphi_time: f64) -> Self {
         Self { delphi_time }
     }
@@ -93,14 +89,14 @@ impl ApiExpirationTime {
             .flatten()
     }
 
-    /// API expiration as a typed Delphi `TDateTime` helper.
+    /// API expiration as a raw day-count helper for diagnostics.
     #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub fn time_delphi(&self) -> DelphiTime {
         DelphiTime::from_days(self.delphi_time)
     }
 
-    /// Raw Delphi `TDateTime` value retained for exact diagnostics.
+    /// Raw legacy day-count value retained for exact diagnostics.
     #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub fn delphi_time(&self) -> f64 {
@@ -142,11 +138,9 @@ impl ApiExpirationTime {
 /// Parse `EngineResponse.data` for `emk_CheckAPIExpirationTime`
 /// (`EngineMethod::CheckAPIExpirationTime`).
 ///
-/// The Delphi server writes exactly one little-endian `Double` on success:
-/// `MoonProtoEngineServer.pas → TEngineWorker.ProcessRequest` branch
-/// `emk_CheckAPIExpirationTime` (`resp.WriteDouble(ExpTime)`). Extra trailing
-/// bytes are ignored so newer servers can append fields without breaking old
-/// consumers.
+/// The server writes exactly one little-endian `Double` on success. Extra
+/// trailing bytes are ignored so newer servers can append fields without
+/// breaking old consumers.
 pub(crate) fn parse_api_expiration_time_response(data: &[u8]) -> Option<ApiExpirationTime> {
     let mut pos = 0usize;
     Some(ApiExpirationTime::from_delphi_time(f64::from_le_bytes(
@@ -156,18 +150,16 @@ pub(crate) fn parse_api_expiration_time_response(data: &[u8]) -> Option<ApiExpir
 
 /// One transferable asset row returned by `emk_UpdateTransferAssets`.
 ///
-/// Delphi source:
-/// `MoonProtoEngineServer.pas` writes `Currency`, `Ammount`, and `Total` from
-/// `TAssetItem`; `MoonProtoEngine.pas` reads the same fields back into
-/// `Markets.FAssets[EKind]`.
+/// The wire row carries `currency`, transferable `amount`, and total balance
+/// for one asset in one transfer bucket.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TransferAsset {
     /// Asset symbol, for example `"USDT"` or `"BTC"`.
     pub currency: String,
     /// Transferable amount reported by the exchange.
     ///
-    /// The field name in Delphi is `Ammount`; Rust exposes the corrected
-    /// spelling while preserving the wire meaning.
+    /// The wire spelling is historical; the SDK exposes the corrected field
+    /// name while preserving the protocol meaning.
     pub amount: f64,
     /// Total balance reported for this transfer asset.
     pub total: f64,

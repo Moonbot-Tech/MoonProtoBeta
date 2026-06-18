@@ -1,5 +1,14 @@
-﻿use super::SlicedAck;
-use crate::protocol::{control, slider::Slider};
+use super::SlicedAck;
+pub(crate) use crate::commands::registry::{
+    find_descriptor, CommandDescriptor, CommandPriority, UKeyRule, UK_IMMUNE_CLICKS, UK_NONE,
+    UK_ORDER_MOVE, UK_STRAT_SELL_PRICE_UPDATE,
+};
+#[cfg(test)]
+pub(crate) use crate::commands::registry::{
+    UK_BASE_UI_SETTINGS, UK_DEX_SWITCH, UK_LEV_MANAGE_SETTINGS, UK_SPOT_SWITCH, UK_STRAT_SNAPSHOT,
+    UK_TURN_MM_DETECTION,
+};
+use crate::protocol::{control, slider::Slider, Command};
 /// Send priority matching Delphi `TMoonProtoSendPriority`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum SendPriority {
@@ -10,6 +19,16 @@ pub(crate) enum SendPriority {
     /// `MPS_Low`: best-effort low-priority payload, one per send cycle.
     #[allow(dead_code)]
     Low,
+}
+
+impl From<CommandPriority> for SendPriority {
+    fn from(value: CommandPriority) -> Self {
+        match value {
+            CommandPriority::Sliced => Self::Sliced,
+            CommandPriority::High => Self::High,
+            CommandPriority::Low => Self::Low,
+        }
+    }
 }
 
 /// Unique key for command deduplication.
@@ -24,47 +43,6 @@ pub(crate) struct UniqueKey {
     /// singleton slot.
     pub uid: u64,
 }
-
-/// `UK_None`: no queue deduplication.
-pub(crate) const UK_NONE: u8 = 0;
-/// `UK_OrderStatus`: low-level order-status request key.
-#[allow(dead_code)]
-pub(crate) const UK_ORDER_STATUS: u8 = 1;
-/// `UK_OrderStatusShort`: low-level short order-status request key.
-#[allow(dead_code)]
-pub(crate) const UK_ORDER_STATUS_SHORT: u8 = 2;
-/// `UK_OrderMove`: replace/cancel/stops/panic/VStop dedup by order task id.
-pub(crate) const UK_ORDER_MOVE: u8 = 3;
-/// `UK_StopMove`: legacy stop-move dedup ordinal from Delphi.
-#[allow(dead_code)]
-pub(crate) const UK_STOP_MOVE: u8 = 4;
-/// `UK_StratSnapshot`: singleton strategy snapshot dedup key.
-pub(crate) const UK_STRAT_SNAPSHOT: u8 = 5;
-/// `UK_BaseUISettings`: singleton client-settings snapshot dedup key.
-pub(crate) const UK_BASE_UI_SETTINGS: u8 = 6;
-/// `UK_StratSellPriceUpdate`: per-strategy sell-price dedup key.
-pub(crate) const UK_STRAT_SELL_PRICE_UPDATE: u8 = 7;
-/// `UK_BalanceFull`: singleton full-balance snapshot dedup key.
-#[allow(dead_code)]
-pub(crate) const UK_BALANCE_FULL: u8 = 8;
-/// `UK_TurnMMDetection`: MM-orders subscription command key.
-pub(crate) const UK_TURN_MM_DETECTION: u8 = 9;
-/// `UK_ImmuneClicks`: batch order-immunity dedup key.
-pub(crate) const UK_IMMUNE_CLICKS: u8 = 10;
-/// `UK_LevManageSettings`: singleton leverage-management settings key.
-pub(crate) const UK_LEV_MANAGE_SETTINGS: u8 = 11;
-/// `UK_ArbPrices`: arbitrage price command key.
-#[allow(dead_code)]
-pub(crate) const UK_ARB_PRICES: u8 = 12;
-/// `UK_DexSwitch`: DEX switch command key.
-pub(crate) const UK_DEX_SWITCH: u8 = 13;
-/// `UK_SpotSwitch`: spot-mode switch command key.
-pub(crate) const UK_SPOT_SWITCH: u8 = 14;
-/// `UK_ChartTextSnapshot`: per-client chart text snapshot key.
-#[allow(dead_code)]
-pub(crate) const UK_CHART_TEXT_SNAPSHOT: u8 = 15;
-/// `UK_ChartTextState`: singleton chart text state key.
-pub(crate) const UK_CHART_TEXT_STATE: u8 = 16;
 
 impl UniqueKey {
     /// No deduplication.
@@ -95,6 +73,7 @@ impl UniqueKey {
 
     /// `UK_BaseUISettings` with Delphi `TClientSettingsCommand.SetUKey`
     /// semantics: every settings snapshot competes for the single UID=1 slot.
+    #[cfg(test)]
     pub(crate) fn base_ui_settings_slot() -> Self {
         Self {
             kind: UK_BASE_UI_SETTINGS,
@@ -102,6 +81,7 @@ impl UniqueKey {
         }
     }
     /// Delphi `TMMOrdersSubscribeCommand` UKey: `(UK_TurnMMDetection, UID)`.
+    #[cfg(test)]
     pub(crate) fn turn_mm_detection_for(uid: u64) -> Self {
         Self {
             kind: UK_TURN_MM_DETECTION,
@@ -110,6 +90,7 @@ impl UniqueKey {
     }
     /// `UK_LevManageSettings` with Delphi `TLevManageCommand.SetUKey`
     /// semantics: every leverage-management snapshot competes for UID=1.
+    #[cfg(test)]
     pub(crate) fn lev_manage_settings_slot() -> Self {
         Self {
             kind: UK_LEV_MANAGE_SETTINGS,
@@ -117,6 +98,7 @@ impl UniqueKey {
         }
     }
     /// Delphi `TSwitchDexCommand` UKey: `(UK_DexSwitch, UID)`.
+    #[cfg(test)]
     pub(crate) fn dex_switch_for(uid: u64) -> Self {
         Self {
             kind: UK_DEX_SWITCH,
@@ -124,18 +106,11 @@ impl UniqueKey {
         }
     }
     /// Delphi `TSwitchSpotCommand` UKey: `(UK_SpotSwitch, UID)`.
+    #[cfg(test)]
     pub(crate) fn spot_switch_for(uid: u64) -> Self {
         Self {
             kind: UK_SPOT_SWITCH,
             uid,
-        }
-    }
-    /// `UK_ChartTextState` with Delphi `TChartTextStateCommand.SetUKey`
-    /// semantics: every state update competes for UID=1.
-    pub(crate) fn chart_text_state_slot() -> Self {
-        Self {
-            kind: UK_CHART_TEXT_STATE,
-            uid: 1,
         }
     }
     /// `UK_StratSellPriceUpdate` keyed by `strategy_id` so dedup is per
@@ -147,12 +122,78 @@ impl UniqueKey {
         }
     }
     /// `UK_StratSnapshot` singleton slot for full strategy snapshots.
+    #[cfg(test)]
     pub(crate) fn strat_snapshot() -> Self {
         Self {
             kind: UK_STRAT_SNAPSHOT,
             uid: 1,
         }
     }
+}
+
+pub(crate) struct TypedSendMetadata {
+    pub(crate) priority: SendPriority,
+    pub(crate) encrypted: bool,
+    pub(crate) max_retries: i32,
+    pub(crate) u_key: UniqueKey,
+}
+
+pub(crate) fn typed_send_metadata(
+    outer: Command,
+    payload: &[u8],
+    explicit_u_key: Option<UniqueKey>,
+) -> Option<TypedSendMetadata> {
+    let cmd_id = payload.first().copied()?;
+    let desc = find_descriptor(outer, cmd_id)?;
+    let u_key = descriptor_u_key(desc, payload, explicit_u_key)?;
+    Some(TypedSendMetadata {
+        priority: desc.priority.into(),
+        encrypted: desc.default_encrypted,
+        max_retries: desc.max_retries,
+        u_key,
+    })
+}
+
+fn descriptor_u_key(
+    desc: &CommandDescriptor,
+    payload: &[u8],
+    explicit_u_key: Option<UniqueKey>,
+) -> Option<UniqueKey> {
+    if let Some(u_key) = explicit_u_key {
+        return Some(u_key);
+    }
+    if desc.unique_kind == UK_NONE {
+        return Some(UniqueKey::none());
+    }
+
+    match desc.ukey {
+        UKeyRule::None => Some(UniqueKey::none()),
+        UKeyRule::HeaderUid | UKeyRule::TradeEpochUid => {
+            payload_header_uid(payload).map(|uid| UniqueKey {
+                kind: desc.unique_kind,
+                uid,
+            })
+        }
+        UKeyRule::Singleton(uid) => Some(UniqueKey {
+            kind: desc.unique_kind,
+            uid,
+        }),
+        // Delphi `TBaseMarketCommand.SetUKey` uses the local `TMarket` pointer.
+        // No current client-sent unique command depends on that inherited rule;
+        // require an explicit key if one appears instead of guessing from
+        // market text/index bytes.
+        UKeyRule::MarketIndex
+        | UKeyRule::StrategyId
+        | UKeyRule::ImmuneItemsSum
+        | UKeyRule::SendContextClientId => None,
+    }
+}
+
+fn payload_header_uid(payload: &[u8]) -> Option<u64> {
+    payload
+        .get(3..11)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u64::from_le_bytes)
 }
 
 /// Item in the send queue (matches TMoonProtoDataToSend)

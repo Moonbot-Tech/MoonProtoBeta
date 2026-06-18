@@ -35,7 +35,7 @@ impl StratsState {
             None => {
                 self.schema_failures = self.schema_failures.saturating_add(1);
                 self.schema_last_error = Some(format!(
-                    "failed to parse TStratSchema raw blob ({raw_len} bytes)"
+                    "failed to parse strategy schema blob ({raw_len} bytes)"
                 ));
                 StratEvent::SchemaParseFailed {
                     #[cfg(any(test, feature = "diagnostics"))]
@@ -45,12 +45,12 @@ impl StratsState {
         }
     }
 
-    /// Latest strategy schema received through `TStratSchemaRequest` during Init.
+    /// Latest strategy schema received during Init.
     pub fn strategy_schema(&self) -> Option<&StrategySchema> {
         self.schema.as_deref()
     }
 
-    /// Raw DEFLATE blob of the latest schema as received in `TStratSchema.Data`.
+    /// Raw DEFLATE blob of the latest strategy schema.
     ///
     /// Normal terminal code reads the decoded [`StrategySchema`] through
     /// [`Self::strategy_schema`]. The raw blob is kept for FireTest/protocol

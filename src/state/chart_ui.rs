@@ -4,10 +4,10 @@ use crate::commands::ui::{AlertObjectCommand, ChartTextSnapshotCommand, ChartTex
 
 /// Accepted chart-alert object owned by the MoonProto core.
 ///
-/// The blob is exactly Delphi `TChartObject.Save`. Rust does not invent a
-/// partial chart-object schema here: UI code that understands chart
-/// objects can decode the blob; other UIs can keep it as an authoritative
-/// opaque snapshot and key it by `(market_name, obj_uid)`.
+/// The blob is the authoritative saved chart-object payload from the core.
+/// The SDK deliberately does not invent a partial chart-object schema here:
+/// UI code that understands chart objects can decode the blob; other UIs can
+/// keep it as an opaque snapshot keyed by `(market_name, obj_uid)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChartAlertObject {
     pub market_name: String,

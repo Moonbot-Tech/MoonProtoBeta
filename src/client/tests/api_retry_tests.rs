@@ -18,7 +18,7 @@ fn dummy_cfg() -> ClientConfig {
 }
 
 #[test]
-fn engine_api_sliced_requests_use_delphi_retry_count() {
+fn engine_api_sliced_requests_use_registry_retry_count() {
     let mut client = Client::new(dummy_cfg());
     client.set_domain_ready(true);
     let raw = crate::commands::engine_request::query_hedge_mode();
@@ -31,4 +31,25 @@ fn engine_api_sliced_requests_use_delphi_retry_count() {
     assert_eq!(sliced[0].priority, SendPriority::Sliced);
     assert_eq!(sliced[0].max_retries, 6);
     assert_eq!(sliced[0].retry_left, 5);
+}
+
+#[test]
+fn rejected_pre_init_subscription_does_not_update_reconnect_clocks() {
+    let client = Client::new(dummy_cfg());
+    let raw = crate::commands::engine_request::subscribe_all_trades(false);
+
+    client.send_api_request_at(&raw, 1234);
+
+    let (sliced, high, low) = client.take_send_queues_for_test();
+    assert!(sliced.is_empty());
+    assert!(high.is_empty());
+    assert!(low.is_empty());
+    assert_eq!(
+        client
+            .reconnect
+            .last_trades_subscribe_request_ms
+            .load(Ordering::Relaxed),
+        NEVER_TIME_MS,
+        "a request rejected by the domain gate must not look like an in-flight reconnect subscribe"
+    );
 }

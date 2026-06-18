@@ -392,6 +392,10 @@ fn handle_ui_command(
             client.ui_chart_text_state(&cmd);
             changed
         }
+        UiRuntimeCommand::OrdersHistoryRequest(market_name) => {
+            client.ui_orders_history_request(&market_name);
+            false
+        }
     }
 }
 

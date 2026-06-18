@@ -5,9 +5,9 @@
 //! and command structs that appear in public signatures, snapshots, and events;
 //! the byte-level builders and parsers themselves are crate-internal.
 //!
-//! These types preserve the Delphi wire formats: base command header, command
-//! id, version, UID, per-command priority/retry semantics, and exact field
-//! order. See `docs/` for public Active Lib/API guides.
+//! These types preserve the production MoonProto wire contract: base command
+//! header, command id, version, UID, per-command priority/retry semantics, and
+//! exact field order. See `docs/` for public Active Lib/API guides.
 
 #![cfg_attr(feature = "diagnostics", allow(unreachable_pub))]
 

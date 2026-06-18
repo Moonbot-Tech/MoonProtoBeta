@@ -1,9 +1,9 @@
-//! Delphi ordinal types used by the `MPC_Order` channel.
+//! Stable order-state ordinal wrappers used by the order channel.
 //!
-//! These wrappers preserve unknown raw bytes because Delphi reads packed enum
-//! fields with `ms.Read(..., SizeOf(...))` and does not reject future ordinals.
+//! These wrappers preserve unknown raw bytes so newer server-side states remain
+//! round-trippable instead of being collapsed into a lossy enum.
 
-/// TOrderType (Vars.pas:57): O_SELL=0, O_BUY=1, O_BuyStop=2, O_BuyLimit=3.
+/// Order side/type: sell, buy, stop-buy, or limit-buy.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct OrderType(u8);
 
@@ -14,7 +14,7 @@ impl OrderType {
     pub const BuyStop: Self = Self(2);
     pub const BuyLimit: Self = Self(3);
 
-    /// Preserve a raw Delphi ordinal byte.
+    /// Preserve a raw ordinal byte.
     #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     #[allow(dead_code)]
@@ -69,8 +69,7 @@ impl std::fmt::Debug for OrderType {
     }
 }
 
-/// TOrderSubType (MarketsU.pas:26): order execution subtype retained in
-/// `TOrderCompact`.
+/// Order execution subtype retained in the compact order snapshot.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct OrderSubType(u8);
 
@@ -139,7 +138,7 @@ impl std::fmt::Debug for OrderSubType {
     }
 }
 
-/// TOrderWorkerStatus (MarketsU.pas:39), trading order state-machine status.
+/// Trading order state-machine status.
 ///
 /// Standard flow for a long position:
 /// ```text
@@ -158,7 +157,7 @@ impl std::fmt::Debug for OrderSubType {
 /// - **Sell phase** (`SellSet`/`SellAlmostDone`/`SellDone`/`SellFail`/`SellCancel`) —
 ///   exits the position (take-profit, stop-loss, or manual close).
 /// - `SellAlmostDone` means the sell completed through a replace/market-stop
-///   path; Delphi leaves the worker loop like it does for final sell statuses.
+///   path; it leaves the worker loop like the final sell statuses.
 ///
 /// **Server constraints**:
 /// - Phase rollback is rejected: a sell phase must not return to buy phase.
@@ -323,8 +322,10 @@ impl std::fmt::Debug for FixedPosition {
     }
 }
 
-/// Sell-side `TMoveAllCmdType` (MoonProtoTradeStruct.pas:148 inline comment).
-/// Describes how `TMoveAllSellsCommand` interprets `Price` / `PriceZone`.
+/// Sell-side bulk-move mode.
+///
+/// Describes how a move-all-sells action interprets its target price and
+/// optional price zone.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MoveAllCmdType(u8);
 
@@ -334,7 +335,7 @@ impl MoveAllCmdType {
     pub const MoveKind: Self = Self(0);
     /// Move orders whose price is inside `[price_zone.min_p, price_zone.max_p]`.
     pub const PriceZone: Self = Self(1);
-    /// Percent/personal mode, interpreted by the Delphi server branch.
+    /// Percent/personal mode.
     pub const Pers: Self = Self(2);
 
     #[cfg(any(test, feature = "diagnostics"))]
@@ -384,11 +385,10 @@ impl std::fmt::Debug for MoveAllCmdType {
     }
 }
 
-/// Buy-side `TMoveAllBuysCommand.CmdType`.
+/// Buy-side bulk-move mode.
 ///
-/// Delphi `TMoveAllBuysCommand` supports only `0: MoveKind` and `2: Pers`;
-/// there is no buy-side `PriceZone` mode and the server buy branch ignores
-/// `CmdType=1`.
+/// Buy-side moves support regular move-kind and percent/personal modes. There
+/// is no buy-side price-zone mode.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MoveAllBuysCmdType(u8);
 

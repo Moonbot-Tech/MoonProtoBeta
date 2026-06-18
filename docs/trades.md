@@ -228,10 +228,9 @@ Old detailed futures rows evicted from the retained futures trade ring are
 compacted into `MiniCandle` rows. This keeps older chart context available
 without retaining every old trade forever.
 
-`mm_order_companion` mirrors MoonBot's `TMMOrderData` side buffer. It is aligned
-by slot with `mm_orders` and carries the HyperDex taker address plus the
-MoonBot-compatible display color. Use `taker_hex()` for taker logs/tooltips and
-`color_argb()` for chart coloring.
+`mm_order_companion` is aligned by slot with `mm_orders` and carries the HyperDex
+taker address plus the MoonBot-compatible display color. Use `taker_hex()` for
+taker logs/tooltips and `color_argb()` for chart coloring.
 
 ## Candles And Derived Analytics
 
@@ -338,7 +337,7 @@ retained public history category.
 `mm_orders_capacity` governs both the MM-order ring and its taker/color
 companion ring; they push and evict in lockstep so an order and its companion
 can never desync. This keeps the same dense hot-path shape as the production
-Delphi core: compact rows, predictable scans, and no per-item allocation.
+core: compact rows, predictable scans, and no per-item allocation.
 `MarketHistorySizing::Auto` is the default: `MoonClient` waits until the market
 list and the requested trade-storage scope are known, then sizes per-market
 rings from system memory. Use `MarketHistorySizing::fixed(config)` when the

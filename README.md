@@ -204,7 +204,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     client.streams().subscribe_orderbook("ETHUSDT")?;
     // After the user chooses a market/order side:
-    // client.trade().new_order(NewOrderParams::new("BTCUSDT", OrderSide::Long, 50100.0, 0.001))?;
+    // if let Some(market) = client.snapshot().and_then(|s| s.markets().find("BTC")) {
+    //     client.trade().new_order(NewOrderParams::for_market(&market, OrderSide::Long, 50100.0, 0.001))?;
+    // }
     // After an order appears in events/snapshots:
     // client.orders().move_order(&visible_order, 50100.0)?;
 

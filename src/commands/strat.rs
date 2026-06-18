@@ -13,6 +13,7 @@
 //! - 7 — TStratSchemaRequest (C→S, empty)
 //! - 8 — TStratSchema (S→C, Sliced, raw-deflate schema blob)
 //! - 9 — TDetectSignalCommand (S→C, High, chart detect/alert fact)
+//! - 10 — TStratRuntimeState (S→C, High, current global strategy run state)
 //!
 //! ## Note on TStratSnapshot.Data
 //! `Data: bytes(Size)` is the serialized `TStrategySerializer` bin format (RTTI-driven,
@@ -38,6 +39,7 @@ const CMD_CHECKED_ECHO: u8 = 6;
 const CMD_SCHEMA_REQUEST: u8 = 7;
 const CMD_SCHEMA: u8 = 8;
 const CMD_DETECT_SIGNAL: u8 = 9;
+const CMD_RUNTIME_STATE: u8 = 10;
 
 pub const DETECT_KIND_ROW: u8 = 0x01;
 pub const DETECT_KIND_CHART_ONLY: u8 = 0x02;
@@ -53,6 +55,10 @@ pub(crate) fn is_schema_request_payload(payload: &[u8]) -> bool {
 
 pub(crate) fn is_schema_payload(payload: &[u8]) -> bool {
     payload.first().copied() == Some(CMD_SCHEMA)
+}
+
+pub(crate) fn is_runtime_state_payload(payload: &[u8]) -> bool {
+    payload.first().copied() == Some(CMD_RUNTIME_STATE)
 }
 
 /// A single TStratCheckedItem element: `StrategyID:UInt64 + Checked:bool` (9 bytes).
@@ -224,6 +230,13 @@ impl DetectSignalCommand {
     }
 }
 
+/// `TStratRuntimeState` (CmdId=10). Server → client global strategy run state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StratRuntimeState {
+    /// `IsRunningStrat` after the server first calculated it.
+    pub strategies_running: bool,
+}
+
 /// All parseable incoming MPC_Strat payloads.
 #[cfg_attr(feature = "diagnostics", allow(dead_code))]
 #[derive(Debug, Clone)]
@@ -241,6 +254,7 @@ pub enum StratCommand {
     },
     Schema(StratSchema),
     DetectSignal(DetectSignalCommand),
+    RuntimeState(StratRuntimeState),
     /// Header is valid, but protocol version is newer than this library can
     /// parse. Delphi registry marks this as `FSkipped` and returns the base
     /// command class.
@@ -391,6 +405,9 @@ impl StratCommand {
                     obj_uid,
                 }))
             }
+            CMD_RUNTIME_STATE => Some(StratCommand::RuntimeState(StratRuntimeState {
+                strategies_running: read_u8_zero_tail(payload, &mut pos) != 0,
+            })),
             _ => Some(StratCommand::Unknown { cmd_id, uid }),
         }
     }

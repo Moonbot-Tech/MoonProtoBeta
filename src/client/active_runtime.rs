@@ -31,9 +31,9 @@ pub use types::{
 /// High-level Active Lib client for regular applications.
 ///
 /// `MoonClient::connect` owns the protocol/runtime thread. It runs until
-/// [`Self::stop`] or drop, keeps reconnect/subscriptions/gap recovery alive, and
-/// exposes read snapshots plus user-intent commands. Applications do not choose
-/// a protocol-loop duration.
+/// [`Self::disconnect`] or drop, keeps reconnect/subscriptions/gap recovery
+/// alive, and exposes read snapshots plus user-intent commands. Applications do
+/// not choose a protocol-loop duration.
 pub struct MoonClient {
     tx: mpsc::Sender<RuntimeCommand>,
     shutdown: Arc<AtomicBool>,
@@ -79,8 +79,8 @@ impl MoonClient {
     /// one-shot work after connect. It is **not** the canonical UI path: a long
     /// running application should use [`Self::connect`] (which returns at once)
     /// and react to [`LifecycleEvent::Ready`] / [`LifecycleEvent::ConnectFailed`]
-    /// from the event sink, exactly like the Delphi client gates work on its
-    /// async `InitDone` flag instead of blocking a thread on readiness.
+    /// from the event sink. Long-running UI code should gate work on retained
+    /// lifecycle state instead of blocking a thread on readiness.
     ///
     /// The wait is a single channel receive (no busy polling). `timeout` bounds
     /// the whole connect+init wait; pick a value larger than the connect/init
@@ -633,10 +633,10 @@ impl MoonClient {
 
     /// Request CoinCard deep-history candles and return immediately.
     ///
-    /// These are demand-driven candles such as Delphi `hk_4h` for CoinCard UI.
-    /// They are separate from the retained 5m candles that Active Lib loads and
-    /// maintains from trades. Completion arrives as `Event::CoinCardCandles`;
-    /// read the latest rows through `snapshot().coin_card_candles()`.
+    /// These are demand-driven CoinCard/deep-history candles. They are separate
+    /// from the retained 5m candles that Active Lib loads and maintains from
+    /// trades. Completion arrives as `Event::CoinCardCandles`; read the latest
+    /// rows through `snapshot().coin_card_candles()`.
     pub(crate) fn request_coin_card_candles(
         &self,
         market: impl Into<String>,
@@ -702,9 +702,8 @@ impl MoonClient {
 
     /// Set local Active Lib market-delta policy.
     ///
-    /// This mirrors Delphi `cfg.ExcludeBlackListDelta`. It is deliberately not a
-    /// `TClientSettingsCommand` wire field: Delphi keeps it as local terminal
-    /// configuration, and the runtime applies it to retained `Market` state.
+    /// This is deliberately not a server settings field: it is local terminal
+    /// policy, and the runtime applies it to retained `Market` analytics state.
     pub(crate) fn set_exclude_blacklisted_markets_from_exchange_delta(
         &self,
         exclude: bool,
@@ -736,7 +735,7 @@ impl MoonClient {
         self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::SwitchSpot(spot)))
     }
 
-    /// Send a leverage-management command (`TLevManageCommand`).
+    /// Queue a leverage-management settings update.
     pub(crate) fn manage_leverage(
         &self,
         cmd: crate::commands::ui::LevManage,
@@ -744,7 +743,7 @@ impl MoonClient {
         self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::LevManage(cmd)))
     }
 
-    /// Send emulated chart trades (`TEmuTradesCommand`).
+    /// Queue emulated chart trades.
     pub(crate) fn send_emulated_trades(
         &self,
         market_index: u16,
@@ -758,7 +757,7 @@ impl MoonClient {
         }))
     }
 
-    /// Send a trigger-management command (`TTriggerManageCommand`).
+    /// Queue a trigger-management update.
     pub(crate) fn manage_triggers(
         &self,
         action: u8,
@@ -774,13 +773,13 @@ impl MoonClient {
         }))
     }
 
-    /// Send a reset-profit command (`TResetProfitCommand`).
+    /// Queue a reset-profit request.
     pub(crate) fn reset_profit(&self, kind: u8) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::ResetProfit(kind)))
     }
 
-    /// Send an arb-activation notify (`TArbActivateNotify`); `valid_days` is a
-    /// Delphi `TDateTime` (days).
+    /// Queue an arbitrage-activation notify; `valid_days` is the protocol
+    /// day-float form derived from `MoonTime`.
     pub(crate) fn notify_arb_activation(&self, valid_days: f64) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::ArbActivateNotify(
             valid_days,
@@ -831,8 +830,7 @@ impl MoonClient {
         }))
     }
 
-    /// Synchronize the Active Lib local strategy list after a terminal edit and
-    /// send a Delphi `TStratSnapshot` batch to the server.
+    /// Synchronize the Active Lib local strategy list after a terminal edit.
     ///
     /// The runtime uses the live strategy schema fetched during Init, so callers
     /// do not carry serializer field hardcode. The call only queues the intent;
@@ -858,12 +856,12 @@ impl MoonClient {
             .map_err(|_| MoonClientError::RuntimeStopped)
     }
 
-    /// Send Delphi checked-state delta if any local strategy changed.
+    /// Send checked-state delta if any local strategy changed.
     pub(crate) fn send_strategy_checked_delta(&self) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::StrategySendCheckedDelta)
     }
 
-    /// Start or stop strategies with Delphi V2 checked-delta semantics.
+    /// Start or stop strategies with the checked-delta runtime semantics.
     pub(crate) fn strategy_start_stop(&self, is_start: bool) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::StrategyStartStop { is_start })
     }

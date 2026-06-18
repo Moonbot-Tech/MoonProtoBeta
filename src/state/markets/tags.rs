@@ -1,4 +1,4 @@
-//! Delphi `emk_CheckBinanceTags` apply logic.
+//! `emk_CheckBinanceTags` apply logic.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -12,9 +12,9 @@ const MARKET_TOKEN_TAG_MIN_WIRE_SIZE: usize = 2;
 impl MarketsState {
     /// Apply the `emk_CheckBinanceTags` response.
     ///
-    /// Delphi `TMoonProtoEngine.CheckBinanceTags` clears seen state for all
-    /// markets, applies tags for markets present in the response, then clears
-    /// tags for every market not seen in that response.
+    /// Token-tag refresh clears seen state for all markets, applies tags for
+    /// markets present in the response, then clears tags for every market not
+    /// seen in that response.
     pub fn apply_token_tags(&mut self, items: Vec<MarketTokenTags>) -> MarketsEvent {
         Arc::make_mut(&mut self.token_tags).clear();
         let mut count = 0usize;
@@ -27,9 +27,9 @@ impl MarketsState {
         MarketsEvent::TokenTagsUpdated { count }
     }
 
-    /// Active-library direct counterpart of Delphi `CheckBinanceTags`.
+    /// Direct Active Lib apply path for `CheckBinanceTags`.
     ///
-    /// Delphi applies tags inside the read loop and clears unseen tags only
+    /// Tags are applied inside the read loop and unseen tags are cleared only
     /// after the loop completes. A late string read error therefore leaves
     /// already-read tag updates applied and does not clear old absent tags.
     // parity: MoonBot MoonProtoEngine.pas:CheckBinanceTags

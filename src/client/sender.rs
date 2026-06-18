@@ -11,9 +11,9 @@ mod ui;
 
 /// Error returned by fallible [`ClientSender`] queueing methods.
 ///
-/// Send/control queues are intentionally unbounded to preserve the Delphi
-/// no-local-cap behavior of `SendCmdInt`. Queueing can still be rejected if
-/// the owning `Client` is gone, or if the caller tries to bypass the Delphi
+/// Send/control queues are intentionally unbounded: typed application commands
+/// do not fail because of a local queue capacity cap. Queueing can still be
+/// rejected if the owning `Client` is gone, or if the caller tries to bypass the
 /// `InitDone`/domain gate before the one-time init sequence completes.
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,7 +45,7 @@ impl std::error::Error for SubscribeError {}
 /// running `Client`.
 /// Subscription helpers update the
 /// active-library registry. Raw command helpers append already-serialized
-/// command payloads directly into the Delphi-style send queues used by `Client`
+/// command payloads directly into the protocol send queues used by `Client`
 /// wrappers. The sender also mirrors fire-and-forget trade, UI, strategy, and
 /// balance wrappers so terminal UI code can send typed actions without
 /// rebuilding wire priorities, retry counts, or UKey values by hand.
@@ -92,10 +92,10 @@ impl ClientSender {
 
     /// Queue an already-serialized command payload for sending.
     ///
-    /// This is the thread-safe counterpart of [`Client::send_cmd`]. It does not
-    /// build protocol payloads for the caller; use typed builders in
-    /// [`crate::commands`] or prefer high-level `Client` wrappers when the caller
-    /// already owns the client thread.
+    /// This is a raw diagnostics/test edge. It does not consult the command
+    /// registry and therefore requires the caller to pass the exact wire
+    /// priority, encryption flag, retry count, and UKey. Normal code should use
+    /// typed `MoonClient`/`ClientSender` actions instead.
     pub(crate) fn send_cmd(
         &self,
         data: Vec<u8>,
@@ -129,9 +129,9 @@ impl ClientSender {
         )
     }
 
-    /// Queue an already-serialized command payload with a Delphi UKey dedup key.
+    /// Queue an already-serialized command payload with an explicit UKey.
     ///
-    /// This is the thread-safe counterpart of [`Client::send_cmd_keyed`].
+    /// This is the thread-safe raw counterpart of [`Client::send_cmd_keyed`].
     pub(crate) fn send_cmd_keyed(
         &self,
         data: Vec<u8>,
@@ -192,8 +192,7 @@ impl ClientSender {
     ) -> Result<(), SubscribeError> {
         let method = engine_request_method(&request_payload);
         let request_uid = engine_request_uid(&request_payload);
-        let result =
-            self.try_send_cmd(request_payload, Command::API, SendPriority::Sliced, true, 6);
+        let result = self.try_send_typed_domain_cmd(request_payload, Command::API);
         if result.is_ok() {
             let now_ms = self.start.elapsed().as_millis() as i64;
             match method {
@@ -217,50 +216,57 @@ impl ClientSender {
         result
     }
 
-    fn send_domain_cmd(
-        &self,
-        data: Vec<u8>,
-        cmd: Command,
-        priority: SendPriority,
-        encrypted: bool,
-        max_retries: i32,
-    ) -> bool {
-        if !self.domain_ready_for_typed_send() {
-            return false;
-        }
-        self.send_cmd(data, cmd, priority, encrypted, max_retries);
-        true
+    fn send_typed_domain_cmd(&self, data: Vec<u8>, cmd: Command) -> bool {
+        self.send_typed_domain_cmd_int(data, cmd, None).is_ok()
     }
 
-    fn send_domain_cmd_keyed(
-        &self,
-        data: Vec<u8>,
-        cmd: Command,
-        priority: SendPriority,
-        encrypted: bool,
-        max_retries: i32,
-        u_key: UniqueKey,
-    ) -> bool {
-        if !self.domain_ready_for_typed_send() {
-            return false;
-        }
-        self.send_cmd_keyed(data, cmd, priority, encrypted, max_retries, u_key);
-        true
+    fn send_typed_domain_cmd_keyed(&self, data: Vec<u8>, cmd: Command, u_key: UniqueKey) -> bool {
+        self.send_typed_domain_cmd_int(data, cmd, Some(u_key))
+            .is_ok()
     }
 
-    fn try_send_domain_cmd_keyed(
+    fn try_send_typed_domain_cmd(&self, data: Vec<u8>, cmd: Command) -> Result<(), SubscribeError> {
+        self.send_typed_domain_cmd_int(data, cmd, None)
+    }
+
+    fn try_send_typed_domain_cmd_keyed(
         &self,
         data: Vec<u8>,
         cmd: Command,
-        priority: SendPriority,
-        encrypted: bool,
-        max_retries: i32,
         u_key: UniqueKey,
     ) -> Result<(), SubscribeError> {
-        if !self.domain_ready_for_typed_send() {
-            return Ok(());
+        self.send_typed_domain_cmd_int(data, cmd, Some(u_key))
+    }
+
+    fn send_typed_domain_cmd_int(
+        &self,
+        data: Vec<u8>,
+        cmd: Command,
+        explicit_u_key: Option<UniqueKey>,
+    ) -> Result<(), SubscribeError> {
+        if !self.shared.app_queue_alive.load(Ordering::Relaxed) {
+            return Err(SubscribeError::Disconnected);
         }
-        self.try_send_cmd_keyed(data, cmd, priority, encrypted, max_retries, u_key)
+        if !self.shared.domain_ready.load(Ordering::Relaxed)
+            && !outgoing_allowed_before_domain_ready(cmd.to_byte(), &data)
+        {
+            return Err(SubscribeError::DomainNotReady);
+        }
+        let Some(meta) = typed_send_metadata(cmd, &data, explicit_u_key) else {
+            log::error!(target: "moonproto::client",
+                "ClientSender::send_typed_domain_cmd: no descriptor/UKey for cmd={:?} payload_cmd_id={:?}",
+                cmd,
+                data.first().copied());
+            return Err(SubscribeError::Disconnected);
+        };
+        self.try_send_cmd_keyed(
+            data,
+            cmd,
+            meta.priority,
+            meta.encrypted,
+            meta.max_retries,
+            meta.u_key,
+        )
     }
 
     fn try_enqueue_send_item(&self, item: SendItem) -> Result<(), SubscribeError> {

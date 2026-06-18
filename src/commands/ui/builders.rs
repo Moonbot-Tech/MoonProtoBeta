@@ -330,3 +330,12 @@ pub fn build_chart_text_snapshot_for_test(cmd: &ChartTextSnapshotCommand) -> Vec
     }
     out
 }
+
+/// CmdId=19 `TOrdersHistoryRequestCommand`.
+#[doc(hidden)]
+pub(crate) fn build_orders_history_request(uid: u64, market_name: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(11 + 2 + market_name.len());
+    write_header(&mut out, CMD_ORDERS_HISTORY_REQUEST, uid);
+    write_string(&mut out, market_name);
+    out
+}

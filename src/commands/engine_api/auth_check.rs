@@ -7,9 +7,9 @@ use zerocopy::{FromBytes, Immutable, KnownLayout, Unaligned};
 
 /// Hyperliquid DEX info.
 ///
-/// Wire layout matches Delphi `THLDexInfo`: `Name: string[15]` as a Pascal
-/// short string (1 length byte + 15 data bytes) followed by a little-endian
-/// `CollateralToken: Word`. The packed size is 18 bytes.
+/// Wire layout is a packed 18-byte row: `Name` as a Pascal short string
+/// (1 length byte + 15 data bytes), followed by a little-endian collateral
+/// token id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DexInfo {
     /// DEX name. Empty string means the default USDC validator.
@@ -44,10 +44,9 @@ impl From<WireDexInfo> for DexInfo {
 
 /// Index into `AuthCheckResponse::known_dexes`.
 ///
-/// Delphi stores current Hyperliquid futures/spot DEX selection as a byte
-/// index (`cfg.HLDexMarket` / `cfg.HLSpotDexMarket`). The wrapper keeps the
-/// wire value exact while public code does not have to pass around a naked
-/// magic `u8`.
+/// Current Hyperliquid futures/spot DEX selection as an index into
+/// [`AuthCheckResponse::known_dexes`]. The wrapper keeps the wire value exact
+/// while public code does not have to pass around a naked magic `u8`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct HyperDexIndex(u8);
 
@@ -115,9 +114,9 @@ pub struct AuthCheckResponse {
 /// Returns `None` when the payload is corrupt or shorter than the mandatory
 /// field prefix. Optional tail fields are parsed only while bytes remain; their
 /// absence means an older server and still returns `Some` with mandatory data.
-/// DEX tail follows Delphi's soft stream-read shape: the declared `cnt` is read,
-/// `SetLength(KnownDexes, cnt)` creates zero-filled records, and each
-/// `TMemoryStream.Read` partially overwrites one 18-byte `THLDexInfo` slot.
+/// DEX tail follows the protocol's soft stream-read shape: the declared `cnt`
+/// is bounded, then each available 18-byte row overwrites one entry while a
+/// short tail keeps the already parsed mandatory fields.
 pub(crate) fn parse_auth_check_response(data: &[u8]) -> Option<AuthCheckResponse> {
     let mut pos = 0usize;
 

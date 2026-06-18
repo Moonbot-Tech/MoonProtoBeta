@@ -439,6 +439,19 @@ fn reset_profit_roundtrip() {
 }
 
 #[test]
+// parity: MoonProtoUIStruct.pas:TOrdersHistoryRequestCommand
+fn orders_history_request_roundtrip() {
+    let raw = build_orders_history_request(19, "BTCUSDT");
+    match UICommand::parse(&raw).unwrap() {
+        UICommand::OrdersHistoryRequest(cmd) => {
+            assert_eq!(cmd.uid, 19);
+            assert_eq!(cmd.market_name, "BTCUSDT");
+        }
+        _ => panic!("wrong variant"),
+    }
+}
+
+#[test]
 fn arb_activate_notify_roundtrip() {
     let raw = build_arb_activate_notify(9, 45678.25);
     match UICommand::parse(&raw).unwrap() {

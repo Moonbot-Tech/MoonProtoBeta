@@ -10,9 +10,9 @@ use super::*;
 /// one-time Init sequence starts.
 #[derive(Debug, Clone, Default)]
 pub struct InitialStrategies {
-    /// Delphi `cfg.ServerStratEpoch` analogue for local snapshots.
+    /// Local strategy snapshot epoch advertised to the server.
     pub epoch: u64,
-    /// Full decoded local strategy list in Delphi list order.
+    /// Full decoded local strategy list in the order expected by the core.
     pub strategies: Vec<crate::commands::strategy_serializer::StrategySnapshot>,
 }
 
@@ -28,7 +28,7 @@ impl InitialStrategies {
 
 /// Configuration for the one-time Init sequence run by [`MoonClient`].
 ///
-/// Delphi-critical init steps are not configurable: BaseCheck, AuthCheck,
+/// Protocol-critical init steps are not configurable: BaseCheck, AuthCheck,
 /// GetMarketsList, UpdateMarketsList, balance refresh,
 /// orders, strategy snapshot sync, and settings sync are the init contract
 /// itself. This config only carries optional stream subscriptions and timing.
@@ -42,11 +42,11 @@ pub struct InitConfig {
     /// An explicit empty list is valid and means "client has no local
     /// strategies".
     pub initial_strategies: Option<InitialStrategies>,
-    /// Value for the post-init `TMMOrdersSubscribeCommand`.
+    /// Post-init market-maker/order heatmap subscription flag.
     ///
-    /// Delphi always sends this UI command after `InitDone` with
-    /// `cfg.ShowHeatMap`. `None` falls back to a previously queued
-    /// `ui_mm_subscribe` intent, then to `false`.
+    /// MoonBot core expects the matching UI action after `InitDone`.
+    /// `None` falls back to a previously queued `ui_mm_subscribe` intent, then
+    /// to `false`.
     pub mm_orders_subscribe: Option<bool>,
     /// Subscribe to all-trades during init. `None` skips the all-trades
     /// subscription during init.
@@ -57,12 +57,12 @@ pub struct InitConfig {
     /// `GetMarketsList` has populated the local market model.
     pub subscribe_orderbooks: Vec<String>,
     /// Per-step Engine API timeout. Default = `DEFAULT_PENDING_TIMEOUT_MS`
-    /// (12s), matching Delphi `TMoonProtoEngine.FTimeout = 12000`.
+    /// (12s).
     ///
     /// `BaseCheck`/`AuthCheck` use this timeout for each `SendAndWait`
-    /// request. A pending Delphi `ServerUpdateSent` marker enables the exact
-    /// Delphi BaseCheck update branch: one normal BaseCheck attempt, then up to
-    /// 10 retries with 2000 ms between attempts.
+    /// request. A pending server-update marker enables the update-aware
+    /// BaseCheck branch: one normal BaseCheck attempt, then up to 10 retries
+    /// with 2000 ms between attempts.
     pub step_timeout: Option<Duration>,
 }
 

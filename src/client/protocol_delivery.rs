@@ -13,6 +13,11 @@ fn panic_payload_message(payload: &(dyn Any + Send)) -> String {
     }
 }
 
+#[inline]
+fn is_strat_runtime_state_payload(command: Command, payload: &[u8]) -> bool {
+    command == Command::Strat && crate::commands::strat::is_runtime_state_payload(payload)
+}
+
 impl ProtocolCore<'_> {
     pub(crate) fn apply_recv_side_effects(&mut self, recv_bytes: u64, timestamp_ms: i64) {
         self.client.connected = true;
@@ -48,6 +53,31 @@ impl ProtocolCore<'_> {
         mode: &mut RunMode<'_>,
     ) {
         let command = Command::from_byte(cmd);
+        let trace_runtime_state =
+            trace_io_enabled() && is_strat_runtime_state_payload(command, &payload);
+        let trace_runtime_payload_hash = if trace_runtime_state {
+            fnv1a64(&payload)
+        } else {
+            0
+        };
+        let trace_runtime_payload_head = if trace_runtime_state {
+            trace_head(&payload, 16)
+        } else {
+            String::new()
+        };
+        if trace_runtime_state {
+            eprintln!(
+                "[mp-runtime-state] t={} stage=enter raw={} payload_len={} payload_hash={:016X} payload_head={} authorized={} auth_status={:?} domain_ready={}",
+                trace_elapsed_ms(),
+                cmd,
+                payload.len(),
+                trace_runtime_payload_hash,
+                trace_runtime_payload_head,
+                self.client.authorized,
+                self.client.auth_status,
+                self.client.subscriptions.domain_ready
+            );
+        }
         if is_domain_push_command(command)
             && !self.client.subscriptions.domain_ready
             && !incoming_allowed_before_domain_ready(command, &payload)
@@ -94,6 +124,14 @@ impl ProtocolCore<'_> {
             );
         }));
         if let Err(panic_payload) = decode_result {
+            if trace_runtime_state {
+                eprintln!(
+                    "[mp-runtime-state] t={} stage=decode_panic raw={} payload_hash={:016X}",
+                    trace_elapsed_ms(),
+                    cmd,
+                    trace_runtime_payload_hash
+                );
+            }
             mode.payload_buf.clear();
             mode.event_buf.clear();
             mode.active_actions_buf.clear();
@@ -103,12 +141,41 @@ impl ProtocolCore<'_> {
                 panic_payload_message(panic_payload.as_ref()));
             return;
         }
+        if trace_runtime_state {
+            let decoded = mode
+                .payload_buf
+                .iter()
+                .map(|(c, p)| format!("{:?}/len={}/head={}", c, p.len(), trace_head(p, 12)))
+                .collect::<Vec<_>>()
+                .join(",");
+            eprintln!(
+                "[mp-runtime-state] t={} stage=decoded raw={} payload_hash={:016X} authorized_before={} authorized_after={} payload_buf_len={} decoded=[{}]",
+                trace_elapsed_ms(),
+                cmd,
+                trace_runtime_payload_hash,
+                authorized_before,
+                self.client.authorized,
+                mode.payload_buf.len(),
+                decoded
+            );
+        }
         if !authorized_before && !self.client.authorized {
+            if trace_runtime_state {
+                eprintln!(
+                    "[mp-runtime-state] t={} stage=drop_after_decode reason=not_authorized raw={} payload_hash={:016X} payload_buf_len={}",
+                    trace_elapsed_ms(),
+                    cmd,
+                    trace_runtime_payload_hash,
+                    mode.payload_buf.len()
+                );
+            }
             mode.payload_buf.clear();
             return;
         }
         let mut decoded_payloads = std::mem::take(&mut mode.payload_buf);
         for (c, p) in decoded_payloads.drain(..) {
+            let trace_runtime_dispatch =
+                trace_io_enabled() && is_strat_runtime_state_payload(c, &p);
             let dispatch_result = catch_unwind(AssertUnwindSafe(|| {
                 mode.event_buf.clear();
                 mode.active_actions_buf.clear();
@@ -123,6 +190,15 @@ impl ProtocolCore<'_> {
                     &ctx,
                     &mut mode.active_actions_buf,
                 );
+                if trace_runtime_dispatch {
+                    eprintln!(
+                        "[mp-runtime-state] t={} stage=dispatch_decoded payload_hash={:016X} event_count={} action_count={}",
+                        trace_elapsed_ms(),
+                        fnv1a64(&p),
+                        mode.event_buf.len(),
+                        mode.active_actions_buf.len()
+                    );
+                }
                 #[cfg(any(test, feature = "diagnostics"))]
                 let event_count = mode.event_buf.len();
                 #[cfg(any(test, feature = "diagnostics"))]
@@ -147,8 +223,22 @@ impl ProtocolCore<'_> {
                     metric_api_method(c, &p),
                     p.len(),
                 );
+                if trace_runtime_dispatch {
+                    eprintln!(
+                        "[mp-runtime-state] t={} stage=dispatch_done payload_hash={:016X}",
+                        trace_elapsed_ms(),
+                        fnv1a64(&p)
+                    );
+                }
             }));
             if let Err(panic_payload) = dispatch_result {
+                if trace_runtime_dispatch {
+                    eprintln!(
+                        "[mp-runtime-state] t={} stage=dispatch_panic payload_hash={:016X}",
+                        trace_elapsed_ms(),
+                        fnv1a64(&p)
+                    );
+                }
                 mode.event_buf.clear();
                 mode.active_actions_buf.clear();
                 log::error!(target: "moonproto::runtime",

@@ -2,9 +2,9 @@
 
 impl Client {
     // ====================================================================
-    //  High-level Trade wrappers (convenience over commands::trade::build_*)
-    //  All are sent as Command::Order (28), Priority=High, encrypted, MaxRetries=3.
-    //  Except DoClose/DoLimitClose/DoSplit/DoSellOrder/DoMarketSplit — MaxRetries=1.
+    //  High-level Trade wrappers (convenience over commands::trade::build_*).
+    //  Send priority, encryption, retry count, and UKey come from
+    //  commands::registry descriptors matching Delphi command attributes.
     // ====================================================================
 
     /// Send `TNewOrderCommand` (CmdId=3) to open a new order.
@@ -21,7 +21,7 @@ impl Client {
         let raw = crate::commands::trade::build_new_order(
             ctx, market, is_short, price, strat_id, order_size,
         );
-        self.send_trade(raw, 3)
+        self.send_trade(raw)
     }
 
     /// Delphi local replace request + `TOrderReplaceCommand` (CmdId=6,
@@ -46,7 +46,7 @@ impl Client {
             return false;
         };
         let raw = crate::commands::trade::build_order_replace(ctx, &market, order_type, price);
-        self.send_trade_keyed(raw, 3, UniqueKey::order_move(ctx.uid));
+        self.send_trade_keyed(raw, UniqueKey::order_move(ctx.uid));
         true
     }
 
@@ -67,7 +67,7 @@ impl Client {
     #[doc(hidden)]
     pub(crate) fn request_all_statuses(&self, uid: u64) -> bool {
         let raw = crate::commands::trade::build_all_statuses_request(uid);
-        self.send_trade(raw, 3)
+        self.send_trade(raw)
     }
 
     /// Delphi local cancel request + `TOrderCancelCommand` (CmdId=10,
@@ -102,7 +102,7 @@ impl Client {
         is_short: bool,
     ) -> bool {
         let raw = crate::commands::trade::build_join_orders(ctx, market, is_short);
-        self.send_trade(raw, 3)
+        self.send_trade(raw)
     }
 
     /// Send `TSplitOrderCommand` (CmdId=12) to split an order into parts.
@@ -122,7 +122,7 @@ impl Client {
             split_small,
             split_small_sell,
         );
-        self.send_trade(raw, 3)
+        self.send_trade(raw)
     }
 
     /// `TMoveAllSellsCommand` (CmdId=13), gated like Delphi active-client UI.
@@ -146,7 +146,7 @@ impl Client {
             return false;
         }
         let raw = crate::commands::trade::build_move_all_sells(ctx, market, params);
-        self.send_trade(raw, 3);
+        self.send_trade(raw);
         true
     }
 
@@ -159,7 +159,7 @@ impl Client {
         market_sell: bool,
     ) -> bool {
         let raw = crate::commands::trade::build_do_close_position(ctx, market, market_sell);
-        self.send_trade(raw, 1)
+        self.send_trade(raw)
     }
 
     /// `TDoLimitClosePositionCommand` (CmdId=15, MaxRetries=1).
@@ -171,7 +171,7 @@ impl Client {
         is_short: bool,
     ) -> bool {
         let raw = crate::commands::trade::build_do_limit_close_position(ctx, market, is_short);
-        self.send_trade(raw, 1)
+        self.send_trade(raw)
     }
 
     /// `TDoSplitPositionCommand` (CmdId=16, MaxRetries=1).
@@ -183,7 +183,7 @@ impl Client {
         is_short: bool,
     ) -> bool {
         let raw = crate::commands::trade::build_do_split_position(ctx, market, is_short);
-        self.send_trade(raw, 1)
+        self.send_trade(raw)
     }
 
     /// `TDoSellOrderCommand` (CmdId=17, MaxRetries=1).
@@ -196,7 +196,7 @@ impl Client {
         size: f64,
     ) -> bool {
         let raw = crate::commands::trade::build_do_sell_order(ctx, market, price, size);
-        self.send_trade(raw, 1)
+        self.send_trade(raw)
     }
 
     /// `TOrderStatusRequest` (CmdId=18) — request the status of a specific order.
@@ -207,7 +207,7 @@ impl Client {
         market: &str,
     ) -> bool {
         let raw = crate::commands::trade::build_order_status_request(ctx, market);
-        self.send_trade(raw, 3)
+        self.send_trade(raw)
     }
 
     /// Request a fresh status for an order already tracked by
@@ -236,7 +236,7 @@ impl Client {
             return false;
         };
         let raw = crate::commands::trade::build_order_stops_update(ctx, &market, 0, status, &stops);
-        self.send_trade_keyed(raw, 3, UniqueKey::order_move(ctx.uid));
+        self.send_trade_keyed(raw, UniqueKey::order_move(ctx.uid));
         true
     }
 
@@ -322,7 +322,7 @@ impl Client {
         let items_uid_sum: u64 = applied
             .iter()
             .fold(0u64, |acc, it| acc.wrapping_add(it.uid));
-        self.send_trade_keyed(raw, 3, UniqueKey::immune_clicks(items_uid_sum));
+        self.send_trade_keyed(raw, UniqueKey::immune_clicks(items_uid_sum));
         true
     }
 
@@ -347,7 +347,7 @@ impl Client {
             return false;
         }
         let raw = crate::commands::trade::build_move_all_buys(ctx, market, params);
-        self.send_trade(raw, 3);
+        self.send_trade(raw);
         true
     }
 
@@ -375,7 +375,7 @@ impl Client {
             return false;
         };
         let raw = crate::commands::trade::build_vstop_update(ctx, &market, 0, params);
-        self.send_trade_keyed(raw, 3, UniqueKey::order_move(ctx.uid));
+        self.send_trade_keyed(raw, UniqueKey::order_move(ctx.uid));
         true
     }
 
@@ -402,7 +402,7 @@ impl Client {
         is_short: bool,
     ) -> bool {
         let raw = crate::commands::trade::build_do_market_split_position(ctx, market, is_short);
-        self.send_trade(raw, 1)
+        self.send_trade(raw)
     }
 
     /// Send `TPenaltyCommand` (CmdId=23) to mark a market as under strategy
@@ -413,6 +413,6 @@ impl Client {
     #[doc(hidden)]
     pub(crate) fn penalty(&self, ctx: crate::commands::trade::TradeCtx, market: &str) -> bool {
         let raw = crate::commands::trade::build_penalty(ctx, market);
-        self.send_trade(raw, 3)
+        self.send_trade(raw)
     }
 }

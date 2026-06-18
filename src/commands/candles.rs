@@ -6,8 +6,8 @@
 //! `MoonClient::candles().request_coin_card_for(...)` and read from the
 //! snapshot. The string-keyed request helper is kept for scripts/tools.
 //!
-//! The raw packed Delphi records and chunked `RequestCandlesData` parser remain
-//! in this module for protocol tests and custom tools, but they are hidden from
+//! The raw packed records and chunked `RequestCandlesData` parser remain in
+//! this module for protocol tests and custom tools, but they are hidden from
 //! the normal rustdoc surface.
 
 use zerocopy::byteorder::little_endian::{F32 as LeF32, F64 as LeF64};
@@ -43,8 +43,9 @@ pub(crate) use self::request_parser::{
     read_deep_price_pack_old,
 };
 
-/// Delphi `MaxDataLenCandles` is normally much lower and is capped at 25_000 in
-/// MoonBot UI sizing. Rust must reject absurd wire counts before allocation.
+/// Candle-count safety cap for one market in demand-driven candle responses.
+/// Normal UI requests are much smaller; absurd wire counts are rejected before
+/// allocation.
 pub(crate) const MAX_REQUEST_CANDLES_PER_MARKET: usize = 25_000;
 pub(crate) const MAX_REQUEST_CANDLES_MARKETS: usize = 4_096;
 pub(crate) const MAX_REQUEST_CANDLES_TOTAL: usize = 10_000_000;
@@ -69,7 +70,7 @@ pub(crate) const MAX_COIN_CARD_CANDLES: usize = 10_000;
 ///
 /// Use `open()`, `high()`, `low()`, `close()`, `volume()`, and time helpers in
 /// application code. The raw fields are hidden to keep callers on the stable
-/// helper API and away from Delphi `TDateTime` representation details.
+/// helper API and away from legacy wire timestamp details.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DeepPrice {
     #[doc(hidden)]
@@ -82,7 +83,7 @@ pub struct DeepPrice {
     pub(crate) low: f32,
     #[doc(hidden)]
     pub(crate) volume: f32,
-    /// `TDateTime` (Delphi double, days since 1899-12-30).
+    /// Legacy wire timestamp: double days since 1899-12-30.
     #[doc(hidden)]
     pub(crate) time: f64,
 }
@@ -215,8 +216,8 @@ impl DeepPrice {
 
 /// Packed `TDeepPricePack` inside `RequestCandlesData` stream.
 ///
-/// Delphi writes this compact 20-byte record for each 5m candle and reconstructs
-/// `OpenP = MaxP`, `CloseP = MinP` on receive.
+/// Compact 20-byte record for each 5m candle; open/close are reconstructed from
+/// high/low on receive.
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
 struct WireDeepPricePack {
@@ -244,7 +245,7 @@ const _: [(); 32] = [(); DEEP_PRICE_PACK_OLD_SIZE];
 const WALL_ITEM_SIZE: usize = 8;
 const REQUEST_CANDLES_MARKET_MIN_SIZE: usize = 2 + 4 + WALL_ITEM_SIZE * 8;
 
-/// Delphi `TWallItem = record volume: Single; count: Integer end`.
+/// Packed wall bucket: `volume: f32`, `count: i32`.
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct WallItem {
@@ -252,7 +253,7 @@ pub struct WallItem {
     pub count: i32,
 }
 
-/// One market entry from Delphi `TMarkets.StoreCandlesToZip`.
+/// One market entry from the compressed candle snapshot stream.
 #[doc(hidden)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct RequestCandlesMarket {
@@ -262,9 +263,9 @@ pub struct RequestCandlesMarket {
     pub sell_wall: [WallItem; 4],
 }
 
-/// `TMarketDeepHistoryKind` enum (EngineBase.pas:60).
+/// Demand-driven CoinCard/history candle interval.
 ///
-/// Byte-exact order in current Delphi:
+/// Byte-exact order in the current MoonBot core:
 /// `(hk_1m, hk_5m, hk_30m, hk_1h, hk_4h, hk_1d)` — six values.
 /// The old backup source had five values without `hk_4h`; using those old
 /// ordinals would shift `Day1` to value 4 and the server would interpret the

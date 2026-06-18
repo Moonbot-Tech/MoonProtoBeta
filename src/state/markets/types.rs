@@ -10,12 +10,12 @@ use crate::commands::market::{
 };
 use crate::commands::trade::OrderType;
 
-/// Stable Delphi-like handle to one `TMarket` object.
+/// Stable handle to one retained market object.
 ///
-/// Delphi `TMarkets` stores `TMarket` object references and replaces only the
-/// surrounding list/dictionaries on listing changes. Rust mirrors that with an
-/// `Arc` handle: callers may keep `MarketHandle` across a listing refresh and
-/// read the same live market object later.
+/// The market universe uses a COW container model: listing refresh may replace
+/// the surrounding lists/dictionaries, but existing market objects stay alive
+/// and are mutated in place. Callers may keep `MarketHandle` across a listing
+/// refresh and read the same live market object later.
 #[derive(Debug, Clone)]
 pub struct MarketHandle {
     pub(super) name: Arc<str>,
@@ -39,10 +39,9 @@ impl MarketHandle {
 
     /// Canonical market name for this stable handle.
     ///
-    /// Terminal UI usually resolves a market once and keeps `MarketHandle`, just
-    /// like Delphi keeps a `TMarket` reference. This accessor lets higher-level
-    /// read helpers use that handle without forcing another name lookup in UI
-    /// code.
+    /// Terminal UI usually resolves a market once and keeps `MarketHandle`.
+    /// This accessor lets higher-level read helpers use that handle without
+    /// forcing another name lookup in UI code.
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -55,8 +54,8 @@ impl MarketHandle {
     /// Copy only the live balance/position fields used by chart and order UI.
     ///
     /// This avoids cloning the whole `Market` object when the consumer only
-    /// needs the Delphi `TMarket` account fields such as liquidation price,
-    /// position size, leverage, and PnL.
+    /// needs account fields such as liquidation price, position size, leverage,
+    /// and PnL.
     pub fn balance_position(&self) -> MarketBalancePosition {
         self.with(MarketBalancePosition::from_market)
     }
@@ -66,12 +65,12 @@ impl MarketHandle {
         self.with(|market| market.price)
     }
 
-    /// Copy the Delphi `TMarket` live trade-tail state.
+    /// Copy the live trade-tail state.
     pub fn trade_state(&self) -> MarketTradeState {
         self.with(|market| market.trade_tail)
     }
 
-    /// Copy the Delphi `TMarket` signed delta state.
+    /// Copy the signed market-delta state.
     ///
     /// This is the UI-facing counterpart of `Coin1hDelta`, `Coin1hDeltaEMA`,
     /// `Coin24hDelta`, and their retained moving averages. It is intentionally
@@ -110,7 +109,7 @@ impl MarketHandle {
     }
 }
 
-/// Small copy of live Delphi `TMarket` balance/position fields.
+/// Small copy of live market balance/position fields.
 ///
 /// Balance packets still mutate the live `Market` object; this type is only a
 /// convenience snapshot for UI code that should not clone the whole market.
@@ -239,11 +238,11 @@ pub struct MarketGlobalDeltas {
     pub exchange_market_count: usize,
 }
 
-/// Delphi `TBaseCurrencyPrice` analogue, keyed by `base_currency`.
+/// Base-currency price row, keyed by `base_currency`.
 ///
 /// The reference fields store market names instead of raw pointers. They are
-/// assigned by the same `CheckCurrencyRefMarkets` conditions and intentionally
-/// are not cleared when a later scan does not find a replacement.
+/// assigned by the production core's base-currency reference rules and
+/// intentionally are not cleared when a later scan does not find a replacement.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct BaseCurrencyPrice {
     pub base_currency: String,
@@ -265,23 +264,23 @@ impl BaseCurrencyPrice {
 
 #[derive(Debug, Clone)]
 pub enum MarketsEvent {
-    /// A `GetMarketsList` response was applied.
-    /// Variant name is historical; repeated calls merge like Delphi.
+    /// A full market-list refresh was applied.
+    /// Variant name is historical; repeated calls merge with current tags.
     MarketsListReplaced { count: usize, corr_count: usize },
     /// A listing refresh inserted new markets into the local market universe.
     ///
-    /// Emitted only after the refreshed `GetMarketsList` has actually added
-    /// markets. `TNewMarketNotifyCommand` itself is internal and only forces
-    /// that refresh.
+    /// Emitted only after the refreshed market list has actually added markets.
+    /// The transport notification that triggered the refresh is internal; UI
+    /// code should react to this retained-state event.
     NewMarketsAdded { names: Vec<String> },
-    /// Prices were updated by `emk_UpdateMarketsList`.
+    /// Live prices/funding/correlation prices were updated.
     PricesUpdated {
         count: usize,
         included_funding: bool,
         included_corr: bool,
     },
-    /// The server-index market-name map was updated by `emk_GetMarketsIndexes`.
+    /// The server-index market-name map was updated.
     IndexesUpdated { count: usize },
-    /// Token tags were updated by `emk_CheckBinanceTags`.
+    /// Token tags were updated.
     TokenTagsUpdated { count: usize },
 }

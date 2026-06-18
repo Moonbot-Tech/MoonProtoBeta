@@ -4043,6 +4043,40 @@ fn pre_init_snapshot_request_is_latched_until_post_init_flush() {
     assert_eq!(provider_calls.load(std::sync::atomic::Ordering::Relaxed), 1);
 }
 
+#[test]
+fn pre_init_strategy_runtime_state_is_applied_before_domain_ready() {
+    let mut d = EventDispatcher::new();
+    let client = crate::client::Client::new(dummy_client_cfg());
+    assert!(!client.is_domain_ready());
+    let mut out = Vec::new();
+    let mut actions = Vec::new();
+
+    let mut payload = Vec::new();
+    payload.push(10); // TStratRuntimeState
+    payload.extend_from_slice(&crate::commands::registry::CURRENT_PROTO_CMD_VER.to_le_bytes());
+    payload.extend_from_slice(&123u64.to_le_bytes());
+    payload.push(1); // StrategiesRunning=true
+
+    dispatch_active_packet_for_test(
+        &mut d,
+        Command::Strat,
+        &payload,
+        0,
+        &mut out,
+        &client,
+        &mut actions,
+    );
+
+    assert_eq!(d.strats.strategies_running(), Some(true));
+    assert!(actions.is_empty());
+    assert!(out.iter().any(|ev| matches!(
+        ev,
+        Event::Strat(crate::state::StratEvent::RuntimeState {
+            strategies_running: true
+        })
+    )));
+}
+
 fn raw_strat_snapshot_payload(uid: u64, server_epoch: u64, full: bool, data: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     out.push(2);

@@ -1,9 +1,9 @@
 # Engine API
 
-Engine API is a server request/response wire surface. In the public Active Lib
-API it is not exposed as "send request and block". Applications queue intents on
-`MoonClient`; the runtime keeps the protocol alive, parses responses, updates
-state, and emits typed events.
+Engine API actions are long-running server operations exposed through the
+non-blocking Active Lib runtime. Applications queue intents on `MoonClient`; the
+runtime keeps the session alive, parses responses, updates retained state, and
+emits typed events.
 
 ## Public Shape
 
@@ -40,7 +40,7 @@ if let Some(snapshot) = client.snapshot() {
 
 `snapshot().account().api_expiration()` returns `ApiExpirationTime`: use
 `time()`, `system_time()`, or `days_until(now)` for UI labels instead of
-carrying the raw Engine API `Double`.
+carrying legacy wire-time doubles through the UI.
 
 ## Candles
 

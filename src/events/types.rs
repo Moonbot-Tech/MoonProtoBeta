@@ -13,7 +13,7 @@ use crate::time::MoonTime;
 
 #[doc(hidden)]
 /// Fresh strategy snapshot override returned by internal runtime tooling for a
-/// server `TStratSnapshotRequest`.
+/// server strategy-snapshot request.
 ///
 /// Normal active-library flow: the application gives strategies to
 /// [`crate::InitialStrategies`] before init, and the runtime uses its owned
@@ -27,11 +27,10 @@ pub(crate) struct StrategySnapshotReply {
 }
 
 impl StrategySnapshotReply {
-    /// Build a reply from an already serialized `TStrategySerializer` payload.
+    /// Build a reply from an already serialized strategy-list payload.
     ///
     /// Empty `data` is treated as an empty strategy list and normalized to a
-    /// valid non-empty serializer payload. This matches Delphi
-    /// `TStratSnapshot.CreateFromStrats([])` and prevents a normal provider from
+    /// valid non-empty serializer payload. This prevents a normal provider from
     /// sending malformed `Size=0` snapshot data.
     pub(crate) fn from_payload(
         server_epoch: u64,
@@ -53,8 +52,8 @@ impl StrategySnapshotReply {
     }
 }
 
-/// Follow-up `TOrderStatusRequest` target produced after a `TAllStatuses`
-/// snapshot did not mention a locally tracked Delphi `WCache` worker.
+/// Follow-up order-status request target produced after a full order-status
+/// snapshot did not mention a locally tracked worker.
 ///
 /// Active `MoonClient` sends these automatically after applying the snapshot.
 /// The type is kept crate-private because terminal code should see the updated
@@ -66,10 +65,10 @@ pub(crate) struct MissingOrderStatusRequest {
     pub market_name: String,
 }
 
-/// One watcher fill after Delphi `ProcessTradesStream` time-shift application.
+/// One watcher fill after trades-stream time-shift application.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WatcherFillEvent {
-    /// Delphi `Round(TDateTime * MSecsPerDay)` timestamp used by `TWSFill.Time`.
+    /// Protocol-native shifted timestamp in milliseconds.
     ///
     /// This is diagnostics-only because it is not Unix milliseconds. Terminal UI
     /// should use [`Self::time`] or [`Self::unix_millis`].
@@ -78,7 +77,7 @@ pub struct WatcherFillEvent {
     pub time_ms: i64,
     #[cfg(not(any(test, feature = "diagnostics")))]
     pub(crate) time_ms: i64,
-    /// Shifted Delphi `TDateTime` value for consumers that work in days.
+    /// Shifted protocol-native day value for diagnostics.
     #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub time: f64,
@@ -88,7 +87,7 @@ pub struct WatcherFillEvent {
     pub qty: f32,
     pub z_btc: f32,
     pub position: f32,
-    /// Delphi `TOrderType`; unknown raw bytes are preserved like Delphi enum bytes.
+    /// Order type byte; unknown raw bytes are preserved for forward compatibility.
     pub order_type: OrderType,
     pub is_short: bool,
     pub is_open: bool,
@@ -127,12 +126,12 @@ pub struct WatcherFillsEvent {
 }
 
 impl WatcherFillsEvent {
-    /// HyperDex user address bytes from Delphi `THLAddress`.
+    /// HyperDex user address bytes.
     pub fn user(&self) -> &[u8; 20] {
         &self.user
     }
 
-    /// HyperDex user address formatted like Delphi `HLAddressToHex(..., true)`.
+    /// HyperDex user address formatted as lowercase `0x...` hex.
     pub fn user_hex(&self) -> String {
         crate::state::hl_address_hex(&self.user)
     }
@@ -150,9 +149,9 @@ impl WatcherFillsEvent {
 
 /// Server-side log line mirrored by MoonProto.
 ///
-/// The wire packet stores `time:TDateTime + UTF-8 text`, but terminal code
+/// The transport stores protocol-native time plus UTF-8 text, but terminal code
 /// should treat this as a typed log event and convert time through helpers
-/// instead of carrying raw Delphi day values around the UI.
+/// instead of carrying raw wire-day values around the UI.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ServerLogEvent {
     time: f64,
@@ -199,7 +198,7 @@ impl DetectWatcherRow {
     }
 }
 
-/// Server-side detect/UI fact from `TDetectSignalCommand`.
+/// Server-side detect/UI fact.
 ///
 /// The core already performed detect/watcher/alert logic. Rust terminal code
 /// should display this fact using local UI settings and retained strategy/market
@@ -253,9 +252,9 @@ impl DetectEvent {
 
 /// User-facing asynchronous Engine API action kind.
 ///
-/// Delphi low-level `TMoonProtoEngine` often implements these commands through
-/// `SendAndWait`, but UI code wraps them in `TThread.CreateAnonymousThread`.
-/// Active Lib exposes that same user effect as non-blocking intents.
+/// These are non-blocking runtime intents. UI code queues the action and then
+/// observes retained state or completion events instead of waiting on a raw
+/// request/response slot.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EngineActionKind {
     CancelAllOrders,
@@ -314,25 +313,24 @@ impl EngineActionEvent {
 
 /// Exact SQL report for a closed sell order written by the MoonBot core.
 ///
-/// Delphi builds this from the same `TDBSaver.BuildCommandSql` payload that is
-/// sent to the legacy MoonCMD path. Active Lib does not parse it into a second
-/// order model; clients that need external DB/report sync receive the canonical
-/// SQL text and the MoonBot Orders DB row id. Use `db_id` as the stable mirror
-/// key: later SQL for price changes, partial fills, or final execution updates
-/// the same DB record.
+/// The core sends the same expanded SQL text it uses for its Orders database
+/// writer. Active Lib does not parse it into a second order model; clients that
+/// need external DB/report sync receive the canonical SQL text and the MoonBot
+/// Orders DB row id. Use `db_id` as the stable mirror key: later SQL for price
+/// changes, partial fills, or final execution updates the same DB record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClosedSellOrderReportEvent {
     /// MoonBot Orders database row id. This is not the order worker UID.
     pub db_id: i64,
-    /// Expanded SQL built by `TDBSaver.BuildCommandSql`.
+    /// Expanded SQL for the MoonBot Orders database row.
     pub sql: String,
 }
 
 /// Arbitrage relay was applied to retained market state.
 ///
-/// Delphi applies compact arb payloads directly to `TMarket.ArbSlots` /
-/// `TMarket.ArbNow`. Active Lib follows that model: this event is a signal for
-/// UI code to refresh selected market handles, not a raw packet surface.
+/// Active Lib applies compact arbitrage payloads directly to retained market
+/// slots. This event is a signal for UI code to refresh selected market
+/// handles, not a raw packet surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArbEvent {
     PricesApplied {
@@ -370,10 +368,8 @@ pub enum Event {
     /// [`TradesEvent`] values, so each sub-event is delivered as a separate
     /// `Event::Trade` instead of a nested vector.
     Trade(TradesEvent),
-    /// Typed HyperDex watcher fills. Delphi decodes these inside
-    /// `ProcessTradesStream` and calls `ProcessWatcherFillsDetect`; Active Lib
-    /// exposes the same domain data instead of dropping the section as opaque
-    /// bytes.
+    /// Typed HyperDex watcher fills from the trades stream. Active Lib exposes
+    /// the domain rows directly instead of dropping the section as opaque bytes.
     WatcherFills(WatcherFillsEvent),
     /// Balance read-model event: full snapshots and incremental updates.
     /// Internal/base/request balance packets are consumed without a public event.
@@ -417,7 +413,7 @@ pub enum Event {
     #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     EngineResponse(EngineResponse),
-    /// Authenticated server-side log line (`MPC_LogMsg`).
+    /// Authenticated server-side log line.
     ServerLog(ServerLogEvent),
     /// Raw payload for channels the dispatcher does not parse.
     #[cfg(any(test, feature = "diagnostics"))]

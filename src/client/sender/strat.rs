@@ -8,18 +8,11 @@ impl ClientSender {
     #[doc(hidden)]
     pub(crate) fn strat_schema_request(&self) {
         let raw = crate::commands::strat::build_schema_request(rand::random());
-        self.send_domain_cmd(raw, Command::Strat, SendPriority::High, true, 3);
+        self.send_typed_domain_cmd(raw, Command::Strat);
     }
 
     fn send_strat_snapshot_command(&self, raw: Vec<u8>) {
-        self.send_domain_cmd_keyed(
-            raw,
-            Command::Strat,
-            SendPriority::Sliced,
-            true,
-            6,
-            UniqueKey::strat_snapshot(),
-        );
+        self.send_typed_domain_cmd(raw, Command::Strat);
     }
 
     /// Send `TStratSnapshot` from an already serialized strategy payload.
@@ -70,7 +63,7 @@ impl ClientSender {
     #[doc(hidden)]
     pub(crate) fn strat_delete(&self, strategy_id: u64, folder_path: &str) {
         let raw = crate::commands::strat::build_delete(rand::random(), strategy_id, folder_path);
-        self.send_domain_cmd(raw, Command::Strat, SendPriority::High, true, 3);
+        self.send_typed_domain_cmd(raw, Command::Strat);
     }
 
     /// Send `TStratSellPriceUpdate` for one strategy.
@@ -81,12 +74,9 @@ impl ClientSender {
             strategy_id,
             sell_price,
         );
-        self.send_domain_cmd_keyed(
+        self.send_typed_domain_cmd_keyed(
             raw,
             Command::Strat,
-            SendPriority::High,
-            true,
-            3,
             UniqueKey::strat_sell_price_update(strategy_id),
         );
     }
@@ -103,6 +93,6 @@ impl ClientSender {
         is_delta: bool,
     ) {
         let raw = crate::commands::strat::build_checked_sync(rand::random(), items, is_delta);
-        self.send_domain_cmd(raw, Command::Strat, SendPriority::Sliced, true, 6);
+        self.send_typed_domain_cmd(raw, Command::Strat);
     }
 }

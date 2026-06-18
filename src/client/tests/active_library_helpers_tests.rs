@@ -90,6 +90,10 @@ fn only_strategy_handshake_commands_are_allowed_before_domain_ready() {
         Command::Strat,
         &crate::commands::strat::build_snapshot_request(7)
     ));
+    assert!(
+        incoming_allowed_before_domain_ready(Command::Strat, &[10]),
+        "TStratRuntimeState is an initial server state fact and must not be dropped before domain_ready"
+    );
     assert!(!incoming_allowed_before_domain_ready(
         Command::Strat,
         &crate::commands::strat::build_delete(7, 42, "")

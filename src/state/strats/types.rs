@@ -1,8 +1,8 @@
 use crate::commands::strategy_serializer::strategy_last_date_to_moon_time;
 use crate::MoonTime;
 
-/// Cached serialized `TStrategySerializer` payload for replying to
-/// `TStratSnapshotRequest`.
+/// Cached serialized strategy payload used when the core asks this client for
+/// its current local strategy list.
 #[derive(Debug, Clone)]
 pub(crate) struct StrategySnapshotPayloadCache {
     pub client_max_last_date: u64,
@@ -14,9 +14,9 @@ pub(crate) struct StrategySnapshotPayloadCache {
 pub struct StrategyInfo {
     /// Server strategy identifier. `0` is not a valid live strategy id.
     pub strategy_id: u64,
-    /// Strategy version from the `TStrategySerializer` header.
+    /// Strategy version from the serialized strategy header.
     pub strategy_ver: i32,
-    /// Unix epoch milliseconds used by Delphi `FLastEditDate`/rollback guards.
+    /// Unix epoch milliseconds used by strategy edit/rollback guards.
     ///
     /// UI code should use [`Self::last_edit_time`] for labels.
     pub last_date: u64,
@@ -24,12 +24,12 @@ pub struct StrategyInfo {
     pub sell_price: f64,
     /// Current checked-state used by strategy start/stop UI.
     pub checked: bool,
-    /// Last server-acknowledged checked-state (`TStrategy.PrevChecked`).
+    /// Last server-acknowledged checked-state.
     pub prev_checked: bool,
     /// Folder path in the strategy tree.
     ///
     /// `Arc<str>` shared with the decoded snapshot `path` — refcount bump on
-    /// apply instead of a per-strategy heap copy (Delphi COW string parity).
+    /// apply instead of a per-strategy heap copy.
     pub folder_path: std::sync::Arc<str>,
 }
 
@@ -78,10 +78,11 @@ pub enum StratEvent {
         #[doc(hidden)]
         raw_data: Vec<u8>,
     },
-    /// Result of `TStratDelete`.
+    /// Result of a strategy/folder delete command.
     ///
-    /// Delphi first tries to delete `StrategyID`, then tries `FolderPath`.
-    /// The event is emitted only when at least one part changed state.
+    /// The core can request both a strategy-id delete and a folder-path delete
+    /// in one command. The event is emitted only when at least one part changed
+    /// state.
     Deleted {
         strategy_id: u64,
         folder_path: String,
@@ -92,7 +93,7 @@ pub enum StratEvent {
     CheckedSynced { changed: usize, is_delta: bool },
     /// Server echo for a checked-state sync sent by this client.
     CheckedEcho { count: usize },
-    /// Strategy schema (`TStratSchema`, CmdId=8) was received and parsed.
+    /// Strategy schema was received and parsed.
     SchemaApplied {
         #[cfg(any(test, feature = "diagnostics"))]
         #[doc(hidden)]
@@ -101,12 +102,14 @@ pub enum StratEvent {
         kind_count: usize,
         field_count: usize,
     },
-    /// Server sent `TStratSchema`, but the raw-deflate/body parse failed.
+    /// Server sent a strategy schema, but the compressed body parse failed.
     SchemaParseFailed {
         #[cfg(any(test, feature = "diagnostics"))]
         #[doc(hidden)]
         raw_len: usize,
     },
+    /// Server reported whether the global strategy engine is currently running.
+    RuntimeState { strategies_running: bool },
 }
 
 impl StratEvent {

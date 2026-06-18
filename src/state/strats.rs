@@ -1,17 +1,12 @@
-//! Strategy sync state maintained from `MPC_Strat` commands.
+//! Strategy sync state maintained by Active Lib.
 //!
-//! Delphi source: `MoonProtoClient.pas:689-800 ProcessStratCommand`.
-//!
-//! `TStratSnapshot.Data` decoding:
-//!
-//! The server sends an RTTI-driven serialized strategy batch in
-//! `TStratSnapshot.data`. `apply_snapshot_decoded()` parses that blob through
+//! The server sends a schema-driven serialized strategy batch.
+//! `apply_snapshot_decoded()` parses that blob through
 //! `commands::strategy_serializer::parse_strategy_batch_with_schema` and applies
-//! every strategy with the Delphi rollback guard by `StrategyLastDate` /
-//! `StrategyVer`. State keeps both lightweight `StrategyInfo` and the full
-//! decoded `StrategySnapshot`, so the Active Lib can answer
-//! `TStratSnapshotRequest` itself and applications can read the latest snapshot
-//! through public API.
+//! every strategy with the strategy edit-date/version rollback guard. State
+//! keeps both lightweight `StrategyInfo` and full decoded `StrategySnapshot`
+//! values, so Active Lib can answer later core snapshot requests itself and
+//! applications can read the latest strategy list through public API.
 
 use crate::commands::strat::{StratCheckedItem, StratCommand};
 use crate::commands::strategy_schema::StrategySchema;
@@ -34,29 +29,31 @@ pub use self::types::{StratEvent, StrategyInfo};
 /// `crate::commands::strategy_serializer` and applies the decoded batch.
 #[derive(Debug, Clone, Default)]
 pub struct StratsState {
-    /// `strategy_id -> StrategyInfo`; entries are removed by `TStratDelete`.
+    /// `strategy_id -> StrategyInfo`; entries are removed by delete commands.
     pub by_id: HashMap<u64, StrategyInfo>,
-    /// Delphi `TStrategies` list order. `by_id` is only the lookup index.
+    /// Retained strategy-list order. `by_id` is only the lookup index.
     order: Vec<u64>,
-    /// Delphi folder tree analogue, keyed case-insensitively like `SameText`.
+    /// Folder tree keyed case-insensitively.
     /// Values keep the first observed spelling of the full folder path.
     folders_by_key: HashMap<String, String>,
     /// Full decoded strategy snapshots owned by the Active Lib.
     ///
-    /// They are used both for answering `TStratSnapshotRequest` and for
+    /// They are used both for answering core snapshot requests and for
     /// application reads through public API.
     snapshots_by_id: HashMap<u64, Arc<StrategySnapshot>>,
     /// Server epoch of the latest applied snapshot.
     pub last_server_epoch: u64,
-    /// Latest raw `TStratSchema.Data` blob.
+    /// Latest raw compressed strategy-schema blob.
     schema_raw: Option<Arc<Vec<u8>>>,
     /// Latest decoded strategy schema.
     schema: Option<Arc<StrategySchema>>,
-    /// `TStratSchema` field name -> TypeID cache for Delphi `BuildReaderProps`.
+    /// Strategy-schema field name -> raw TypeID cache for snapshot serialization.
     /// Stored behind `Arc` so `MoonStateSnapshot` clones remain cheap.
     schema_field_types: Option<Arc<HashMap<String, u8>>>,
-    /// Cached `TStrategySerializer` payload for `TStratSnapshot.CreateFromStrats`.
+    /// Cached serialized payload for local strategy-list snapshot replies.
     snapshot_payload_cache: Option<Arc<StrategySnapshotPayloadCache>>,
+    /// `None` until the server first reports `IsRunningStrat`.
+    strategies_running: Option<bool>,
     schema_revision: u64,
     schema_failures: u64,
     schema_last_error: Option<String>,
@@ -91,10 +88,9 @@ impl StratsState {
 
     /// Apply one decoded strategy command.
     ///
-    /// For `TStratSnapshot`, this returns a snapshot notification. The active
+    /// For strategy snapshots, this returns a snapshot notification. The active
     /// dispatcher decodes/applies the serializer payload before publishing the
-    /// event and advances `last_server_epoch` only after that succeeds,
-    /// matching Delphi `ProcessStratCommand`.
+    /// event and advances `last_server_epoch` only after that succeeds.
     pub(crate) fn apply(&mut self, cmd: StratCommand) -> Option<StratEvent> {
         match cmd {
             StratCommand::Snapshot(snap) => {
@@ -188,12 +184,20 @@ impl StratsState {
             StratCommand::SchemaRequest { .. } => None,
             StratCommand::Skipped { .. } => None,
             StratCommand::Schema(schema) => Some(self.apply_schema_raw(schema.data)),
+            StratCommand::RuntimeState(state) => {
+                self.strategies_running = Some(state.strategies_running);
+                Some(StratEvent::RuntimeState {
+                    strategies_running: state.strategies_running,
+                })
+            }
             StratCommand::Unknown { .. } => None,
         }
     }
 
-    /// Delphi `TStrategy.Checked := value`: local UI mutation. It changes
-    /// checked state but leaves `PrevChecked` untouched until server sync/echo.
+    /// Local UI mutation for a strategy checked flag.
+    ///
+    /// This changes current checked state but leaves the acknowledged checked
+    /// state untouched until the core sync/echo arrives.
     pub fn set_checked(&mut self, strategy_id: u64, checked: bool) -> bool {
         let Some(entry) = self.by_id.get_mut(&strategy_id) else {
             return false;
@@ -207,7 +211,7 @@ impl StratsState {
         true
     }
 
-    /// Delphi `TStrategies.GetCheckedDelta`.
+    /// Checked-state delta that still needs to be sent to the core.
     pub fn checked_delta(&self) -> Vec<StratCheckedItem> {
         let mut out = Vec::new();
         for strategy_id in &self.order {
@@ -232,6 +236,14 @@ impl StratsState {
         self.snapshots_by_id.get(&strategy_id).map(Arc::as_ref)
     }
 
+    /// Global strategy run state reported by the server.
+    ///
+    /// `None` means the server has not yet calculated/sent `IsRunningStrat`
+    /// for this session.
+    pub fn strategies_running(&self) -> Option<bool> {
+        self.strategies_running
+    }
+
     pub fn has_folder(&self, folder_path: &str) -> bool {
         if folder_path.is_empty() {
             return true;
@@ -246,7 +258,7 @@ impl StratsState {
             .filter_map(|strategy_id| self.snapshots_by_id.get(strategy_id).map(Arc::as_ref))
     }
 
-    /// Owned export of all retained strategy snapshots in Delphi list order.
+    /// Owned export of all retained strategy snapshots in retained list order.
     ///
     /// This clones full `StrategySnapshot` values. Use [`Self::snapshots`] for
     /// normal read-only terminal UI paths.
@@ -304,6 +316,7 @@ impl StratsState {
         self.schema_revision = 0;
         self.schema_failures = 0;
         self.schema_last_error = None;
+        self.strategies_running = None;
     }
 }
 

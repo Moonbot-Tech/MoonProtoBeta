@@ -1,7 +1,5 @@
 //! MoonProto UI/settings command channel.
 //!
-//! Delphi source: `MoonProto/MoonProtoUIStruct.pas`.
-//!
 //! ## CmdId mapping
 //! - 1  — `TClientSettingsCommand`  (Sliced, UK_BaseUISettings) — full UI/settings snapshot
 //! - 2  — `TSettingsRequest`        (empty)
@@ -21,20 +19,20 @@
 //! - 16 — `TAlertSnapshotRequest`   (empty)
 //! - 17 — `TChartTextStateCommand`  (High, UK_ChartTextState)
 //! - 18 — `TChartTextSnapshotCommand` (Sliced, UK_ChartTextSnapshot)
+//! - 19 — `TOrdersHistoryRequestCommand` (market name)
 //!
 //! ## ASCfg / ASCfg2 blobs
 //! `TAutoStartConfig` (104 bytes) and `TAutoStartConfig2` (168 bytes) are
-//! Delphi packed records from `Config.pas`. On the wire they are encoded as
+//! fixed packed settings blobs. On the wire they are encoded as
 //! `Word size + bytes(size)` with soft-read semantics: extra tail bytes are
 //! skipped and short payloads are partially copied. Active Lib preserves the
 //! hidden blobs for exact roundtrip and exposes typed `AutoStartConfig` /
 //! `AutoStartConfig2` views for terminal UI edits.
 //!
 //! ## ArbConfig compact format
-//! This is not a raw Delphi record. The wire form is
-//! `ver:byte + wantedSet:bytes(32) + flags:byte + colorCount:byte +
-//! colorCount*5 bytes`. `wantedSet` is Delphi `set of byte`
-//! (32 bytes = 256-bit mask).
+//! This is a compact wire structure, not a raw settings record. The wire form
+//! is `ver:byte + wantedSet:bytes(32) + flags:byte + colorCount:byte +
+//! colorCount*5 bytes`. `wantedSet` is a 256-bit platform mask.
 
 #![cfg_attr(feature = "diagnostics", allow(dead_code))]
 
@@ -55,9 +53,9 @@ pub(crate) use builders::build_new_market_notify;
 pub(crate) use builders::{
     build_alert_object, build_alert_snapshot_request, build_arb_activate_notify,
     build_chart_text_state, build_client_settings, build_emu_trades, build_lev_manage,
-    build_mm_orders_subscribe, build_reset_profit, build_settings_request, build_strat_start_stop,
-    build_strat_start_stop_v2, build_switch_dex, build_switch_spot, build_trigger_manage,
-    build_update_version,
+    build_mm_orders_subscribe, build_orders_history_request, build_reset_profit,
+    build_settings_request, build_strat_start_stop, build_strat_start_stop_v2, build_switch_dex,
+    build_switch_spot, build_trigger_manage, build_update_version,
 };
 
 // --- CmdId constants ---
@@ -79,6 +77,7 @@ const CMD_ALERT_OBJECT: u8 = 15;
 const CMD_ALERT_SNAPSHOT_REQUEST: u8 = 16;
 const CMD_CHART_TEXT_STATE: u8 = 17;
 const CMD_CHART_TEXT_SNAPSHOT: u8 = 18;
+const CMD_ORDERS_HISTORY_REQUEST: u8 = 19;
 
 const LEV_CMD_VER: u8 = 1;
 
@@ -279,7 +278,7 @@ pub(crate) const ARB_CONFIG_VER: u8 = 1;
 //  AutoStart typed views (TAutoStartConfig / TAutoStartConfig2)
 // =============================================================================
 
-/// Terminal-facing view of Delphi `TAutoStartConfig`.
+/// Terminal-facing view of the first AutoStart settings page.
 ///
 /// This is the settings-page meaning of the fixed 104-byte `as_cfg` blob. The
 /// wire blob is still kept on [`ClientSettingsCommand`] for exact roundtrip and
@@ -322,9 +321,9 @@ pub struct AutoStartConfig {
     pub work_time_to: f64,
 }
 
-/// Terminal-facing view of Delphi `TAutoStartConfig2`.
+/// Terminal-facing view of the second AutoStart settings page.
 ///
-/// Reserved Delphi fields are intentionally not exposed, but `set_*` /
+/// Reserved wire fields are intentionally not exposed, but `set_*` /
 /// `update_*` helpers preserve the current reserved bytes in `as_cfg2`.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct AutoStartConfig2 {
@@ -342,13 +341,12 @@ pub struct AutoStartConfig2 {
 //  ArbConfig — compact wire form (NOT raw record)
 // =============================================================================
 
-/// Compact `ArbConfig` form as embedded into `TClientSettingsCommand`.
+/// Compact arbitrage display config embedded into the settings snapshot.
 ///
-/// Delphi source: `MoonProtoUIStruct.pas:370-393` (read) and `450-468`
-/// (write).
+/// The compact form keeps a 256-bit wanted-platform mask plus display flags.
 #[derive(Debug, Clone)]
 pub struct ArbConfigCompact {
-    /// 256-bit "wanted platform" mask, matching Delphi `set of byte`.
+    /// 256-bit wanted-platform mask.
     #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub wanted: [bool; 256],
@@ -399,8 +397,11 @@ impl ArbConfigCompact {
 //  EmuTradePoint (6-byte packed record)
 // =============================================================================
 
-/// `TEmuTradePoint = packed record TimeDeltaMS:Word(2) + Price:Single(4)` = 6 bytes.
-/// Source: MoonProtoUIStruct.pas:115-118.
+/// One compact emulated chart tick: millisecond delta + f32 price.
+///
+/// The 6-byte row keeps replayed emulator paths small enough to send as a
+/// normal chart-edit action, while UI code works with [`EmuPencilPoint`]
+/// absolute time + price values.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EmuTradePoint {
     time_delta_ms: u16,
@@ -447,9 +448,9 @@ impl EmuTradePoint {
 
     /// Emulated sell tick at `time_delta_ms` after the command base time.
     ///
-    /// Delphi encodes sell side by storing a negative `Price` in the packed
-    /// point. Keeping that sign convention in the public constructor lets UI
-    /// drawing code build the exact wire shape without exposing raw bytes.
+    /// The wire format stores sell-side ticks as a negative `Price`. Keeping
+    /// that sign convention inside the constructor lets UI drawing code build
+    /// the exact payload without exposing raw bytes.
     pub fn sell(time_delta_ms: u16, price: f32) -> Self {
         Self {
             time_delta_ms,
@@ -578,8 +579,8 @@ pub struct TempBlacklistEntry<'a> {
 impl TempBlacklistEntry<'_> {
     /// Remaining blacklist duration as normal Rust time.
     ///
-    /// Delphi serializes the value as `TDateTime` day delta, but terminal code
-    /// should treat it as a duration row.
+    /// The wire value is a day fraction; terminal code should treat it as a
+    /// duration row.
     pub fn remaining_duration(self) -> Duration {
         if !self.remaining_days.is_finite() || self.remaining_days <= 0.0 {
             return Duration::ZERO;
@@ -596,11 +597,11 @@ impl TempBlacklistEntry<'_> {
     }
 }
 
-/// CmdId=1 `TClientSettingsCommand` — full MoonBot UI/settings snapshot.
+/// Full MoonBot UI/settings snapshot retained by Active Lib.
 ///
 /// Many fields are append-only soft-read fields: depending on server version,
-/// part of the tail may be absent. Delphi `CreateFromStream` fills the missing
-/// tail from current `cfg`; in the Active Lib path this is handled by
+/// part of the tail may be absent. Active Lib fills the missing tail from the
+/// current retained settings through
 /// `UICommand::parse_with_client_settings_fallback`.
 ///
 /// Normal terminal code edits the retained settings snapshot and sends the
@@ -615,9 +616,9 @@ impl TempBlacklistEntry<'_> {
 ///     client.settings().send(settings);
 /// }
 /// ```
-/// High-level send helpers write a fresh wire UID and use Delphi's fixed
-/// settings UKey slot for queue deduplication. Terminal UI edits the settings
-/// values below; it does not choose the wire UID.
+/// High-level send helpers write a fresh wire UID and use the fixed settings
+/// UKey slot for queue deduplication. Terminal UI edits the settings values
+/// below; it does not choose the wire UID.
 #[derive(Debug, Clone, Default)]
 pub struct ClientSettingsCommand {
     /// Wire command UID. Leave it as `0` when using high-level send helpers.
@@ -647,9 +648,9 @@ pub struct ClientSettingsCommand {
     // --- v2+ ---
     pub buy_iceberg: bool,
     pub sell_iceberg: bool,
-    /// `cfg.OrdersControl.SignOrders` value mirrored explicitly in the Rust
-    /// snapshot. Delphi writes it into global config instead of storing a
-    /// separate command field.
+    /// `OrdersControl.SignOrders` value mirrored explicitly in the snapshot.
+    /// The core keeps this as global settings state rather than a separate
+    /// command field.
     pub sign_orders: bool,
     // --- always present (v1+) ---
     pub coins_black_list_text: String,
@@ -671,13 +672,13 @@ pub struct ClientSettingsCommand {
     pub free_position_check: bool,
     pub vol_drop_level: i32,
     pub use_stop_market: bool,
-    /// `TAutoStartConfig` blob (104 bytes in the current Delphi version).
+    /// AutoStart settings-page blob (104 bytes in the current wire version).
     #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub as_cfg: Vec<u8>,
     #[cfg(not(any(test, feature = "diagnostics")))]
     pub(crate) as_cfg: Vec<u8>,
-    /// `TAutoStartConfig2` blob (168 bytes in the current Delphi version).
+    /// Second AutoStart settings-page blob (168 bytes in the current wire version).
     #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub as_cfg2: Vec<u8>,
@@ -701,17 +702,16 @@ pub struct ClientSettingsCommand {
     pub join_sell_kind: u8,
     #[cfg(not(any(test, feature = "diagnostics")))]
     pub(crate) join_sell_kind: u8,
-    /// Compact `ArbConfig` form, not a raw Delphi record.
+    /// Compact `ArbConfig` form, not a raw settings record.
     pub arb_config: ArbConfigCompact,
 }
 
 impl ClientSettingsCommand {
     /// Effective take-profit percentage shown by the main sell control.
     ///
-    /// Mirrors terminal state after Delphi `ApplySettingsFromServer` calls
-    /// `UpdateFixedButtons`: fixed-sell mode uses the selected fixed-sell
-    /// preset, normal mode uses `x_sell`, and `x_sell == 0` falls back to scalp
-    /// mode (`x_sell_scalp / 50`).
+    /// Mirrors terminal state after settings apply: fixed-sell mode uses the
+    /// selected fixed-sell preset, normal mode uses `x_sell`, and `x_sell == 0`
+    /// falls back to scalp mode (`x_sell_scalp / 50`).
     pub fn effective_take_profit_percent(&self) -> f64 {
         if self.fixed_sell_mode {
             self.selected_fixed_sell_percent()
@@ -728,11 +728,11 @@ impl ClientSettingsCommand {
 
     /// Set the normal main take-profit slider and leave scalp/fixed-sell modes.
     ///
-    /// Delphi stores this as `xSell` plus the shared `xTMode` scale flag. The
+    /// The wire stores this as `xSell` plus the shared `xTMode` scale flag. The
     /// terminal-facing helper writes the exact visible percent in the regular
-    /// scale (`xTMode=false`), so UI code does not have to remember the historic
-    /// storage trick. Values are rounded and clamped to Delphi's visible
-    /// `1..=900` percent range.
+    /// scale (`xTMode=false`), so UI code does not have to remember the storage
+    /// trick. Values are rounded and clamped to the visible `1..=900` percent
+    /// range.
     pub fn set_main_take_profit_percent(&mut self, percent: f64) {
         let percent = if percent.is_finite() { percent } else { 1.0 };
         let percent = percent.round().clamp(1.0, 900.0) as i32;
@@ -743,10 +743,10 @@ impl ClientSettingsCommand {
 
     /// Set the scalp/min-price sell mode percentage.
     ///
-    /// Delphi selects this mode by storing `xSell=0` and the visible percent as
-    /// `xSellScalp / 50`. This helper writes the mode directly from a normal
-    /// percent value and keeps the wire-compatible integer storage internal to
-    /// the settings snapshot.
+    /// The wire selects this mode by storing `xSell=0` and the visible percent
+    /// as `xSellScalp / 50`. This helper writes the mode directly from a normal
+    /// percent value and keeps the integer storage internal to the settings
+    /// snapshot.
     pub fn set_scalp_take_profit_percent(&mut self, percent: f64) {
         let percent = if percent.is_finite() {
             percent.max(0.0)
@@ -759,7 +759,7 @@ impl ClientSettingsCommand {
         self.x_sell_scalp = raw;
     }
 
-    /// Delphi visible percentage for a 1-based fixed-sell preset button.
+    /// Visible percentage for a 1-based fixed-sell preset button.
     pub fn fixed_sell_preset_percent(&self, slot_1_based: usize) -> Option<f64> {
         if !(1..=6).contains(&slot_1_based) {
             return None;
@@ -773,15 +773,15 @@ impl ClientSettingsCommand {
         &self.s_price
     }
 
-    /// Delphi-compatible 1-based fixed-sell slot number, clamped to `1..=6`.
+    /// Wire-compatible 1-based fixed-sell slot number, clamped to `1..=6`.
     pub fn selected_fixed_sell_slot(&self) -> usize {
         usize::from(self.sb_num.clamp(1, 6))
     }
 
     /// Select one of the six fixed-sell buttons.
     ///
-    /// Mirrors Delphi `UpdateFixedButtons`: the slot is clamped to `1..=6` and
-    /// `fixed_sell_price` is synchronized from the selected preset.
+    /// The slot is clamped to `1..=6` and `fixed_sell_price` is synchronized
+    /// from the selected preset.
     pub fn set_selected_fixed_sell_slot(&mut self, slot_1_based: usize) {
         let slot = slot_1_based.clamp(1, 6);
         self.sb_num = slot as u8;
@@ -795,10 +795,9 @@ impl ClientSettingsCommand {
 
     /// Set a fixed-sell preset button value.
     ///
-    /// The value is the same raw preset value Delphi edits in
-    /// `BTCBalanceEdit`; display helpers apply `x_tmode` when drawing the
-    /// visible percentage. If the edited slot is selected, `fixed_sell_price`
-    /// is synchronized immediately.
+    /// The value is the raw preset value; display helpers apply `x_tmode` when
+    /// drawing the visible percentage. If the edited slot is selected,
+    /// `fixed_sell_price` is synchronized immediately.
     pub fn set_fixed_sell_preset_price(&mut self, slot_1_based: usize, price: f32) -> bool {
         if !(1..=6).contains(&slot_1_based) {
             return false;
@@ -817,7 +816,7 @@ impl ClientSettingsCommand {
         self.fixed_sell_price = f64::from(price);
     }
 
-    /// Delphi visible percentage for the currently selected fixed-sell preset.
+    /// Visible percentage for the currently selected fixed-sell preset.
     pub fn selected_fixed_sell_percent(&self) -> f64 {
         self.fixed_sell_preset_percent(self.selected_fixed_sell_slot())
             .unwrap_or(0.0)
@@ -828,7 +827,7 @@ impl ClientSettingsCommand {
         JoinSellKind::from_byte(self.join_sell_kind)
     }
 
-    /// Set the join-sells mode while preserving the exact Delphi byte on wire.
+    /// Set the join-sells mode while preserving the exact wire byte.
     pub fn set_join_sell_mode(&mut self, mode: JoinSellKind) {
         self.join_sell_kind = mode.to_byte();
     }
@@ -846,9 +845,9 @@ impl ClientSettingsCommand {
 
     /// Replace temporary coin-blacklist rows as one typed UI list.
     ///
-    /// Delphi stores this as two parallel arrays (`TempBLSymbols` and
-    /// `TempBLTimes`). Terminal code should edit rows as `(symbol,
-    /// remaining duration)`; the wire arrays are rebuilt here for exact roundtrip.
+    /// The wire stores this as two parallel arrays (`TempBLSymbols` and
+    /// `TempBLTimes`). Terminal code should edit rows as `(symbol, remaining
+    /// duration)`; the wire arrays are rebuilt here for exact roundtrip.
     pub fn set_temp_blacklist_entries<I, S>(&mut self, entries: I)
     where
         I: IntoIterator<Item = (S, Duration)>,
@@ -882,8 +881,7 @@ impl ClientSettingsCommand {
         WireAutoStartConfig::from_blob(&self.as_cfg).to_public()
     }
 
-    /// Replace the AutoStart settings page while keeping exact Delphi wire
-    /// layout for `TAutoStartConfig`.
+    /// Replace the AutoStart settings page while keeping the exact wire layout.
     pub fn set_auto_start_config(&mut self, cfg: AutoStartConfig) {
         let mut wire = WireAutoStartConfig::from_blob(&self.as_cfg);
         wire.write_public(&cfg);
@@ -902,8 +900,8 @@ impl ClientSettingsCommand {
         WireAutoStartConfig2::from_blob(&self.as_cfg2).to_public()
     }
 
-    /// Replace the second AutoStart settings page. Reserved Delphi bytes from
-    /// the current blob are preserved.
+    /// Replace the second AutoStart settings page. Reserved bytes from the
+    /// current blob are preserved.
     pub fn set_auto_start_config2(&mut self, cfg: AutoStartConfig2) {
         let mut wire = WireAutoStartConfig2::from_blob(&self.as_cfg2);
         wire.write_public(&cfg);
@@ -911,7 +909,7 @@ impl ClientSettingsCommand {
     }
 
     /// Edit the second AutoStart settings page in-place while preserving
-    /// reserved Delphi bytes.
+    /// reserved wire bytes.
     pub fn update_auto_start_config2(&mut self, f: impl FnOnce(&mut AutoStartConfig2)) {
         let mut cfg = self.auto_start_config2();
         f(&mut cfg);
@@ -919,7 +917,7 @@ impl ClientSettingsCommand {
     }
 }
 
-/// CmdId=3 `TStratStartStopCommand`. Boolean IsStart.
+/// Start or stop all checked strategies.
 #[derive(Debug, Clone, Copy)]
 pub struct StratStartStop {
     #[cfg(any(test, feature = "diagnostics"))]
@@ -930,7 +928,7 @@ pub struct StratStartStop {
     pub is_start: bool,
 }
 
-/// CmdId=4 `TStratStartStopCommandV2`, carrying checked-strategy deltas.
+/// Start or stop only the explicit checked-strategy delta set.
 #[derive(Debug, Clone)]
 pub struct StratStartStopV2 {
     #[cfg(any(test, feature = "diagnostics"))]
@@ -942,7 +940,7 @@ pub struct StratStartStopV2 {
     pub items: Vec<StratCheckedItem>,
 }
 
-/// CmdId=5 `TMMOrdersSubscribeCommand`.
+/// Toggle market-maker/order heatmap subscription.
 #[derive(Debug, Clone, Copy)]
 pub struct MMOrdersSubscribe {
     #[cfg(any(test, feature = "diagnostics"))]
@@ -953,11 +951,10 @@ pub struct MMOrdersSubscribe {
     pub subscribe: bool,
 }
 
-/// CmdId=6 `TUpdateVersionCommand`.
+/// Request a MoonBot version update.
 ///
 /// This is the MoonBot remote-update command, not a passive client-version
-/// notification. Delphi writes `VersionName` as UTF-8 string and `IsRelease` as
-/// one byte. `VersionName=""` with `is_release=true` is the normal release
+/// notification. `VersionName=""` with `is_release=true` is the normal release
 /// update button; a non-empty name targets a test/beta build name.
 #[derive(Debug, Clone)]
 pub struct UpdateVersion {
@@ -970,7 +967,7 @@ pub struct UpdateVersion {
     pub is_release: bool,
 }
 
-/// CmdId=7 `TEmuTradesCommand` (Priority=Sliced), emulated ticks for one market.
+/// Emulated chart ticks for one market.
 #[derive(Debug, Clone)]
 pub struct EmuTrades {
     #[cfg(any(test, feature = "diagnostics"))]
@@ -983,12 +980,12 @@ pub struct EmuTrades {
     pub m_index: u16,
     #[cfg(not(any(test, feature = "diagnostics")))]
     pub(crate) m_index: u16,
-    /// `BaseTime: TDateTime` (Delphi double, days since 1899-12-30).
+    /// Wire base time as day-fraction timestamp.
     pub base_time: f64,
     pub points: Vec<EmuTradePoint>,
 }
 
-/// CmdId=8 `TNewMarketNotifyCommand` (empty body, Priority=High).
+/// Internal listing-refresh trigger after a new market notification.
 #[derive(Debug, Clone, Copy)]
 pub struct NewMarketNotify {
     #[cfg(any(test, feature = "diagnostics"))]
@@ -998,7 +995,7 @@ pub struct NewMarketNotify {
     pub(crate) uid: u64,
 }
 
-/// CmdId=9 `TLevManageCommand` (Sliced, UK_LevManageSettings).
+/// Leverage-management settings snapshot.
 #[derive(Debug, Clone)]
 pub struct LevManage {
     #[cfg(any(test, feature = "diagnostics"))]
@@ -1006,8 +1003,8 @@ pub struct LevManage {
     pub uid: u64,
     #[cfg(not(any(test, feature = "diagnostics")))]
     pub(crate) uid: u64,
-    /// Version byte read from the incoming command. Outgoing builder always writes
-    /// Delphi's `LevCmdVer = 1`, regardless of this read-model field.
+    /// Version byte read from the incoming command. Outgoing builder always
+    /// writes the current `LevCmdVer = 1`, regardless of this read-model field.
     #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub cmd_ver: u8,
@@ -1059,12 +1056,12 @@ pub struct ResetProfit {
 /// [`crate::MoonSettings::manage_triggers_for_markets`] and all-market trigger
 /// helpers.
 ///
-/// Maps the Delphi `TTriggerManageCommand.Action` byte.
+/// Maps the trigger-management action byte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TriggerAction {
-    /// Clear the listed triggers (Delphi `Action = 0`).
+    /// Clear the listed triggers (`Action = 0`).
     Clear,
-    /// Set/arm the listed triggers (Delphi `Action = 1`).
+    /// Set/arm the listed triggers (`Action = 1`).
     Set,
     /// Future/unknown action byte preserved for diagnostics/roundtrip.
     Unknown(u8),
@@ -1090,7 +1087,7 @@ impl TriggerAction {
         }
     }
 
-    /// Delphi wire ordinal: `Clear = 0`, `Set = 1`.
+    /// Wire ordinal: `Clear = 0`, `Set = 1`.
     #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub const fn to_byte(self) -> u8 {
@@ -1113,14 +1110,14 @@ impl TriggerAction {
 
 /// Which profit counter to reset, for [`crate::MoonSettings::reset_profit`].
 ///
-/// Maps the Delphi `TResetProfitCommand.ResetKind` byte.
+/// Maps the reset-profit kind byte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResetProfitKind {
-    /// Reset only the current-session profit (Delphi `ResetKind = 0`).
+    /// Reset only the current-session profit (`ResetKind = 0`).
     CurrentProfit,
-    /// Reset the all-time accumulated profit (Delphi `ResetKind = 1`).
+    /// Reset the all-time accumulated profit (`ResetKind = 1`).
     AllProfit,
-    /// Future/unknown reset kind preserved from the Delphi byte.
+    /// Future/unknown reset kind preserved from the wire byte.
     Unknown(u8),
 }
 
@@ -1144,7 +1141,7 @@ impl ResetProfitKind {
         }
     }
 
-    /// Delphi wire ordinal: `CurrentProfit = 0`, `AllProfit = 1`.
+    /// Wire ordinal: `CurrentProfit = 0`, `AllProfit = 1`.
     #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub const fn to_byte(self) -> u8 {
@@ -1190,7 +1187,7 @@ pub struct SwitchDex {
     pub dex_name: String,
 }
 
-/// Delphi `TSwitchSpotCommand.SpotIndex`.
+/// Spot-market switch target.
 ///
 /// Server accepts `0=Crypto` and `1=Predict`; raw future values are preserved
 /// for forward compatibility, but normal application code should use the named
@@ -1340,6 +1337,22 @@ pub struct ChartTextSnapshotCommand {
     pub debug_lines: Vec<String>,
 }
 
+/// `TOrdersHistoryRequestCommand` (UI CmdId=19).
+///
+/// Client asks the server-side MoonBot terminal to execute its existing orders
+/// history export/update flow for one market. The response is not a paired
+/// MoonProto payload; this is a fire-and-forget UI command like the terminal
+/// button path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrdersHistoryRequest {
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
+    pub uid: u64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) uid: u64,
+    pub market_name: String,
+}
+
 // =============================================================================
 //  UICommand enum
 // =============================================================================
@@ -1370,8 +1383,9 @@ pub enum UICommand {
     },
     ChartTextState(ChartTextStateCommand),
     ChartTextSnapshot(ChartTextSnapshotCommand),
+    OrdersHistoryRequest(OrdersHistoryRequest),
     /// Command header is well-formed, but the command version is newer than
-    /// this library can parse. Delphi registry marks this as `FSkipped`.
+    /// this library can parse. The command is skipped without state changes.
     Skipped {
         cmd_id: u8,
         uid: u64,

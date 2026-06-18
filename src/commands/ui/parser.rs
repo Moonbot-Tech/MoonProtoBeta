@@ -262,6 +262,14 @@ impl UICommand {
                 }))
             }
 
+            CMD_ORDERS_HISTORY_REQUEST => {
+                let market_name = read_string(payload, &mut pos)?;
+                Some(UICommand::OrdersHistoryRequest(OrdersHistoryRequest {
+                    uid,
+                    market_name,
+                }))
+            }
+
             _ => Some(UICommand::Unknown { cmd_id, uid }),
         }
     }

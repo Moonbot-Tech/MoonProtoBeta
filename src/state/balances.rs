@@ -1,13 +1,9 @@
 //! Account-level balance totals maintained by the active `MoonClient` runtime.
 //!
-//! Per-market balance/position lives on each `Market` (Delphi `TMarket`), applied
-//! by `MarketsState::apply_balance_update` (`MoonProtoEngine.pas:
-//! ApplyBalanceItem` — Delphi writes liq/pos/profit straight into `TMarket`).
-//! This module keeps only the account-level globals (BTC totals + total PnL),
-//! matching Delphi `TMarkets` scalars (`FTotalPNL` etc.). It does NOT keep a
-//! second per-market balance store: that was a Rust-only duplicate (double-apply
-//! and full-snapshot rebuild) of data already on `Market`, removed in favor of
-//! the single Delphi-parity source.
+//! Per-market balance, position, liquidation, leverage, and PnL live directly
+//! on each retained `Market`. This module keeps only account-level totals
+//! (BTC totals + total PnL), so chart/UI code reads one authoritative market
+//! object instead of stitching together a separate balance table.
 
 use crate::commands::balance::BalanceUpdate;
 
@@ -22,8 +18,8 @@ pub struct GlobalBalance {
     pub btc_balance_full: f64,
     /// Special-coin balance (USDT for futures, BUSD/USDC in MA mode, etc.).
     pub special_coin_balance: f64,
-    /// Delphi `TMarkets.FTotalPNL`: sum of per-market `total_profit` for
-    /// `TMarket.IsBTCMarket` markets only. Recomputed from live markets.
+    /// Sum of per-market `total_profit` for BTC-quoted markets only,
+    /// recomputed from the retained live market objects.
     pub total_pnl: f64,
 }
 
@@ -38,7 +34,7 @@ pub struct BalancesState {
     /// Account totals (BTC, special coin, total PnL).
     pub global: GlobalBalance,
     /// Last applied balance-packet epoch. Diagnostic; per-market epoch gating
-    /// lives on `Market` (Delphi `m.LastBalanceEpoch`).
+    /// lives on the retained `Market` objects.
     pub(crate) last_epoch: u16,
 }
 
@@ -59,7 +55,7 @@ pub enum BalanceEvent {
         epoch: u16,
         global_changed: bool,
     },
-    /// Command was recognized, but Delphi does not apply it to balance state.
+    /// Command was recognized, but this command kind has no balance-state effect.
     #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     Ignored { cmd_id: u8, epoch: u16 },
@@ -77,11 +73,11 @@ impl BalancesState {
     /// Apply the account-level globals after the per-market balance apply ran on
     /// markets. `total_pnl` is
     /// [`crate::state::markets::MarketsState::sum_btc_total_profit`]
-    /// over the just-updated live markets (Delphi `RecalcTotalPnl`).
+    /// over the just-updated live markets.
     ///
     /// - cmd 3 (full snapshot): always carries globals.
     /// - cmd 4 (incremental): updates globals only when `global_changed`.
-    /// - other (e.g. cmd 2): not applied, like Delphi.
+    /// - other (e.g. cmd 2): not applied.
     // parity: MoonBot MarketsU.pas:TMarkets (FTotalPNL/BTC globals) + RecalcTotalPnl
     pub(crate) fn apply_global(&mut self, upd: &BalanceUpdate, total_pnl: f64) {
         let set_btc = match upd.cmd_id {

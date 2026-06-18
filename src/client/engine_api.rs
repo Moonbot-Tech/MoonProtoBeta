@@ -1,9 +1,12 @@
 use super::*;
 
 impl Client {
-    /// Convenience: send an Engine API request (MPS_Sliced, encrypted, MaxRetries=6).
-    /// Matches Delphi: `TEngineRequest` has explicit `MoonCmdPriority(MPS_Sliced)`,
-    /// and `TCommandRegistry.InitRegistry` gives Sliced commands `MaxRetries=6`.
+    /// Queue an Engine API request through the typed command registry.
+    ///
+    /// The registry owns send priority, encryption, retry count, and UKey
+    /// defaults. Subscription/reconnect clocks are updated only after the
+    /// request actually entered the send queue; a domain-gated request must not
+    /// look like an in-flight subscribe.
     #[doc(hidden)]
     pub(crate) fn send_api_request(&self, request_payload: &[u8]) {
         self.send_api_request_at(request_payload, self.now_ms());
@@ -30,14 +33,9 @@ impl Client {
     }
 
     pub(crate) fn send_api_request_at(&self, request_payload: &[u8], now_ms: i64) {
-        self.mark_engine_request_queued_at(request_payload, now_ms);
-        self.send_cmd(
-            request_payload.to_vec(),
-            Command::API,
-            SendPriority::Sliced,
-            true, // Engine API is always encrypted
-            6,    // TEngineRequest effective MaxRetries for MPS_Sliced
-        );
+        if self.send_typed_domain_cmd(request_payload.to_vec(), Command::API) {
+            self.mark_engine_request_queued_at(request_payload, now_ms);
+        }
     }
 
     /// Send an Engine API request and register it in `api_pending`.

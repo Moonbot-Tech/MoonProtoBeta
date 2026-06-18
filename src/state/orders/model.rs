@@ -4,12 +4,12 @@ use super::{OrderTraceLine, SellReason};
 use crate::commands::market::{BaseCurrency, ExchangeCode};
 use crate::commands::trade::*;
 
-/// One retained order with worker-equivalent state.
+/// One retained order with core-equivalent state.
 ///
-/// Fields mirror `BOrderWorker` data received from the server through
-/// `TOrderStatus`, `TOrderStatusUpdate`, `TOrderReplaceResponse`,
-/// `TOrderStopsUpdate`, `TVStopUpdate`, `TCorridorUpdate`, and
-/// `TOrderTracePoint`.
+/// This is the UI/read-model object for one live or recently finished worker:
+/// exchange legs, local replace/cancel/stops intents, trace lines, strategy
+/// linkage, and cleanup flags are kept together so terminal code does not have
+/// to stitch packet-shaped fragments by hand.
 #[derive(Debug, Clone)]
 pub struct Order {
     /// Unique order id = server task UID.
@@ -39,7 +39,7 @@ pub struct Order {
     pub vstop_vol: f64,
     /// Local outgoing panic-sell intent.
     pub panic_sell: bool,
-    /// Moon-shot marker raised by `TCorridorUpdate`.
+    /// Moon-shot marker from corridor updates.
     pub is_moon_shot: bool,
     /// Last corridor price range update.
     pub corridor_price_down: f32,
@@ -74,7 +74,7 @@ pub struct Order {
     pub job_is_done: bool,
     /// Server requested worker cancellation.
     pub cancel_request: bool,
-    /// Server-forced removal (`TOrderNotFound` arrived).
+    /// Server-forced removal.
     pub server_forced_remove: bool,
     /// Last sell reason.
     pub sell_reason: SellReason,
@@ -82,7 +82,7 @@ pub struct Order {
     // --- Internal sync state ---
     /// Per-status monotonic epoch used for anti out-of-order checks.
     pub(super) server_latest_epoch: [u16; 10],
-    /// Snapshot flag updated by `TAllStatuses`.
+    /// Latest full order-status snapshot marker.
     pub(crate) snapshot_flag: u8,
     pub(super) replace_sent_time_ms: i64,
     pub(super) pending_cancel_sent_ms: i64,
@@ -107,7 +107,7 @@ impl Order {
         self.sell_reason
     }
 
-    /// Create a new `Order` from `TOrderStatus`.
+    /// Create a new retained order from a full status row.
     pub(super) fn from_status(status_cmd: &OrderStatus) -> Self {
         Self {
             uid: status_cmd.epoch_header.market.base.uid,

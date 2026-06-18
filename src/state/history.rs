@@ -1,8 +1,8 @@
 //! Active-library retained history row types.
 //!
 //! These rows are the typed payloads stored by [`crate::state::seq_ring`].
-//! They intentionally mirror Delphi storage records where the record is a
-//! user-visible/history concept rather than only a wire packet.
+//! They intentionally keep the production core's compact storage shape where
+//! the row is a user-visible/history concept rather than only a wire packet.
 
 use crate::state::seq_ring::SeqRingTimedRow;
 use crate::MoonTime;
@@ -42,12 +42,12 @@ pub enum CandlesSnapshotEvent {
     },
 }
 
-/// Delphi `ProcessTradesStream` per-packet time-shift state.
+/// Per-packet time-shift state for compact trades-stream rows.
 ///
 /// The first known/stored row in a packet fixes
 /// `TimeShift := round((NowTimeX - RowTime) * 24) / 24`; every later row in the
-/// packet uses the same shift. Unknown-market sections skipped by Delphi do not
-/// fill this value.
+/// packet uses the same shift. Unknown-market sections skipped by Active Lib do
+/// not fill this value.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub(crate) struct TradesPacketTimeShift {
     shift_days: Option<f64>,
@@ -83,12 +83,12 @@ pub(crate) fn moon_time_from_delphi_days(days: f64) -> MoonTime {
     MoonTime::from_delphi_days(days).unwrap_or(MoonTime::ZERO)
 }
 
-/// Delphi `TTrade`: detailed trade/liquidation row stored in market history.
+/// Detailed trade/liquidation row stored in retained market history.
 ///
-/// Delphi layout is 16 bytes: `Time: TDateTime; Price: Single; Qty: Single`.
-/// `Qty` is signed exactly like Delphi: sign bit clear means buy, sign bit set
-/// means sell. This intentionally uses sign-bit checks, so `-0.0` has the same
-/// machine effect as Delphi's `PCardinal(@Qty)^ and $80000000`.
+/// The compact production layout is 16 bytes: time, `f32` price, and signed
+/// `f32` quantity. A clear sign bit means buy, a set sign bit means sell. The
+/// sign-bit check intentionally treats `-0.0` as sell, preserving byte-level
+/// behavior for historical rows and chart/tape calculations.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 #[repr(C)]
 pub struct TradeHistoryRow {
@@ -131,12 +131,11 @@ impl SeqRingTimedRow for TradeHistoryRow {
     }
 }
 
-/// Delphi `TMMOrder`: main market-maker history row.
+/// Main market-maker history row.
 ///
-/// Delphi layout is `Time: TDateTime; volume: Double; Q: Double`. Optional taker
-/// address and color are companion data in Delphi
-/// `TStreamableRingBuffer<TMMOrder, TMMOrderData>` and must be ported as a
-/// separate companion layer, not silently folded into this base row.
+/// The base row stores time, volume, and quantity. Optional taker address and
+/// color are companion data and stay in a separate slot-aligned companion ring,
+/// not silently folded into this base row.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 #[repr(C)]
 pub struct MMOrderHistoryRow {
@@ -163,10 +162,10 @@ impl SeqRingTimedRow for MMOrderHistoryRow {
     }
 }
 
-/// Delphi `TMMOrderData`: companion data for `TMMOrder`.
+/// Slot-aligned companion data for [`MMOrderHistoryRow`].
 ///
-/// Delphi layout is `Taker: THLAddress` (20 bytes) and `Color: TColor`. It is
-/// stored beside the base `TMMOrder` row by slot, not inside the base row.
+/// The companion stores a 20-byte HyperDex taker address and ARGB color beside
+/// the base MM-order row by slot, not inside the base row.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub struct MMOrderCompanionData {
@@ -175,17 +174,17 @@ pub struct MMOrderCompanionData {
 }
 
 impl MMOrderCompanionData {
-    /// HyperDex taker address bytes from Delphi `THLAddress`.
+    /// HyperDex taker address bytes.
     pub fn taker(&self) -> &[u8; 20] {
         &self.taker
     }
 
-    /// HyperDex taker address formatted like Delphi `HLAddressToHex(..., true)`.
+    /// HyperDex taker address formatted as lowercase `0x...` hex.
     pub fn taker_hex(&self) -> String {
         hl_address_hex(&self.taker)
     }
 
-    /// Deterministic ARGB color produced by Delphi `HLAddressColor`.
+    /// Deterministic ARGB color derived from the taker address.
     pub fn color_argb(&self) -> u32 {
         self.color
     }
@@ -220,12 +219,11 @@ pub fn hl_address_hex(address: &[u8; 20]) -> String {
     out
 }
 
-/// Delphi `THistoricalPrices` used by `Market.HistoryPrice`.
+/// Last-price history point used by the retained brown price line.
 ///
-/// Delphi layout is `packed record current: Single; RealTime: TDateTime`.
-/// MoonBot draws the brown LastPrice chart line from this history. The source
-/// value is `UpdateMarketsList -> pLast = (Bid + Ask) / 2`, not the trades
-/// stream last trade price.
+/// The retained row is compact: `f32` price plus timestamp. The source value is
+/// the market-list midpoint `(bid + ask) / 2`, not the trades stream last trade
+/// price.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 #[repr(C)]
 pub struct LastPricePoint {
@@ -293,11 +291,10 @@ impl SeqRingTimedRow for MarkPricePoint {
 
 /// Active Lib retained 5-minute candle row.
 ///
-/// The source snapshot is Delphi `TDeepPrice` / `TDeepPricePack`, but the row
-/// lives in state because applications read it together with trades and
-/// derived analytics. `buyWall/sellWall` from the wire snapshot are deliberately
-/// not retained here: the library decision is to expose candles, not wall UI
-/// helpers.
+/// The row lives in retained state because applications read it together with
+/// trades and derived analytics. Extra wall-helper fields from the transport
+/// snapshot are deliberately not retained here: the library decision is to
+/// expose candles, not wall UI helpers.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 #[repr(C)]
 pub struct Candle5mRow {
@@ -363,10 +360,10 @@ impl SeqRingTimedRow for Candle5mRow {
     }
 }
 
-/// Delphi `TMiniCandle` used to compact evicted detailed trades.
+/// Mini-candle used to compact evicted detailed trades.
 ///
-/// Delphi layout is 24 bytes: `Time: TDateTime; Cnt: Integer; MinPrice,
-/// MaxPrice, BuyVol, SellVol: Single`.
+/// Compact 24-byte row: time, trade count, min/max price, buy volume, and sell
+/// volume.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 #[repr(C)]
 pub struct MiniCandle {
@@ -416,13 +413,12 @@ impl SeqRingTimedRow for MiniCandle {
     }
 }
 
-/// Compact detailed trades into Delphi `TMiniCandle` groups.
+/// Compact detailed trades into mini-candle groups.
 ///
-/// This mirrors the `UseTradesCompression` body inside Delphi
-/// `TMarket.ResizeOrdersHistory`: the group anchor is the first trade time, a
-/// new candle starts when `abs(anchor - row.Time) > 5 / SecsPerDay`, split
-/// groups are appended only when newer than `last_mini_time` and older than the
-/// resize `now_time`, and the final group only checks `c.Time > last_mini_time`.
+/// The group anchor is the first trade time. A new candle starts when the next
+/// detailed row is more than five seconds away from that anchor. Split groups
+/// are appended only when newer than `last_mini_time` and older than the resize
+/// `now_time`; the final group only checks `c.time > last_mini_time`.
 // parity: MoonBot MarketsU.pas:TMarket.ResizeOrdersHistory (UseTradesCompression)
 pub(crate) fn compact_trades_to_mini_candles(
     rows: &[TradeHistoryRow],
@@ -482,9 +478,8 @@ fn empty_mini_candle(time: MoonTime) -> MiniCandle {
 
 /// Buy/sell rolling volume totals.
 ///
-/// `*_value` is `Price * Abs(Qty)`, matching Delphi volume calculations over
-/// `TTrade`. `*_qty` keeps the coin/base quantity separately for clients that
-/// need it.
+/// `*_value` is `price * abs(quantity)`. `*_qty` keeps the coin/base quantity
+/// separately for clients that need it.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct TradeVolumeTotals {
     pub buy_value: f64,
@@ -588,38 +583,38 @@ pub struct MarketDerivedSnapshot {
     pub trade_deltas: DerivedDeltaSnapshot,
     /// Deltas from retained 5m candles plus the current candle.
     ///
-    /// Long candle delta fields follow Delphi `RecalcPumpQ` bucket semantics:
-    /// `two_hours` is Delphi `Last2hDelta` (`h <= 2`, roughly three hours),
-    /// `three_hours` is `Last3hDelta` (`h <= 3`, roughly four hours), and
-    /// `twenty_four_hours` is `Last24hDelta` (`h <= 24`, roughly 25 hours).
+    /// Long candle delta fields use production-core bucket semantics:
+    /// `two_hours` covers the `h <= 2` buckets (roughly three hours),
+    /// `three_hours` covers `h <= 3` (roughly four hours), and
+    /// `twenty_four_hours` covers `h <= 24` (roughly 25 hours).
     pub candle_deltas: DerivedDeltaSnapshot,
-    /// Deltas from Delphi's retained LastPrice/HistoryPrice line.
+    /// Deltas from the retained LastPrice/HistoryPrice line.
     ///
-    /// Delphi feeds this line from `UpdateMarketsList -> TMarket.AddFrom` and
-    /// uses it for the 15m/30m/1h derived windows in `CheckHourlyValues`.
+    /// Active Lib feeds this line from market-list midpoint updates and uses it
+    /// for the 15m/30m/1h derived windows.
     pub last_price_deltas: DerivedDeltaSnapshot,
     /// Combined convenient view. For each field it is the max of the trade and
-    /// retained-history sources for that window, matching Delphi's "do not
-    /// lower a hotter delta with a colder source" shape.
+    /// retained-history sources for that window, so a hotter short-source delta
+    /// is not lowered by a colder long-source delta.
     pub deltas: DerivedDeltaSnapshot,
-    /// In-progress (not yet sealed) 5m candle — Delphi `TMarket.FCandle`.
+    /// In-progress (not yet sealed) 5m candle.
     /// Lives OUTSIDE the sealed `candles_5m` ring; the chart draws it as a
     /// live bar. `None` while the current period has had no trades yet.
     ///
     /// Timestamp convention (sverka #14 V3): this live candle's `time` is the
     /// period START (its first trade), while sealed candles in the `candles_5m`
-    /// ring are stamped at seal with the period END (Delphi `Deep5m[N].Time :=
-    /// NowTime`). OHLC and volume are correct in both; a chart that open-aligns
-    /// its bars should map the live candle to the current period's open.
+    /// ring are stamped at seal with the period END. OHLC and volume are
+    /// correct in both; a chart that open-aligns its bars should map the live
+    /// candle to the current period's open.
     pub current_candle: Option<Candle5mRow>,
 }
 
 /// Incremental rolling volumes for the Active Lib trade history.
 ///
 /// Buckets are 5 seconds wide and cover 5 minutes total. This intentionally
-/// differs from Delphi's expensive scan in `JoinHOrders`, but preserves the
-/// public value being maintained: fast buy/sell trade volume over 1/3/5 minute
-/// windows. The accepted precision loss is bounded by one bucket width.
+/// avoids repeated full scans while preserving the public value being
+/// maintained: fast buy/sell trade volume over 1/3/5 minute windows. The
+/// accepted precision loss is bounded by one bucket width.
 #[derive(Debug, Clone)]
 pub(crate) struct RollingTradeVolumes {
     buckets: [TradeVolumeBucket; ROLLING_VOLUME_BUCKETS],

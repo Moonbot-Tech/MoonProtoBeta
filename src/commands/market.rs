@@ -1,16 +1,13 @@
 //! Market Active Lib types and low-level Engine API response parsers.
 //!
-//! Delphi sources: `MoonProto/MoonProtoSerialization.pas` and
-//! `MoonProto/MoonProtoEngineServer.pas`.
-//!
 //! Regular applications should access markets through retained `MarketHandle`
 //! values and `MarketsState` readers. The packet-shaped parsers/builders here
 //! are protocol tools; they accept `EngineResponse.data` after optional DEFLATE
 //! decompression and are hidden from normal rustdoc where they are not a useful
 //! user-facing abstraction.
 //!
-//! Engine stream primitive layout follows Delphi: little-endian numeric fields,
-//! one-byte booleans, and u16-length UTF-8 strings.
+//! Engine stream primitive layout is little-endian numeric fields, one-byte
+//! booleans, and u16-length UTF-8 strings.
 
 use std::collections::HashMap;
 
@@ -63,7 +60,7 @@ pub(crate) use self::token_tags::{build_token_tags_response, parse_token_tags_re
 //  TBotPlatform ordinal (Vars.pas:24)
 // =============================================================================
 
-/// Delphi `TBotPlatform` raw ordinal from `Vars.pas`.
+/// Raw exchange/platform ordinal used by the core.
 ///
 /// Server identity and trade route headers carry this as one byte. The wrapper
 /// keeps unknown future ordinals byte-exact while the public API avoids naked
@@ -153,12 +150,11 @@ impl std::fmt::Debug for ExchangeCode {
 //  TBaseCurrency ordinal (Vars.pas:40)
 // =============================================================================
 
-/// `TBaseCurrency` — raw ordinal of Delphi enum from `Vars.pas:40`.
+/// Raw base-currency ordinal used by the core.
 ///
-/// Delphi stores this field as a one-byte enum ordinal and `WriteMarketToStream`
-/// writes `Ord(m.FuturesType)`. Keep the raw byte instead of collapsing unknown
-/// future ordinals to `BC_Unknown`, so parse + write preserves the exact wire
-/// value.
+/// The wire stores this field as a one-byte enum ordinal. Keep the raw byte
+/// instead of collapsing unknown future ordinals to `BC_Unknown`, so parse +
+/// write preserves the exact wire value.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BaseCurrency(u8);
 
@@ -265,10 +261,10 @@ impl std::fmt::Debug for BaseCurrency {
 //  TListedOnExchange ordinal (Vars.pas:58)
 // =============================================================================
 
-/// Delphi `TListedOnExchange` raw ordinal from `Vars.pas`.
+/// Raw listed-on-exchange ordinal derived from the market futures type.
 ///
-/// This value is not sent in `WriteMarketToStream`. Delphi derives
-/// `TMarket.ListedType` after `GetMarketsList` from `FuturesType`.
+/// This value is not sent in `WriteMarketToStream`; Active Lib derives it after
+/// `GetMarketsList` from `FuturesType`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ListedType(u8);
 
@@ -283,7 +279,7 @@ impl ListedType {
 //  TPositionType ordinal (MarketsU.pas:31)
 // =============================================================================
 
-/// Delphi `TPositionType` (`PT_Cross=0`, `PT_Isolated=1`).
+/// Position margin mode (`Cross=0`, `Isolated=1`).
 ///
 /// Balance/market packets carry this as one raw byte. The Active Lib API exposes
 /// the typed value so user code does not pass magic `0/1`, while raw parsers
@@ -353,7 +349,7 @@ impl std::fmt::Debug for PositionType {
 //  Arbitrage platform codes (ArbTypes.pas)
 // =============================================================================
 
-/// Arbitrage platform code used by Delphi `ArbSlotPlatforms`.
+/// Arbitrage platform code used by arb slots.
 ///
 /// Regular exchange codes reuse `TBotPlatform` ordinals; arbitrage also has
 /// special codes for Hyperliquid deployers and extra feeds. This is why the
@@ -454,7 +450,7 @@ impl std::fmt::Debug for ArbPlatformCode {
     }
 }
 
-/// Delphi `TArbSlot.IsolatedFlags`: bit0 deposit blocked, bit1 withdraw blocked.
+/// Arbitrage isolation flags: bit0 deposit blocked, bit1 withdraw blocked.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct ArbIsolationFlags(u8);
 
@@ -511,11 +507,11 @@ impl std::fmt::Debug for ArbIsolationFlags {
 
 /// Live Active Lib market object.
 ///
-/// The first fields are byte-exact with `WriteMarketToStream`
+/// The first fields are byte-exact with the market-list wire stream
 /// (MoonProtoSerialization.pas:42-98): 10 strings + 6 ints + 1 int64 +
 /// 20 doubles + 5 bools + 1 byte for v2 `FuturesType`. The remaining fields
-/// mirror Delphi `TMarket` live state maintained by other protocol commands and
-/// are not serialized by `WriteMarketToStream`.
+/// are retained live state maintained by other protocol commands and are not
+/// serialized by the market-list stream.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Market {
     // --- Strings (10) ---
@@ -663,7 +659,7 @@ pub struct Market {
     pub(crate) bn_only_isolated: bool,
     // --- v2: FuturesType ---
     pub futures_type: BaseCurrency,
-    // --- Active Lib live balance / position state (Delphi TMarket fields) ---
+    // --- Active Lib live balance / position state ---
     pub initial_balance: f64,
     pub locked_balance: f64,
     pub pos_size: f64,
@@ -695,15 +691,15 @@ pub struct Market {
     pub last_balance_epoch: u16,
     #[cfg(not(any(test, feature = "diagnostics")))]
     pub(crate) last_balance_epoch: u16,
-    // --- Active Lib live trade tail state (Delphi TMarket trade fields) ---
+    // --- Active Lib live trade tail state ---
     pub trade_tail: MarketTradeState,
-    // --- Active Lib live price state (Delphi TMarket bid/ask/last/mark fields) ---
+    // --- Active Lib live price state ---
     pub price: MarketPrice,
-    // --- Active Lib signed delta state (Delphi Coin1hDelta/Coin24hDelta fields) ---
+    // --- Active Lib signed delta state ---
     pub delta_state: MarketDeltaState,
-    // --- Active Lib UI/config blacklist state (Delphi TMarket.MarketBlackListedCfg) ---
+    // --- Active Lib UI/config blacklist state ---
     pub(crate) market_blacklisted_cfg: bool,
-    // --- Active Lib live arbitrage state (Delphi TMarket.ArbSlots/ArbNow) ---
+    // --- Active Lib live arbitrage state ---
     #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub arb_slots: HashMap<ArbPlatformCode, MarketArbSlot>,
@@ -711,32 +707,30 @@ pub struct Market {
     pub(crate) arb_slots: HashMap<ArbPlatformCode, MarketArbSlot>,
 }
 
-/// Delphi `TMarket` live trade tail fields maintained from `MPC_TradesStream`.
+/// Live trade-tail fields maintained from the trades stream.
 ///
-/// These are not part of the wire `Market` snapshot written by
-/// `WriteMarketToStream`: Delphi does not send them in `GetMarketsList`, but it
-/// mutates them inline while processing trades. They live on `Market` (like the
-/// balance/position and arbitrage live state above) so a trades datagram updates
-/// the per-market object in place through its own lock, instead of a parallel
-/// `MarketsState` map that would force a full copy-on-write clone of the whole
-/// markets container on every trades datagram.
+/// These are not part of the wire market-list snapshot. They live on `Market`
+/// (like the balance/position and arbitrage live state above) so a trades
+/// datagram updates the per-market object in place through its own lock,
+/// instead of a parallel `MarketsState` map that would force a full
+/// copy-on-write clone of the whole markets container on every trades datagram.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct MarketTradeState {
-    /// Delphi `TMarket.LastGotAllTrades` (`GetTimeMS`) for futures trades.
+    /// Last futures-trades update time (`GetTimeMS` units).
     pub last_got_all_trades_ms: i64,
-    /// Delphi `TMarket.LastGotSpotTrades` (`GetTimeMS`) for spot trades.
+    /// Last spot-trades update time (`GetTimeMS` units).
     pub last_got_spot_trades_ms: i64,
-    /// Delphi `TMarket.LastTradePrice`.
+    /// Last futures trade price.
     pub last_trade_price: f64,
-    /// Delphi `TMarket.LastBuyPrice`; yes, Delphi updates this on `O_Sell`.
+    /// Last buy-side tail price; updated from sell-maker rows by the core model.
     pub last_buy_price: f64,
-    /// Delphi `TMarket.LastSellPrice`; Delphi updates this on `O_Buy`.
+    /// Last sell-side tail price; updated from buy-maker rows by the core model.
     pub last_sell_price: f64,
-    /// Delphi `TMarket.LastTradePriceEMA15`.
+    /// 15-step EMA of last futures trade price.
     pub last_trade_price_ema15: f64,
-    /// Delphi `TMarket.LastTradePriceEMA5`.
+    /// 5-step EMA of last futures trade price.
     pub last_trade_price_ema5: f64,
-    /// Delphi `TMarket.LastTradeKind = O_Sell`.
+    /// Whether the last futures trade row was sell-side.
     pub last_trade_was_sell: bool,
 }
 
@@ -772,35 +766,33 @@ impl MarketTradeState {
 
 /// Per-market price snapshot updated by `emk_UpdateMarketsList`.
 ///
-/// These are Delphi `TMarket` live price fields. They live on `Market` (like the
-/// balance/position and trade-tail state) so an `emk_UpdateMarketsList` price
-/// apply or an order-book `ChartPriceStep` refresh mutates the per-market object
-/// in place through its own lock, instead of a parallel `MarketsState.prices`
-/// vector that would force a copy-on-write clone of the whole price vector on
-/// every order-book datagram.
+/// These live on the retained `Market` object, like balance/position and
+/// trade-tail state. Price refreshes and order-book `ChartPriceStep` updates
+/// mutate one market object in place through its own lock, instead of cloning a
+/// parallel price vector on every order-book datagram.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct MarketPrice {
     /// Best bid price.
     pub bid: f64,
     /// Best ask price.
     pub ask: f64,
-    /// Delphi `TMarket.LastBid`, updated from `Bid` by `UpdateMarketsList`.
+    /// Previous/retained bid value updated from `Bid` by `UpdateMarketsList`.
     pub last_bid: f64,
-    /// Delphi `TMarket.LastAsk`, updated from `Ask` by `UpdateMarketsList`.
+    /// Previous/retained ask value updated from `Ask` by `UpdateMarketsList`.
     pub last_ask: f64,
-    /// Delphi `TMarket.pLast = (Bid + Ask) / 2`.
+    /// Mid price `(Bid + Ask) / 2`.
     pub p_last: f64,
-    /// Delphi `TMarket.MinLotSize`.
+    /// Minimum lot size from the exchange filter.
     pub min_lot_size: f64,
-    /// Delphi `TMarket.ChartPriceStep`, updated by `AddNewAksPrice(Ask)`.
+    /// Chart/orderbook price step updated from ask/orderbook prices.
     ///
     /// Futures retained trade join uses this value for same-price aggregation.
-    /// Delphi updates it only when `Ask > eps`; otherwise the previous value is
-    /// kept.
+    /// It updates only when the incoming price is meaningful; otherwise the
+    /// previous value is kept.
     pub chart_price_step: f64,
     /// Funding rate for perpetual futures, for example `0.0001` = 0.01%.
     pub funding_rate: f64,
-    /// Client-local Delphi `TDateTime` for the next funding charge.
+    /// Wire timestamp for the next funding charge.
     #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub funding_time: f64,
@@ -824,7 +816,7 @@ impl MarketPrice {
     }
 }
 
-/// Delphi `TMarket` signed delta state used by strategies and terminal panels.
+/// Signed market-delta state used by strategies and terminal panels.
 ///
 /// These fields are different from the positive min/max `Last*Delta` values:
 /// `coin_1h_delta` is a signed deviation of the current price from the retained
@@ -966,9 +958,6 @@ impl Market {
     }
 
     /// Listed-on-exchange kind derived from `futures_type`.
-    ///
-    /// Delphi `GetMarketsList` post-pass:
-    /// `FuturesType <> BC_EMPTY -> L_Both`, otherwise `L_Spot`.
     // parity: MoonBot MoonProtoEngine.pas:GetMarketsList (FuturesType -> ListedType)
     pub fn listed_type(&self) -> ListedType {
         if self.futures_type == BaseCurrency::EMPTY {
@@ -978,7 +967,7 @@ impl Market {
         }
     }
 
-    /// Delphi `TMarket.FTotalProfit`.
+    /// Total profit across buy/long/short sides.
     pub fn total_profit(&self) -> f64 {
         self.total_profit_b + self.total_profit_l + self.total_profit_s
     }
@@ -1067,7 +1056,7 @@ impl Default for MarketArbSlot {
 }
 
 impl MarketArbSlot {
-    /// Current write head inside the fixed Delphi 10-point arb ring.
+    /// Current write head inside the fixed 10-point arb ring.
     #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub fn head_index(&self) -> usize {
@@ -1079,7 +1068,7 @@ impl MarketArbSlot {
         self.head as usize
     }
 
-    /// Latest point written to the fixed Delphi ring.
+    /// Latest point written to the fixed ring.
     pub fn latest_point(&self) -> MarketArbPricePoint {
         self.ring[self.head_index()]
     }
@@ -1096,8 +1085,8 @@ impl MarketArbSlot {
     }
 }
 
-/// Read `TMarket` from `EngineStreamReader`, byte-exact with Delphi
-/// `ReadMarketFromStream`.
+/// Read one market from `EngineStreamReader`, byte-exact with the core
+/// market-list stream.
 ///
 /// `ver >= 2` means the payload contains the trailing `FuturesType` byte.
 #[doc(hidden)]
@@ -1262,9 +1251,8 @@ pub(crate) fn apply_delphi_local_funding_shift(
 
 /// Serialize `Market` into an `EngineStreamReader`-compatible byte stream.
 ///
-/// This mirrors Delphi `WriteMarketToStream`. `FuturesType` is always written,
-/// as in the reference implementation; `ver` is kept only for symmetry with
-/// `read_market`.
+/// `FuturesType` is always written by the current wire stream; `ver` is kept
+/// only for symmetry with `read_market`.
 #[cfg(test)]
 pub(crate) fn write_market(out: &mut Vec<u8>, m: &Market, _ver: u16) {
     write_market_with_local_shift(out, m, _ver, current_local_time_shift_minutes())
@@ -1354,7 +1342,7 @@ pub(super) fn write_str(out: &mut Vec<u8>, s: &str) {
 //  CorrMarket struct
 // =============================================================================
 
-/// Delphi `TCorrMarket` correlation-market row.
+/// Correlation-market row.
 ///
 /// Byte-exact with `WriteCorrMarketToStream`
 /// (`MoonProtoSerialization.pas:169-178`).
@@ -1364,7 +1352,7 @@ pub struct CorrMarket {
     pub bn_market_name: String,
     pub bn_market_currency: String,
     pub bn_tick_size: f64,
-    /// Base-currency name; empty string when Delphi had `nil`.
+    /// Base-currency name; empty string when absent.
     pub base_currency_name: String,
 }
 

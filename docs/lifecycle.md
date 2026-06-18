@@ -77,11 +77,12 @@ Base
 changes. If the one-time Init has already completed, the following successful
 reconnect restores required Engine API state automatically.
 
-If an internal runtime bug panics inside the protocol owner, `MoonClient` logs
-the error, discards the half-mutated owner state, rebuilds the protocol owner,
-and reconnects with the retained subscription/strategy intents. Applications
-observe the normal reconnect/ready flow; they do not recreate the client because
-of an internal panic boundary.
+If an internal parser/dispatch bug panics while applying one incoming payload,
+`MoonClient` logs the error, drops that payload, clears unpublished event/action
+buffers, and keeps the runtime alive. This keeps an unexpected bad packet from
+turning into a full terminal reconnect. A broader runtime-loop panic outside the
+per-payload boundary is still guarded by a last-resort rebuild/reconnect path,
+but normal domain dispatch is isolated at payload scope.
 
 `Ready` is not a "all background data is fully loaded" barrier. It waits for
 the mandatory init spine: authorization, BaseCheck/AuthCheck, markets list with
