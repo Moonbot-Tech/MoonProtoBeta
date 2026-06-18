@@ -14,6 +14,8 @@ use crate::state::history::{
     RollingTradeVolumeSnapshot, RollingTradeVolumes, TradeHistoryRow, TradesPacketTimeShift,
 };
 use crate::state::seq_ring::{SeqRingReader, SeqRingWriter};
+#[cfg(any(test, feature = "diagnostics"))]
+use crate::state::seq_ring::{SeqRingRow, SeqRingTimedRow};
 use crate::MoonTime;
 use parking_lot::RwLock;
 
@@ -200,6 +202,72 @@ impl MarketHistoryStore {
     #[cfg(test)]
     pub(crate) fn derived_snapshot(&self) -> MarketDerivedSnapshot {
         self.derived
+    }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    pub(crate) fn diag_fill_to_capacity(&mut self, now_time: MoonTime, span_ms: i64) {
+        let now_ms = now_time.unix_millis();
+        let span_ms = span_ms.max(1);
+        let futures_rows = diag_fill_timed_ring(
+            &mut self.futures_trades,
+            self.readers.futures_trades.as_ref(),
+            now_ms,
+            span_ms,
+            synthetic_trade_row,
+        );
+        diag_fill_timed_ring(
+            &mut self.spot_trades,
+            self.readers.spot_trades.as_ref(),
+            now_ms,
+            span_ms,
+            synthetic_spot_trade_row,
+        );
+        diag_fill_timed_ring(
+            &mut self.liquidations,
+            self.readers.liquidations.as_ref(),
+            now_ms,
+            span_ms,
+            synthetic_liquidation_row,
+        );
+        self.diag_fill_mm_orders_to_capacity(now_ms, span_ms);
+        diag_fill_timed_ring(
+            &mut self.last_prices,
+            self.readers.last_prices.as_ref(),
+            now_ms,
+            span_ms,
+            synthetic_last_price_point,
+        );
+        diag_fill_timed_ring(
+            &mut self.mark_prices,
+            self.readers.mark_prices.as_ref(),
+            now_ms,
+            span_ms,
+            synthetic_mark_price_point,
+        );
+        diag_fill_timed_ring(
+            &mut self.mini_candles,
+            self.readers.mini_candles.as_ref(),
+            now_ms,
+            span_ms,
+            synthetic_mini_candle,
+        );
+        diag_fill_timed_ring(
+            &mut self.candles_5m,
+            self.readers.candles_5m.as_ref(),
+            now_ms,
+            span_ms,
+            synthetic_candle_5m,
+        );
+
+        if let Some(rows) = futures_rows {
+            self.rolling_volumes = RollingTradeVolumes::default();
+            for row in rows {
+                self.rolling_volumes.add_trade(row);
+            }
+        }
+        self.evicted_futures_for_compaction.clear();
+        self.candle_deltas_dirty = true;
+        self.refresh_derived_analytics(now_time);
     }
 
     pub(crate) fn replace_candles_5m_from_snapshot(
@@ -431,6 +499,55 @@ impl MarketHistoryStore {
             None
         }
     }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    fn diag_fill_mm_orders_to_capacity(&mut self, now_ms: i64, span_ms: i64) {
+        let (Some(writer), Some(reader)) =
+            (self.mm_orders.as_mut(), self.readers.mm_orders.as_ref())
+        else {
+            return;
+        };
+        let capacity = reader.capacity();
+        if capacity == 0 {
+            return;
+        }
+
+        let mut existing_orders = Vec::new();
+        reader.copy_last(capacity, &mut existing_orders);
+        if existing_orders.len() >= capacity {
+            return;
+        }
+
+        let mut existing_companions = Vec::new();
+        if let Some(companion_reader) = self.readers.mm_order_companion.as_ref() {
+            companion_reader.copy_last(capacity, &mut existing_companions);
+        }
+        if existing_companions.len() < existing_orders.len() {
+            existing_companions.resize(existing_orders.len(), MMOrderCompanionData::default());
+        }
+
+        let fill = capacity - existing_orders.len();
+        let end_ms = existing_orders
+            .first()
+            .map(|row| row.seq_ring_time_ms().saturating_sub(1))
+            .unwrap_or(now_ms);
+        let mut orders = Vec::with_capacity(capacity);
+        let mut companions = Vec::with_capacity(capacity);
+        for idx in 0..fill {
+            let time = diag_synthetic_time(end_ms, span_ms, idx, fill);
+            orders.push(synthetic_mm_order_row(idx, fill, time));
+            companions.push(synthetic_mm_companion(idx));
+        }
+        orders.extend_from_slice(&existing_orders);
+        companions.extend_from_slice(&existing_companions[..existing_orders.len()]);
+
+        writer.clear();
+        writer.push_batch(&orders);
+        if let Some(companion_writer) = self.mm_order_companion.as_mut() {
+            companion_writer.clear();
+            companion_writer.push_batch(&companions);
+        }
+    }
 }
 
 fn candles_snapshot_is_stale(last_time: MoonTime, now_time: MoonTime) -> bool {
@@ -457,6 +574,159 @@ fn last_mini_time(reader: Option<&SeqRingReader<MiniCandle>>) -> Option<MoonTime
     let mut out = Vec::new();
     reader.copy_last(1, &mut out);
     out.first().map(|row| row.time)
+}
+
+#[cfg(any(test, feature = "diagnostics"))]
+fn diag_fill_timed_ring<T, F>(
+    writer: &mut Option<SeqRingWriter<T>>,
+    reader: Option<&SeqRingReader<T>>,
+    now_ms: i64,
+    span_ms: i64,
+    make_row: F,
+) -> Option<Vec<T>>
+where
+    T: SeqRingRow + SeqRingTimedRow,
+    F: Fn(usize, usize, MoonTime) -> T,
+{
+    let (Some(writer), Some(reader)) = (writer.as_mut(), reader) else {
+        return None;
+    };
+    let capacity = reader.capacity();
+    if capacity == 0 {
+        return Some(Vec::new());
+    }
+
+    let mut existing = Vec::new();
+    reader.copy_last(capacity, &mut existing);
+    if existing.len() >= capacity {
+        return Some(existing);
+    }
+
+    let fill = capacity - existing.len();
+    let end_ms = existing
+        .first()
+        .map(|row| row.seq_ring_time_ms().saturating_sub(1))
+        .unwrap_or(now_ms);
+    let mut rows = Vec::with_capacity(capacity);
+    for idx in 0..fill {
+        let time = diag_synthetic_time(end_ms, span_ms, idx, fill);
+        rows.push(make_row(idx, fill, time));
+    }
+    rows.extend_from_slice(&existing);
+
+    writer.clear();
+    writer.push_batch(&rows);
+    Some(rows)
+}
+
+#[cfg(any(test, feature = "diagnostics"))]
+fn diag_synthetic_time(end_ms: i64, span_ms: i64, idx: usize, count: usize) -> MoonTime {
+    let start_ms = end_ms.saturating_sub(span_ms);
+    let offset = if count <= 1 {
+        0
+    } else {
+        ((span_ms as i128) * (idx as i128) / ((count - 1) as i128)) as i64
+    };
+    MoonTime::from_unix_millis(start_ms.saturating_add(offset))
+}
+
+#[cfg(any(test, feature = "diagnostics"))]
+fn synthetic_price(idx: usize, base: f32) -> f32 {
+    base + (idx % 97) as f32 * 0.11 + (idx / 97) as f32 * 0.01
+}
+
+#[cfg(any(test, feature = "diagnostics"))]
+fn synthetic_trade_row(idx: usize, _count: usize, time: MoonTime) -> TradeHistoryRow {
+    let price = synthetic_price(idx, 100.0);
+    let qty = 0.01 + (idx % 13) as f32 * 0.0025;
+    TradeHistoryRow {
+        time,
+        price,
+        qty: if idx % 2 == 0 { qty } else { -qty },
+    }
+}
+
+#[cfg(any(test, feature = "diagnostics"))]
+fn synthetic_spot_trade_row(idx: usize, count: usize, time: MoonTime) -> TradeHistoryRow {
+    let mut row = synthetic_trade_row(idx, count, time);
+    row.price += 0.37;
+    row
+}
+
+#[cfg(any(test, feature = "diagnostics"))]
+fn synthetic_liquidation_row(idx: usize, count: usize, time: MoonTime) -> TradeHistoryRow {
+    let mut row = synthetic_trade_row(idx, count, time);
+    row.price += 0.73;
+    row.qty *= 3.0;
+    row
+}
+
+#[cfg(any(test, feature = "diagnostics"))]
+fn synthetic_mm_order_row(idx: usize, _count: usize, time: MoonTime) -> MMOrderHistoryRow {
+    let q = 1.0 + (idx % 11) as f64 * 0.25;
+    MMOrderHistoryRow {
+        time,
+        volume: 100.0 + (idx % 29) as f64 * 7.5,
+        q: if idx % 2 == 0 { q } else { -q },
+    }
+}
+
+#[cfg(any(test, feature = "diagnostics"))]
+fn synthetic_mm_companion(idx: usize) -> MMOrderCompanionData {
+    let mut taker = [0u8; 20];
+    for (byte_idx, byte) in taker.iter_mut().enumerate() {
+        *byte = (idx as u8).wrapping_mul(31).wrapping_add(byte_idx as u8);
+    }
+    MMOrderCompanionData {
+        taker,
+        color: hl_address_color(taker),
+    }
+}
+
+#[cfg(any(test, feature = "diagnostics"))]
+fn synthetic_last_price_point(idx: usize, _count: usize, time: MoonTime) -> LastPricePoint {
+    LastPricePoint {
+        current: synthetic_price(idx, 100.0),
+        time,
+    }
+}
+
+#[cfg(any(test, feature = "diagnostics"))]
+fn synthetic_mark_price_point(idx: usize, _count: usize, time: MoonTime) -> MarkPricePoint {
+    MarkPricePoint {
+        current: synthetic_price(idx, 100.2),
+        time,
+    }
+}
+
+#[cfg(any(test, feature = "diagnostics"))]
+fn synthetic_mini_candle(idx: usize, _count: usize, time: MoonTime) -> MiniCandle {
+    let low = synthetic_price(idx, 99.0);
+    let high = low + 0.8 + (idx % 5) as f32 * 0.03;
+    MiniCandle {
+        time,
+        cnt: 1 + (idx % 17) as i32,
+        min_price: low,
+        max_price: high,
+        buy_vol: 10.0 + (idx % 23) as f32,
+        sell_vol: 8.0 + (idx % 19) as f32,
+    }
+}
+
+#[cfg(any(test, feature = "diagnostics"))]
+fn synthetic_candle_5m(idx: usize, _count: usize, time: MoonTime) -> Candle5mRow {
+    let open = synthetic_price(idx, 100.0);
+    let close = open + if idx % 2 == 0 { 0.35 } else { -0.25 };
+    let high = open.max(close) + 0.55;
+    let low = open.min(close) - 0.45;
+    Candle5mRow {
+        open,
+        close,
+        high,
+        low,
+        volume: 1_000.0 + (idx % 37) as f32 * 11.0,
+        time,
+    }
 }
 
 #[cfg(test)]

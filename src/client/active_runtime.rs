@@ -28,6 +28,10 @@ pub use types::{
     NewOrderTicket, OrderSide, SellOrderParams, SplitOrderParams, TradesStreamMode, VStopParams,
 };
 
+#[cfg(any(test, feature = "diagnostics"))]
+#[doc(hidden)]
+pub const DIAG_MARKET_HISTORY_FILL_SPAN_MS: i64 = 3_600_000;
+
 /// High-level Active Lib client for regular applications.
 ///
 /// `MoonClient::connect` owns the protocol/runtime thread. It runs until
@@ -294,6 +298,46 @@ impl MoonClient {
     #[doc(hidden)]
     pub fn debug_reset_err_emu_diagnostics(&self) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::DebugResetErrEmuDiagnostics)
+    }
+
+    /// Diagnostics-only retained-history fixture hook.
+    ///
+    /// Fills every retained-history ring for `market_name` to its configured
+    /// effective capacity with chronological synthetic rows, then returns only
+    /// after the history worker has published the data. Regular builds do not
+    /// contain this method.
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
+    pub fn diag_fill_market_history_to_capacity(
+        &self,
+        market_name: impl Into<String>,
+        now_ms: i64,
+        span_ms: i64,
+    ) -> Result<bool, MoonClientError> {
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        self.tx
+            .send(RuntimeCommand::DiagFillMarketHistoryToCapacity {
+                market_name: market_name.into(),
+                now_time: crate::MoonTime::from_unix_millis(now_ms),
+                span_ms,
+                reply: reply_tx,
+            })
+            .map_err(|_| MoonClientError::RuntimeStopped)?;
+        reply_rx.recv().map_err(|_| MoonClientError::RuntimeStopped)
+    }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
+    pub fn diag_fill_market_history_to_capacity_default_span(
+        &self,
+        market_name: impl Into<String>,
+        now_ms: i64,
+    ) -> Result<bool, MoonClientError> {
+        self.diag_fill_market_history_to_capacity(
+            market_name,
+            now_ms,
+            DIAG_MARKET_HISTORY_FILL_SPAN_MS,
+        )
     }
 
     /// Drain typed events produced by the Active Lib runtime.

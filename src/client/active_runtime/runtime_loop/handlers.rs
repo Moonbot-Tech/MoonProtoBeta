@@ -212,6 +212,18 @@ pub(super) fn handle_command(
             client.reset_err_emu_diagnostics();
             false
         }
+        #[cfg(any(test, feature = "diagnostics"))]
+        RuntimeCommand::DiagFillMarketHistoryToCapacity {
+            market_name,
+            now_time,
+            span_ms,
+            reply,
+        } => {
+            let filled =
+                dispatcher.diag_fill_market_history_to_capacity(&market_name, now_time, span_ms);
+            let _ = reply.send(filled);
+            false
+        }
         RuntimeCommand::OrderAction(kind) => {
             let result = handle_order_action(client, dispatcher, &kind);
             if !result {

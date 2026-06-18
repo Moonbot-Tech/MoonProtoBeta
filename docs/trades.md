@@ -146,10 +146,9 @@ reader.copy_from_cursor(cursor, limit, &mut out);
 reader.with_from_cursor(cursor, limit, |view| { /* zero-copy slices */ });
 reader.copy_new_since(&mut cursor, limit, &mut out);
 let drain = reader.drain_new_bounded(&mut cursor, limit, &mut out);
-let ((min_price, max_price), meta) =
-    reader.scan_from_cursor(cursor, limit, (f32::MAX, f32::MIN), |acc, row| {
-        (acc.0.min(row.price), acc.1.max(row.price))
-    });
+let (range, meta) = reader.price_range_from_cursor(cursor, limit);
+let (range, meta) = reader.price_range_time_ms(from_ms, to_ms, limit);
+let (volume, meta) = reader.qty_sum_time_ms(from_ms, to_ms, limit);
 ```
 
 `SeqRingCursor` is the application-side "index" into a retained history. A chart
@@ -181,14 +180,42 @@ retained capacity and the read restarted from the oldest row still available.
 The dense locked backend reports `concurrent_miss = false`; the flag is reserved
 for future backends that cannot keep the read range stable without retry.
 
-`scan_from_cursor` is for retained range queries that should not build a second
-long-lived history. It visits rows under the ring read lock in retained sequence
-order and returns caller-defined aggregate state plus the same read metadata.
-Use it for min/max or similar analytics over a retained range. The closure must
-be short and non-blocking: do simple CPU work over the row, not UI rendering,
-logging, I/O, sleeps, or calls back into client code. Use copy methods when the
-caller needs owned rows or wants to do heavier work after releasing the ring
-read lock.
+For common analytics, prefer MoonProto's built-in aggregate helpers:
+
+```rust
+pub struct PriceRange {
+    pub min: f32,
+    pub max: f32,
+    pub count: usize,
+}
+
+pub struct QtySum {
+    pub sum: f64,
+    pub count: usize,
+}
+
+reader.price_range_from_cursor(cursor, limit);
+reader.price_range_time(from_time, to_time, limit);
+reader.price_range_time_ms(from_ms, to_ms, limit);
+reader.qty_sum_from_cursor(cursor, limit);
+reader.qty_sum_time(from_time, to_time, limit);
+reader.qty_sum_time_ms(from_ms, to_ms, limit);
+```
+
+Price ranges are available for trades, LastPrice, MarkPrice, 5m candles, and
+mini-candles. Quantity/volume sums are available for trades, MM-order quantity,
+5m candle volume, and mini-candle buy+sell volume. These helpers run short
+tight loops inside the library and return ready aggregates, so callers do not
+need a custom callback under the retained ring lock for normal min/max/sum
+queries.
+
+`scan_from_cursor` remains available for custom retained range queries that
+should not build a second long-lived history. It visits rows under the ring read
+lock in retained sequence order and returns caller-defined aggregate state plus
+the same read metadata. The closure must be short and non-blocking: do simple
+CPU work over the row, not UI rendering, logging, I/O, sleeps, or calls back
+into client code. Use copy methods when the caller needs owned rows or wants to
+do heavier work after releasing the ring read lock.
 
 Retained rows preserve receive/store order. UDP resend rows can arrive late, so
 timestamp order is not guaranteed. Time-range reads scan/filter retained rows
@@ -266,6 +293,27 @@ without retaining every old trade forever.
 `mm_order_companion` is aligned by slot with `mm_orders` and carries the HyperDex
 taker address plus the MoonBot-compatible display color. Use `taker_hex()` for
 taker logs/tooltips and `color_argb()` for chart coloring.
+
+## Diagnostics Fixture
+
+When built with `feature = "diagnostics"`, `MoonClient` exposes a hidden
+retained-history fixture hook for terminal stress tests:
+
+```rust
+client.diag_fill_market_history_to_capacity(
+    "BTCUSDT",
+    now_ms,
+    moonproto::client::DIAG_MARKET_HISTORY_FILL_SPAN_MS,
+)?;
+```
+
+The hook is not compiled into regular builds. It asks the retained-history
+worker to fill every configured history ring for the market to its effective
+capacity with chronological synthetic rows. Existing live rows remain at the
+newest end; synthetic rows are inserted before them. After the call returns,
+normal `copy_*`, `drain_new_bounded`, and aggregate reads see the fixture as
+ordinary retained history, so a terminal can test full-capacity GPU upload and
+tail eviction without a second fake data path.
 
 ## Candles And Derived Analytics
 

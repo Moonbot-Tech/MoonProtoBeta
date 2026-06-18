@@ -76,6 +76,9 @@ mod subscriptions;
 mod thread_cpu;
 mod transport_state;
 
+#[cfg(any(test, feature = "diagnostics"))]
+#[doc(hidden)]
+pub use active_runtime::DIAG_MARKET_HISTORY_FILL_SPAN_MS;
 pub use active_runtime::{
     ClosePositionParams, CoinCardCandlesTicket, EngineActionTicket, MoonAccount, MoonBalances,
     MoonCandles, MoonChartAlerts, MoonChartText, MoonClient, MoonClientError, MoonClientEvent,
