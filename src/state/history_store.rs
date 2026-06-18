@@ -208,55 +208,56 @@ impl MarketHistoryStore {
     pub(crate) fn diag_fill_to_capacity(&mut self, now_time: MoonTime, span_ms: i64) {
         let now_ms = now_time.unix_millis();
         let span_ms = span_ms.max(1);
+        let price_anchor = self.diag_price_anchor();
         let futures_rows = diag_fill_timed_ring(
             &mut self.futures_trades,
             self.readers.futures_trades.as_ref(),
             now_ms,
             span_ms,
-            synthetic_trade_row,
+            |idx, count, time| synthetic_trade_row(idx, count, time, price_anchor),
         );
         diag_fill_timed_ring(
             &mut self.spot_trades,
             self.readers.spot_trades.as_ref(),
             now_ms,
             span_ms,
-            synthetic_spot_trade_row,
+            |idx, count, time| synthetic_spot_trade_row(idx, count, time, price_anchor),
         );
         diag_fill_timed_ring(
             &mut self.liquidations,
             self.readers.liquidations.as_ref(),
             now_ms,
             span_ms,
-            synthetic_liquidation_row,
+            |idx, count, time| synthetic_liquidation_row(idx, count, time, price_anchor),
         );
-        self.diag_fill_mm_orders_to_capacity(now_ms, span_ms);
+        self.diag_fill_mm_orders_to_capacity(now_ms, span_ms, price_anchor);
         diag_fill_timed_ring(
             &mut self.last_prices,
             self.readers.last_prices.as_ref(),
             now_ms,
             span_ms,
-            synthetic_last_price_point,
+            |idx, count, time| synthetic_last_price_point(idx, count, time, price_anchor),
         );
         diag_fill_timed_ring(
             &mut self.mark_prices,
             self.readers.mark_prices.as_ref(),
             now_ms,
             span_ms,
-            synthetic_mark_price_point,
+            |idx, count, time| synthetic_mark_price_point(idx, count, time, price_anchor),
         );
         diag_fill_timed_ring(
             &mut self.mini_candles,
             self.readers.mini_candles.as_ref(),
             now_ms,
             span_ms,
-            synthetic_mini_candle,
+            |idx, count, time| synthetic_mini_candle(idx, count, time, price_anchor),
         );
         diag_fill_timed_ring(
             &mut self.candles_5m,
             self.readers.candles_5m.as_ref(),
             now_ms,
             span_ms,
-            synthetic_candle_5m,
+            |idx, count, time| synthetic_candle_5m(idx, count, time, price_anchor),
         );
 
         if let Some(rows) = futures_rows {
@@ -501,7 +502,30 @@ impl MarketHistoryStore {
     }
 
     #[cfg(any(test, feature = "diagnostics"))]
-    fn diag_fill_mm_orders_to_capacity(&mut self, now_ms: i64, span_ms: i64) {
+    fn diag_price_anchor(&self) -> f32 {
+        diag_last_reader_price(self.readers.last_prices.as_ref(), |row| row.current)
+            .or_else(|| {
+                diag_last_reader_price(self.readers.mark_prices.as_ref(), |row| row.current)
+            })
+            .or_else(|| {
+                diag_last_reader_price(self.readers.futures_trades.as_ref(), |row| row.price)
+            })
+            .or_else(|| diag_last_reader_price(self.readers.spot_trades.as_ref(), |row| row.price))
+            .or_else(|| {
+                self.current_candle
+                    .and_then(|row| valid_diag_price(row.close))
+            })
+            .or_else(|| diag_last_reader_price(self.readers.candles_5m.as_ref(), |row| row.close))
+            .or_else(|| {
+                diag_last_reader_price(self.readers.mini_candles.as_ref(), |row| {
+                    (row.min_price + row.max_price) * 0.5
+                })
+            })
+            .unwrap_or(100.0)
+    }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    fn diag_fill_mm_orders_to_capacity(&mut self, now_ms: i64, span_ms: i64, price_base: f32) {
         let (Some(writer), Some(reader)) =
             (self.mm_orders.as_mut(), self.readers.mm_orders.as_ref())
         else {
@@ -535,7 +559,7 @@ impl MarketHistoryStore {
         let mut companions = Vec::with_capacity(capacity);
         for idx in 0..fill {
             let time = diag_synthetic_time(end_ms, span_ms, idx, fill);
-            orders.push(synthetic_mm_order_row(idx, fill, time));
+            orders.push(synthetic_mm_order_row(idx, fill, time, price_base));
             companions.push(synthetic_mm_companion(idx));
         }
         orders.extend_from_slice(&existing_orders);
@@ -631,13 +655,47 @@ fn diag_synthetic_time(end_ms: i64, span_ms: i64, idx: usize, count: usize) -> M
 }
 
 #[cfg(any(test, feature = "diagnostics"))]
-fn synthetic_price(idx: usize, base: f32) -> f32 {
-    base + (idx % 97) as f32 * 0.11 + (idx / 97) as f32 * 0.01
+fn valid_diag_price(price: f32) -> Option<f32> {
+    if price.is_finite() && price > 0.0 {
+        Some(price)
+    } else {
+        None
+    }
 }
 
 #[cfg(any(test, feature = "diagnostics"))]
-fn synthetic_trade_row(idx: usize, _count: usize, time: MoonTime) -> TradeHistoryRow {
-    let price = synthetic_price(idx, 100.0);
+fn diag_last_reader_price<T, F>(reader: Option<&SeqRingReader<T>>, price: F) -> Option<f32>
+where
+    T: SeqRingRow,
+    F: Fn(&T) -> f32,
+{
+    let reader = reader?;
+    let mut rows = Vec::new();
+    reader.copy_last(1, &mut rows);
+    rows.first().and_then(|row| valid_diag_price(price(row)))
+}
+
+#[cfg(any(test, feature = "diagnostics"))]
+fn synthetic_price(idx: usize, count: usize, base: f32) -> f32 {
+    let base = valid_diag_price(base).unwrap_or(100.0);
+    let progress = if count <= 1 {
+        1.0
+    } else {
+        idx as f32 / (count - 1) as f32
+    };
+    let trend = (progress - 1.0) * 0.003;
+    let wave = ((idx % 17) as f32 - 8.0) * 0.00025;
+    (base * (1.0 + trend + wave)).max(f32::MIN_POSITIVE)
+}
+
+#[cfg(any(test, feature = "diagnostics"))]
+fn synthetic_trade_row(
+    idx: usize,
+    count: usize,
+    time: MoonTime,
+    price_base: f32,
+) -> TradeHistoryRow {
+    let price = synthetic_price(idx, count, price_base);
     let qty = 0.01 + (idx % 13) as f32 * 0.0025;
     TradeHistoryRow {
         time,
@@ -647,26 +705,41 @@ fn synthetic_trade_row(idx: usize, _count: usize, time: MoonTime) -> TradeHistor
 }
 
 #[cfg(any(test, feature = "diagnostics"))]
-fn synthetic_spot_trade_row(idx: usize, count: usize, time: MoonTime) -> TradeHistoryRow {
-    let mut row = synthetic_trade_row(idx, count, time);
-    row.price += 0.37;
+fn synthetic_spot_trade_row(
+    idx: usize,
+    count: usize,
+    time: MoonTime,
+    price_base: f32,
+) -> TradeHistoryRow {
+    let mut row = synthetic_trade_row(idx, count, time, price_base);
+    row.price *= 1.0003;
     row
 }
 
 #[cfg(any(test, feature = "diagnostics"))]
-fn synthetic_liquidation_row(idx: usize, count: usize, time: MoonTime) -> TradeHistoryRow {
-    let mut row = synthetic_trade_row(idx, count, time);
-    row.price += 0.73;
+fn synthetic_liquidation_row(
+    idx: usize,
+    count: usize,
+    time: MoonTime,
+    price_base: f32,
+) -> TradeHistoryRow {
+    let mut row = synthetic_trade_row(idx, count, time, price_base);
+    row.price *= 0.9991;
     row.qty *= 3.0;
     row
 }
 
 #[cfg(any(test, feature = "diagnostics"))]
-fn synthetic_mm_order_row(idx: usize, _count: usize, time: MoonTime) -> MMOrderHistoryRow {
+fn synthetic_mm_order_row(
+    idx: usize,
+    count: usize,
+    time: MoonTime,
+    price_base: f32,
+) -> MMOrderHistoryRow {
     let q = 1.0 + (idx % 11) as f64 * 0.25;
     MMOrderHistoryRow {
         time,
-        volume: 100.0 + (idx % 29) as f64 * 7.5,
+        volume: synthetic_price(idx, count, price_base) as f64,
         q: if idx % 2 == 0 { q } else { -q },
     }
 }
@@ -684,41 +757,52 @@ fn synthetic_mm_companion(idx: usize) -> MMOrderCompanionData {
 }
 
 #[cfg(any(test, feature = "diagnostics"))]
-fn synthetic_last_price_point(idx: usize, _count: usize, time: MoonTime) -> LastPricePoint {
+fn synthetic_last_price_point(
+    idx: usize,
+    count: usize,
+    time: MoonTime,
+    price_base: f32,
+) -> LastPricePoint {
     LastPricePoint {
-        current: synthetic_price(idx, 100.0),
+        current: synthetic_price(idx, count, price_base),
         time,
     }
 }
 
 #[cfg(any(test, feature = "diagnostics"))]
-fn synthetic_mark_price_point(idx: usize, _count: usize, time: MoonTime) -> MarkPricePoint {
+fn synthetic_mark_price_point(
+    idx: usize,
+    count: usize,
+    time: MoonTime,
+    price_base: f32,
+) -> MarkPricePoint {
     MarkPricePoint {
-        current: synthetic_price(idx, 100.2),
+        current: synthetic_price(idx, count, price_base) * 1.0002,
         time,
     }
 }
 
 #[cfg(any(test, feature = "diagnostics"))]
-fn synthetic_mini_candle(idx: usize, _count: usize, time: MoonTime) -> MiniCandle {
-    let low = synthetic_price(idx, 99.0);
-    let high = low + 0.8 + (idx % 5) as f32 * 0.03;
+fn synthetic_mini_candle(idx: usize, count: usize, time: MoonTime, price_base: f32) -> MiniCandle {
+    let mid = synthetic_price(idx, count, price_base);
+    let half_range = (mid * (0.0008 + (idx % 5) as f32 * 0.00005)).max(0.0001);
     MiniCandle {
         time,
         cnt: 1 + (idx % 17) as i32,
-        min_price: low,
-        max_price: high,
+        min_price: mid - half_range,
+        max_price: mid + half_range,
         buy_vol: 10.0 + (idx % 23) as f32,
         sell_vol: 8.0 + (idx % 19) as f32,
     }
 }
 
 #[cfg(any(test, feature = "diagnostics"))]
-fn synthetic_candle_5m(idx: usize, _count: usize, time: MoonTime) -> Candle5mRow {
-    let open = synthetic_price(idx, 100.0);
-    let close = open + if idx % 2 == 0 { 0.35 } else { -0.25 };
-    let high = open.max(close) + 0.55;
-    let low = open.min(close) - 0.45;
+fn synthetic_candle_5m(idx: usize, count: usize, time: MoonTime, price_base: f32) -> Candle5mRow {
+    let open = synthetic_price(idx, count, price_base);
+    let close = open * if idx % 2 == 0 { 1.0004 } else { 0.9997 };
+    let range = (open * 0.0009).max(0.0001);
+    let high = open.max(close) + range;
+    let low = open.min(close) - range;
     Candle5mRow {
         open,
         close,
