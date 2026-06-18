@@ -1,4 +1,3 @@
-use super::config::{MAX_HISTORY_MEMORY_PERCENT, MIN_HISTORY_MEMORY_PERCENT};
 use super::*;
 use crate::state::history::{CandleVolumeSnapshot, DerivedDeltaSnapshot};
 use crate::time::SECONDS_PER_DAY;
@@ -35,37 +34,6 @@ fn small_memory_config_uses_larger_fraction() {
     let large = 16 * GIB;
     assert_eq!(MarketHistoryConfig::history_budget_bytes(small), small / 4);
     assert_eq!(MarketHistoryConfig::history_budget_bytes(large), large / 5);
-}
-
-#[test]
-fn scaled_memory_config_clamps_and_scales_budget() {
-    let total = 16 * GIB;
-    let base = MarketHistoryConfig::history_budget_bytes(total);
-
-    assert_eq!(
-        MarketHistoryConfig::history_budget_bytes_scaled(total, 50),
-        base
-    );
-    assert_eq!(
-        MarketHistoryConfig::history_budget_bytes_scaled(total, 200),
-        base * 2
-    );
-    assert_eq!(
-        MarketHistoryConfig::history_budget_bytes_scaled(total, 999),
-        base * 8
-    );
-    assert_eq!(
-        MarketHistorySizing::auto_scaled(50),
-        MarketHistorySizing::AutoScaled {
-            memory_percent: MIN_HISTORY_MEMORY_PERCENT,
-        }
-    );
-    assert_eq!(
-        MarketHistorySizing::auto_scaled(999),
-        MarketHistorySizing::AutoScaled {
-            memory_percent: MAX_HISTORY_MEMORY_PERCENT,
-        }
-    );
 }
 
 #[test]

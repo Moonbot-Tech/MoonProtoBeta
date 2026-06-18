@@ -76,8 +76,8 @@ pub use orders::{
 #[cfg(test)]
 pub(crate) use seq_ring::SeqRingWriter;
 pub use seq_ring::{
-    SeqRingBounds, SeqRingCursor, SeqRingDrainMeta, SeqRingReadMeta, SeqRingReadView,
-    SeqRingReader, SeqRingRow, SeqRingTimedRow,
+    SeqRingBounds, SeqRingCursor, SeqRingReadMeta, SeqRingReadView, SeqRingReader, SeqRingRow,
+    SeqRingTimedRow,
 };
 pub use settings::{SettingsEvent, SettingsState};
 pub use strats::{StratEvent, StrategyInfo, StratsState};

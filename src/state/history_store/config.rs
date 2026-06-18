@@ -9,9 +9,6 @@ use crate::state::history::{
 };
 
 pub(super) const GIB: usize = 1024 * 1024 * 1024;
-pub(super) const MIN_HISTORY_MEMORY_PERCENT: u16 = 100;
-pub(super) const DEFAULT_HISTORY_MEMORY_PERCENT: u16 = 100;
-pub(super) const MAX_HISTORY_MEMORY_PERCENT: u16 = 800;
 const TRADE_SLOT_BYTES: usize = size_of::<TradeHistoryRow>();
 const MM_ORDER_SLOT_BYTES: usize = size_of::<MMOrderHistoryRow>();
 const MM_COMPANION_SLOT_BYTES: usize = size_of::<MMOrderCompanionData>();
@@ -88,19 +85,10 @@ pub struct MarketHistoryConfig {
 pub enum MarketHistorySizing {
     #[default]
     Auto,
-    AutoScaled {
-        memory_percent: u16,
-    },
     Fixed(MarketHistoryConfig),
 }
 
 impl MarketHistorySizing {
-    pub fn auto_scaled(memory_percent: u16) -> Self {
-        Self::AutoScaled {
-            memory_percent: clamp_history_memory_percent(memory_percent),
-        }
-    }
-
     pub fn fixed(config: MarketHistoryConfig) -> Self {
         Self::Fixed(config)
     }
@@ -108,9 +96,6 @@ impl MarketHistorySizing {
     pub(crate) fn resolve(self, market_count: usize) -> MarketHistoryConfig {
         match self {
             Self::Auto => MarketHistoryConfig::from_system_memory(market_count),
-            Self::AutoScaled { memory_percent } => {
-                MarketHistoryConfig::from_system_memory_scaled(market_count, memory_percent)
-            }
             Self::Fixed(config) => config,
         }
     }
@@ -138,30 +123,14 @@ impl Default for MarketHistoryConfig {
 
 impl MarketHistoryConfig {
     pub fn from_system_memory(market_count: usize) -> Self {
-        Self::from_system_memory_scaled(market_count, DEFAULT_HISTORY_MEMORY_PERCENT)
-    }
-
-    pub fn from_system_memory_scaled(market_count: usize, memory_percent: u16) -> Self {
         system_total_memory_bytes()
-            .map(|total| Self::from_total_memory_bytes_scaled(total, market_count, memory_percent))
+            .map(|total| Self::from_total_memory_bytes(total, market_count))
             .unwrap_or_default()
     }
 
     pub fn from_total_memory_bytes(total_memory_bytes: usize, market_count: usize) -> Self {
-        Self::from_total_memory_bytes_scaled(
-            total_memory_bytes,
-            market_count,
-            DEFAULT_HISTORY_MEMORY_PERCENT,
-        )
-    }
-
-    pub fn from_total_memory_bytes_scaled(
-        total_memory_bytes: usize,
-        market_count: usize,
-        memory_percent: u16,
-    ) -> Self {
         let market_count = market_count.max(1);
-        let budget = Self::history_budget_bytes_scaled(total_memory_bytes, memory_percent);
+        let budget = Self::history_budget_bytes(total_memory_bytes);
         let per_market_budget = budget / market_count;
 
         let futures_trades_capacity =
@@ -200,16 +169,11 @@ impl MarketHistoryConfig {
     }
 
     pub fn history_budget_bytes(total_memory_bytes: usize) -> usize {
-        Self::history_budget_bytes_scaled(total_memory_bytes, DEFAULT_HISTORY_MEMORY_PERCENT)
-    }
-
-    pub fn history_budget_bytes_scaled(total_memory_bytes: usize, memory_percent: u16) -> usize {
-        let base = if total_memory_bytes < 8 * GIB {
+        if total_memory_bytes < 8 * GIB {
             total_memory_bytes / 4
         } else {
             total_memory_bytes / 5
-        };
-        base.saturating_mul(clamp_history_memory_percent(memory_percent) as usize) / 100
+        }
     }
 
     pub fn estimated_bytes_per_market(&self) -> usize {
@@ -223,10 +187,6 @@ impl MarketHistoryConfig {
             + self.mini_candles_capacity * MINI_CANDLE_SLOT_BYTES
             + self.candles_5m_capacity * CANDLE_5M_SLOT_BYTES
     }
-}
-
-pub(super) fn clamp_history_memory_percent(memory_percent: u16) -> u16 {
-    memory_percent.clamp(MIN_HISTORY_MEMORY_PERCENT, MAX_HISTORY_MEMORY_PERCENT)
 }
 
 fn capacity_from_share(
