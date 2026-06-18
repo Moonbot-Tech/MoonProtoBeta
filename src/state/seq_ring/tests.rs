@@ -149,6 +149,79 @@ fn copy_new_since_uses_per_consumer_cursor() {
 }
 
 #[test]
+fn bounded_drain_reports_not_caught_up_when_limit_is_smaller_than_backlog() {
+    let (mut writer, reader) = SeqRingWriter::<u64>::new(8).unwrap();
+    writer.push_batch(&[10, 11, 12, 13, 14]);
+
+    let mut cursor = reader.cursor_from_oldest();
+    let mut out = Vec::new();
+    let meta = reader.copy_new_since_bounded_all(&mut cursor, 2, &mut out);
+
+    assert_eq!(out, vec![10, 11]);
+    assert_eq!(
+        meta,
+        SeqRingDrainMeta {
+            copied: 2,
+            clipped: false,
+            caught_up: false,
+            concurrent_miss: false,
+        }
+    );
+    assert_eq!(cursor.next_seq(), 2);
+
+    let meta = reader.copy_new_since_bounded_all(&mut cursor, 10, &mut out);
+    assert_eq!(out, vec![12, 13, 14]);
+    assert_eq!(
+        meta,
+        SeqRingDrainMeta {
+            copied: 3,
+            clipped: false,
+            caught_up: true,
+            concurrent_miss: false,
+        }
+    );
+    assert_eq!(cursor.next_seq(), 5);
+}
+
+#[test]
+fn bounded_drain_reports_clipped_when_cursor_fell_behind_retention() {
+    let (mut writer, reader) = SeqRingWriter::<u64>::new(3).unwrap();
+    writer.push_batch(&[10, 11, 12, 13, 14]);
+
+    let mut cursor = SeqRingCursor::from_next_seq(0);
+    let mut out = Vec::new();
+    let meta = reader.copy_new_since_bounded_all(&mut cursor, 10, &mut out);
+
+    assert_eq!(out, vec![12, 13, 14]);
+    assert_eq!(
+        meta,
+        SeqRingDrainMeta {
+            copied: 3,
+            clipped: true,
+            caught_up: true,
+            concurrent_miss: false,
+        }
+    );
+    assert_eq!(cursor.next_seq(), 5);
+}
+
+#[test]
+fn scan_from_cursor_visits_retained_range_without_copying_rows() {
+    let (mut writer, reader) = SeqRingWriter::<u64>::new(8).unwrap();
+    writer.push_batch(&[10, 40, 20, 30]);
+
+    let cursor = reader.cursor_from_oldest();
+    let ((min, max), meta) =
+        reader.scan_from_cursor(cursor, 3, (u64::MAX, 0), |(min, max), row| {
+            (min.min(*row), max.max(*row))
+        });
+
+    assert_eq!((min, max), (10, 40));
+    assert_eq!(meta.copied, 3);
+    assert!(!meta.clipped);
+}
+
+#[test]
 fn copy_from_time_hides_sequence_coordinates() {
     let (mut writer, reader) = SeqRingWriter::<TimedRow>::new(8).unwrap();
     for i in 0..6 {
@@ -178,6 +251,40 @@ fn copy_from_time_hides_sequence_coordinates() {
             TimedRow {
                 time_ms: 2_250,
                 value: 5,
+            },
+        ]
+    );
+}
+
+#[test]
+fn millisecond_time_range_helper_returns_rows_in_sequence_order() {
+    let (mut writer, reader) = SeqRingWriter::<TimedRow>::new(8).unwrap();
+    for i in 0..6 {
+        writer.push(TimedRow {
+            time_ms: 1_000 + i * 250,
+            value: i,
+        });
+    }
+
+    let mut out = Vec::new();
+    reader
+        .copy_time_range_ms(1_250, 2_000, 10, &mut out)
+        .unwrap();
+
+    assert_eq!(
+        out,
+        vec![
+            TimedRow {
+                time_ms: 1_250,
+                value: 1,
+            },
+            TimedRow {
+                time_ms: 1_500,
+                value: 2,
+            },
+            TimedRow {
+                time_ms: 1_750,
+                value: 3,
             },
         ]
     );

@@ -72,6 +72,21 @@ pub struct SeqRingReadMeta {
     pub concurrent_miss: bool,
 }
 
+/// Result of draining new retained rows through a per-consumer cursor.
+///
+/// This intentionally omits raw sequence numbers from the public contract.
+/// Consumers only need to know how many rows were copied, whether their cursor
+/// fell behind retention, and whether another drain call is needed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SeqRingDrainMeta {
+    pub copied: usize,
+    pub clipped: bool,
+    pub caught_up: bool,
+    /// Always false for the dense locked backend: the read lock prevents slot
+    /// overwrite during the copy/view. Reserved for future lock-free backends.
+    pub concurrent_miss: bool,
+}
+
 /// Per-consumer "read only new rows" cursor.
 ///
 /// The cursor deliberately belongs to the caller. Each UI/user/strategy thread
@@ -343,6 +358,58 @@ impl<T: SeqRingRow> SeqRingReader<T> {
         meta
     }
 
+    /// Copy new rows after a per-consumer cursor and report whether the caller
+    /// caught up with the retained stream.
+    ///
+    /// This is the UI/tool-friendly drain contract: callers do not need raw
+    /// sequence numbers to distinguish "copied a bounded batch, call again" from
+    /// "caught up". The cursor advances to the actual retained start plus the
+    /// rows copied, so a clipped stale cursor resumes from the oldest retained
+    /// row and then progresses by the copied amount.
+    pub fn copy_new_since_bounded_all(
+        &self,
+        cursor: &mut SeqRingCursor,
+        limit: usize,
+        out: &mut Vec<T>,
+    ) -> SeqRingDrainMeta {
+        let meta = self.copy_from_seq_internal(cursor.next_seq, limit, out);
+        cursor.next_seq = meta.actual_start_seq + meta.copied as u64;
+        SeqRingDrainMeta {
+            copied: meta.copied,
+            clipped: meta.clipped,
+            caught_up: cursor.next_seq >= meta.next_seq,
+            concurrent_miss: meta.concurrent_miss,
+        }
+    }
+
+    /// Scan retained rows from a cursor without building a second history.
+    ///
+    /// The scan runs under the ring read lock and visits rows in retained
+    /// sequence order. Use it for aggregate queries such as min/max over a
+    /// retained range; use copy methods when the caller needs owned rows.
+    pub fn scan_from_cursor<R, F>(
+        &self,
+        cursor: SeqRingCursor,
+        limit: usize,
+        init: R,
+        mut f: F,
+    ) -> (R, SeqRingReadMeta)
+    where
+        F: FnMut(R, &T) -> R,
+    {
+        self.with_from_cursor(cursor, limit, |view| {
+            let mut acc = Some(init);
+            view.for_each(|row| {
+                let current = acc.take().expect("scan accumulator must be present");
+                acc = Some(f(current, row));
+            });
+            (
+                acc.expect("scan accumulator must be present after scan"),
+                view.meta(),
+            )
+        })
+    }
+
     fn with_from_seq_internal<R, F>(&self, start_seq: u64, limit: usize, f: F) -> R
     where
         F: FnOnce(SeqRingReadView<'_, T>) -> R,
@@ -442,6 +509,16 @@ impl<T: SeqRingTimedRow> SeqRingReader<T> {
         Some(meta)
     }
 
+    /// Millisecond-domain variant of [`Self::copy_from_time`].
+    pub fn copy_from_time_ms(
+        &self,
+        time_ms: i64,
+        limit: usize,
+        out: &mut Vec<T>,
+    ) -> Option<SeqRingReadMeta> {
+        self.copy_from_time(MoonTime::from_unix_millis(time_ms), limit, out)
+    }
+
     /// Clears `out` and copies rows with `from_time <= row.time < to_time`.
     pub fn copy_time_range(
         &self,
@@ -482,6 +559,22 @@ impl<T: SeqRingTimedRow> SeqRingReader<T> {
             clipped: time_clipped,
             concurrent_miss: false,
         })
+    }
+
+    /// Millisecond-domain variant of [`Self::copy_time_range`].
+    pub fn copy_time_range_ms(
+        &self,
+        from_ms: i64,
+        to_ms: i64,
+        limit: usize,
+        out: &mut Vec<T>,
+    ) -> Option<SeqRingReadMeta> {
+        self.copy_time_range(
+            MoonTime::from_unix_millis(from_ms),
+            MoonTime::from_unix_millis(to_ms),
+            limit,
+            out,
+        )
     }
 }
 

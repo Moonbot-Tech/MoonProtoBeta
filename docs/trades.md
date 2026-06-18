@@ -138,11 +138,18 @@ Each `SeqRingReader` supports:
 ```rust
 reader.copy_last(limit, &mut out);
 reader.copy_from_time(time, limit, &mut out);
+reader.copy_from_time_ms(from_ms, limit, &mut out);
 reader.copy_time_range(from_time, to_time, limit, &mut out);
+reader.copy_time_range_ms(from_ms, to_ms, limit, &mut out);
 let cursor = reader.cursor_at_or_after_time(time);
 reader.copy_from_cursor(cursor, limit, &mut out);
 reader.with_from_cursor(cursor, limit, |view| { /* zero-copy slices */ });
 reader.copy_new_since(&mut cursor, limit, &mut out);
+let drain = reader.copy_new_since_bounded_all(&mut cursor, limit, &mut out);
+let ((min_price, max_price), meta) =
+    reader.scan_from_cursor(cursor, limit, (f32::MAX, f32::MIN), |acc, row| {
+        (acc.0.min(row.price), acc.1.max(row.price))
+    });
 ```
 
 `SeqRingCursor` is the application-side "index" into a retained history. A chart
@@ -154,6 +161,31 @@ share one cursor between independent UI panels, strategy code, and logs. If
 retained ring capacity; returned rows start from the oldest still retained row.
 Raw sequence-number helpers are diagnostics/test-only; normal terminal code uses
 cursor and time APIs.
+
+For high-throughput consumers that drain in bounded batches, prefer
+`copy_new_since_bounded_all`. It returns a compact public status:
+
+```rust
+pub struct SeqRingDrainMeta {
+    pub copied: usize,
+    pub clipped: bool,
+    pub caught_up: bool,
+    pub concurrent_miss: bool,
+}
+```
+
+`caught_up = false` means the retained stream still had more rows than the
+requested `limit`; call the drain again with the same cursor if you want to
+catch up immediately. `clipped = true` means the cursor was older than the
+retained capacity and the read restarted from the oldest row still available.
+The dense locked backend reports `concurrent_miss = false`; the flag is reserved
+for future backends that cannot keep the read range stable without retry.
+
+`scan_from_cursor` is for retained range queries that should not build a second
+long-lived history. It visits rows under the ring read lock in retained sequence
+order and returns caller-defined aggregate state plus the same read metadata.
+Use it for min/max or similar analytics over a retained range; use copy methods
+when the caller needs owned rows.
 
 Retained rows preserve receive/store order. UDP resend rows can arrive late, so
 timestamp order is not guaranteed. Time-range reads scan/filter retained rows
@@ -310,13 +342,29 @@ pub struct MarketHistoryConfig {
 
 impl MarketHistoryConfig {
     pub fn from_system_memory(market_count: usize) -> Self;
+    pub fn from_system_memory_with_budget_percent(
+        market_count: usize,
+        budget_percent: u16,
+    ) -> Self;
     pub fn from_total_memory_bytes(total_memory_bytes: usize, market_count: usize) -> Self;
+    pub fn from_total_memory_bytes_with_budget_percent(
+        total_memory_bytes: usize,
+        market_count: usize,
+        budget_percent: u16,
+    ) -> Self;
     pub fn history_budget_bytes(total_memory_bytes: usize) -> usize;
+    pub fn history_budget_bytes_with_budget_percent(
+        total_memory_bytes: usize,
+        budget_percent: u16,
+    ) -> usize;
     pub fn estimated_bytes_per_market(&self) -> usize;
 }
 
 let cfg = ClientConfig::new(host, port, master_key, mac_key)
     .with_market_history(MarketHistorySizing::Auto);
+
+let cfg = ClientConfig::new(host, port, master_key, mac_key)
+    .with_market_history(MarketHistorySizing::auto_with_budget_percent(300));
 
 let cfg = ClientConfig::new(host, port, master_key, mac_key)
     .with_market_history(MarketHistorySizing::fixed(MarketHistoryConfig {
@@ -340,9 +388,11 @@ can never desync. This keeps the same dense hot-path shape as the production
 core: compact rows, predictable scans, and no per-item allocation.
 `MarketHistorySizing::Auto` is the default: `MoonClient` waits until the market
 list and the requested trade-storage scope are known, then sizes per-market
-rings from system memory. Use `MarketHistorySizing::fixed(config)` when the
-application wants exact capacities or wants to disable selected retained
-categories with `0`.
+rings from system memory. `MarketHistorySizing::auto_with_budget_percent(value)`
+keeps the same memory-aware split but scales the retained-history budget; values
+are clamped to `100..=800`, with `100` equal to the default. Use
+`MarketHistorySizing::fixed(config)` when the application wants exact capacities
+or wants to disable selected retained categories with `0`.
 
 `MoonClient` creates and owns the default history worker automatically when the
 trades subscription scope becomes active. Regular applications use
