@@ -155,7 +155,7 @@ fn bounded_drain_reports_not_caught_up_when_limit_is_smaller_than_backlog() {
 
     let mut cursor = reader.cursor_from_oldest();
     let mut out = Vec::new();
-    let meta = reader.copy_new_since_bounded_all(&mut cursor, 2, &mut out);
+    let meta = reader.drain_new_bounded(&mut cursor, 2, &mut out);
 
     assert_eq!(out, vec![10, 11]);
     assert_eq!(
@@ -169,7 +169,7 @@ fn bounded_drain_reports_not_caught_up_when_limit_is_smaller_than_backlog() {
     );
     assert_eq!(cursor.next_seq(), 2);
 
-    let meta = reader.copy_new_since_bounded_all(&mut cursor, 10, &mut out);
+    let meta = reader.drain_new_bounded(&mut cursor, 10, &mut out);
     assert_eq!(out, vec![12, 13, 14]);
     assert_eq!(
         meta,
@@ -190,7 +190,7 @@ fn bounded_drain_reports_clipped_when_cursor_fell_behind_retention() {
 
     let mut cursor = SeqRingCursor::from_next_seq(0);
     let mut out = Vec::new();
-    let meta = reader.copy_new_since_bounded_all(&mut cursor, 10, &mut out);
+    let meta = reader.drain_new_bounded(&mut cursor, 10, &mut out);
 
     assert_eq!(out, vec![12, 13, 14]);
     assert_eq!(

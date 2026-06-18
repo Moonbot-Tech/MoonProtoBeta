@@ -366,7 +366,7 @@ impl<T: SeqRingRow> SeqRingReader<T> {
     /// "caught up". The cursor advances to the actual retained start plus the
     /// rows copied, so a clipped stale cursor resumes from the oldest retained
     /// row and then progresses by the copied amount.
-    pub fn copy_new_since_bounded_all(
+    pub fn drain_new_bounded(
         &self,
         cursor: &mut SeqRingCursor,
         limit: usize,
@@ -387,6 +387,10 @@ impl<T: SeqRingRow> SeqRingReader<T> {
     /// The scan runs under the ring read lock and visits rows in retained
     /// sequence order. Use it for aggregate queries such as min/max over a
     /// retained range; use copy methods when the caller needs owned rows.
+    ///
+    /// Keep `f` short and non-blocking. It runs while this retained-history
+    /// ring is read-locked, so it should do simple CPU work over the row, not
+    /// UI rendering, logging, I/O, sleeps, or calls back into client code.
     pub fn scan_from_cursor<R, F>(
         &self,
         cursor: SeqRingCursor,
@@ -426,6 +430,9 @@ impl<T: SeqRingRow> SeqRingReader<T> {
 
     /// Lock the dense ring and expose a retained range from a cursor as
     /// zero-copy slices for the duration of `f`.
+    ///
+    /// Keep `f` short and non-blocking. This is the low-level borrowed-slice
+    /// path: the read lock is held until `f` returns.
     pub fn with_from_cursor<R, F>(&self, cursor: SeqRingCursor, limit: usize, f: F) -> R
     where
         F: FnOnce(SeqRingReadView<'_, T>) -> R,
