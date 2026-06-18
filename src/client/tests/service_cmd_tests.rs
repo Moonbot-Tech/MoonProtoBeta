@@ -1,7 +1,8 @@
 use super::*;
 use crate::events::{Event, EventDispatcher};
 use crate::transport::{
-    outer_light_crypt, ClientMsgHeader, MacContext, ServerMsgHeader, TRANSPORT_VER,
+    outer_light_crypt, ClientMsgHeader, MacContext, ServerMsgHeader, CLIENT_HDR_SIZE,
+    TRANSPORT_VER,
 };
 
 static ERR_EMU_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -53,7 +54,6 @@ fn pack_server_packet(mac_key: &MoonKey, cmd: Command, payload: &[u8]) -> Vec<u8
 }
 
 fn unpack_client_packet(mac_key: &MoonKey, raw: &[u8]) -> (ClientMsgHeader, Vec<u8>) {
-    const CLIENT_HDR_SIZE: usize = 15;
     let mut buf = raw.to_vec();
     outer_light_crypt(&mut buf, MacContext::new(mac_key).obf_key());
     let hdr = ClientMsgHeader::from_bytes(&buf).unwrap();
@@ -66,10 +66,19 @@ fn unpack_client_packet(mac_key: &MoonKey, raw: &[u8]) -> (ClientMsgHeader, Vec<
 }
 
 fn recv_client_packet(server_sock: &UdpSocket, client: &mut Client) -> (ClientMsgHeader, Vec<u8>) {
+    let (hdr, payload, _) = recv_client_packet_with_raw_len(server_sock, client);
+    (hdr, payload)
+}
+
+fn recv_client_packet_with_raw_len(
+    server_sock: &UdpSocket,
+    client: &mut Client,
+) -> (ClientMsgHeader, Vec<u8>, usize) {
     let _events = pump_inline_reader_collect(client);
     let mut ack_buf = [0u8; 2048];
     let (n, _from) = server_sock.recv_from(&mut ack_buf).unwrap();
-    unpack_client_packet(&client.cfg.mac_key, &ack_buf[..n])
+    let (hdr, payload) = unpack_client_packet(&client.cfg.mac_key, &ack_buf[..n]);
+    (hdr, payload, n)
 }
 
 fn recv_client_packet_with_events(
@@ -590,7 +599,8 @@ fn reader_handles_size_test_without_main_loop_tick() {
     let packet = pack_server_packet(&client.cfg.mac_key, Command::SizeTest, &size_test);
     server_sock.send_to(&packet, client_addr).unwrap();
 
-    let (hdr, ack_payload) = recv_client_packet(&server_sock, &mut client);
+    let (hdr, ack_payload, ack_wire_len) =
+        recv_client_packet_with_raw_len(&server_sock, &mut client);
     wait_reader_total_recv(&mut client, packet.len() as u64);
     assert_no_inline_reader_events(
         &mut client,
@@ -598,7 +608,8 @@ fn reader_handles_size_test_without_main_loop_tick() {
     );
 
     assert_eq!(hdr.cmd, Command::SizeAck.to_byte());
-    assert_eq!(ack_payload.len(), size as usize);
+    assert_eq!(ack_wire_len, size as usize);
+    assert_eq!(ack_payload.len(), size as usize - CLIENT_HDR_SIZE);
     assert_eq!(&ack_payload[0..2], &size.to_le_bytes());
     assert_eq!(&ack_payload[4..6], &series.to_le_bytes());
     assert_eq!(client.recv.data_read_state.data_size_ack_series_num, series);
@@ -634,7 +645,8 @@ fn reader_handles_probe_mtu_without_main_loop_tick() {
     let packet = pack_server_packet(&client.cfg.mac_key, Command::ProbeMTU, &probe);
     server_sock.send_to(&packet, client_addr).unwrap();
 
-    let (hdr, ack_payload) = recv_client_packet(&server_sock, &mut client);
+    let (hdr, ack_payload, ack_wire_len) =
+        recv_client_packet_with_raw_len(&server_sock, &mut client);
     wait_reader_total_recv(&mut client, packet.len() as u64);
     assert_no_inline_reader_events(
         &mut client,
@@ -642,7 +654,8 @@ fn reader_handles_probe_mtu_without_main_loop_tick() {
     );
 
     assert_eq!(hdr.cmd, Command::ProbeMTUAck.to_byte());
-    assert_eq!(ack_payload.len(), test_size as usize);
+    assert_eq!(ack_wire_len, test_size as usize);
+    assert_eq!(ack_payload.len(), test_size as usize - CLIENT_HDR_SIZE);
     assert_eq!(&ack_payload[0..2], &probe_id.to_le_bytes());
     assert_eq!(ack_payload[2], probe_index);
     assert_eq!(&ack_payload[3..5], &test_size.to_le_bytes());

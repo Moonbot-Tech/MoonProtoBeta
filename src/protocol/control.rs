@@ -5,6 +5,8 @@ use zerocopy::byteorder::little_endian::{
 };
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
+use crate::transport::CLIENT_HDR_SIZE;
+
 pub(crate) const PING_SIZE: usize = std::mem::size_of::<WirePing>();
 const _: [(); 54] = [(); PING_SIZE];
 pub(crate) const SIZE_TEST_SIZE: usize = std::mem::size_of::<WireSizeTestData>();
@@ -115,15 +117,15 @@ impl SizeTestData {
         })
     }
 
-    pub(crate) fn ack_bytes(size: u16, series_num: u16) -> Vec<u8> {
-        let mut out = vec![0u8; size as usize];
+    pub(crate) fn ack_bytes(size: u16, series_num: u16) -> Option<Vec<u8>> {
+        let mut out = padded_client_payload(size, SIZE_TEST_SIZE)?;
         let wire = WireSizeTestData {
             size: LeU16::new(size),
             packet_num: LeU16::new(0),
             series_num: LeU16::new(series_num),
         };
         out[..SIZE_TEST_SIZE].copy_from_slice(wire.as_bytes());
-        out
+        Some(out)
     }
 }
 
@@ -163,16 +165,24 @@ impl ProbeMtu {
         })
     }
 
-    pub(crate) fn ack_bytes(self) -> Vec<u8> {
-        let mut out = vec![0u8; self.test_size as usize];
+    pub(crate) fn ack_bytes(self) -> Option<Vec<u8>> {
+        let mut out = padded_client_payload(self.test_size, PROBE_MTU_ACK_SIZE)?;
         let wire = WireProbeMtuAck {
             probe_id: LeU16::new(self.probe_id),
             probe_index: self.probe_index,
             received_size: LeU16::new(self.test_size),
         };
         out[..PROBE_MTU_ACK_SIZE].copy_from_slice(wire.as_bytes());
-        out
+        Some(out)
     }
+}
+
+fn padded_client_payload(total_datagram_size: u16, record_size: usize) -> Option<Vec<u8>> {
+    let payload_len = usize::from(total_datagram_size).checked_sub(CLIENT_HDR_SIZE)?;
+    if payload_len < record_size {
+        return None;
+    }
+    Some(vec![0u8; payload_len])
 }
 
 #[cfg(test)]
@@ -193,10 +203,11 @@ mod tests {
 
     #[test]
     fn size_test_ack_writes_fixed_header_and_zero_packet_num() {
-        let ack = SizeTestData::ack_bytes(8, 0x1234);
+        let total_size = (CLIENT_HDR_SIZE + 8) as u16;
+        let ack = SizeTestData::ack_bytes(total_size, 0x1234).unwrap();
 
         assert_eq!(ack.len(), 8);
-        assert_eq!(&ack[0..2], &8u16.to_le_bytes());
+        assert_eq!(&ack[0..2], &total_size.to_le_bytes());
         assert_eq!(&ack[2..4], &0u16.to_le_bytes());
         assert_eq!(&ack[4..6], &0x1234u16.to_le_bytes());
     }
@@ -206,13 +217,13 @@ mod tests {
         let probe = ProbeMtu {
             probe_id: 0xAABB,
             probe_index: 1,
-            test_size: 7,
+            test_size: (CLIENT_HDR_SIZE + 7) as u16,
         };
-        let ack = probe.ack_bytes();
+        let ack = probe.ack_bytes().unwrap();
 
         assert_eq!(ack.len(), 7);
         assert_eq!(&ack[0..2], &0xAABBu16.to_le_bytes());
         assert_eq!(ack[2], 1);
-        assert_eq!(&ack[3..5], &7u16.to_le_bytes());
+        assert_eq!(&ack[3..5], &((CLIENT_HDR_SIZE + 7) as u16).to_le_bytes());
     }
 }
