@@ -9,6 +9,9 @@ use crate::state::history::{
 };
 
 pub(super) const GIB: usize = 1024 * 1024 * 1024;
+const DEFAULT_HISTORY_BUDGET_PERCENT: u16 = 100;
+const MIN_HISTORY_BUDGET_PERCENT: u16 = 100;
+const MAX_HISTORY_BUDGET_PERCENT: u16 = 800;
 const TRADE_SLOT_BYTES: usize = size_of::<TradeHistoryRow>();
 const MM_ORDER_SLOT_BYTES: usize = size_of::<MMOrderHistoryRow>();
 const MM_COMPANION_SLOT_BYTES: usize = size_of::<MMOrderCompanionData>();
@@ -85,17 +88,38 @@ pub struct MarketHistoryConfig {
 pub enum MarketHistorySizing {
     #[default]
     Auto,
+    /// Auto sizing with a user-visible memory budget multiplier.
+    ///
+    /// `100` means the default memory-aware budget. Larger values keep the same
+    /// proportional split between rings but allow more retained rows, clamped to
+    /// `100..=800` like MoonBot's chart/trade memory setting.
+    AutoBudgetPercent(u16),
     Fixed(MarketHistoryConfig),
 }
 
 impl MarketHistorySizing {
+    pub const DEFAULT_BUDGET_PERCENT: u16 = DEFAULT_HISTORY_BUDGET_PERCENT;
+    pub const MIN_BUDGET_PERCENT: u16 = MIN_HISTORY_BUDGET_PERCENT;
+    pub const MAX_BUDGET_PERCENT: u16 = MAX_HISTORY_BUDGET_PERCENT;
+
     pub fn fixed(config: MarketHistoryConfig) -> Self {
         Self::Fixed(config)
+    }
+
+    pub fn auto_with_budget_percent(percent: u16) -> Self {
+        Self::AutoBudgetPercent(Self::clamp_budget_percent(percent))
+    }
+
+    pub fn clamp_budget_percent(percent: u16) -> u16 {
+        percent.clamp(MIN_HISTORY_BUDGET_PERCENT, MAX_HISTORY_BUDGET_PERCENT)
     }
 
     pub(crate) fn resolve(self, market_count: usize) -> MarketHistoryConfig {
         match self {
             Self::Auto => MarketHistoryConfig::from_system_memory(market_count),
+            Self::AutoBudgetPercent(percent) => {
+                MarketHistoryConfig::from_system_memory_with_budget_percent(market_count, percent)
+            }
             Self::Fixed(config) => config,
         }
     }
@@ -123,14 +147,40 @@ impl Default for MarketHistoryConfig {
 
 impl MarketHistoryConfig {
     pub fn from_system_memory(market_count: usize) -> Self {
+        Self::from_system_memory_with_budget_percent(market_count, DEFAULT_HISTORY_BUDGET_PERCENT)
+    }
+
+    pub fn from_system_memory_with_budget_percent(
+        market_count: usize,
+        budget_percent: u16,
+    ) -> Self {
         system_total_memory_bytes()
-            .map(|total| Self::from_total_memory_bytes(total, market_count))
+            .map(|total| {
+                Self::from_total_memory_bytes_with_budget_percent(
+                    total,
+                    market_count,
+                    budget_percent,
+                )
+            })
             .unwrap_or_default()
     }
 
     pub fn from_total_memory_bytes(total_memory_bytes: usize, market_count: usize) -> Self {
+        Self::from_total_memory_bytes_with_budget_percent(
+            total_memory_bytes,
+            market_count,
+            DEFAULT_HISTORY_BUDGET_PERCENT,
+        )
+    }
+
+    pub fn from_total_memory_bytes_with_budget_percent(
+        total_memory_bytes: usize,
+        market_count: usize,
+        budget_percent: u16,
+    ) -> Self {
         let market_count = market_count.max(1);
-        let budget = Self::history_budget_bytes(total_memory_bytes);
+        let budget =
+            Self::history_budget_bytes_with_budget_percent(total_memory_bytes, budget_percent);
         let per_market_budget = budget / market_count;
 
         let futures_trades_capacity =
@@ -169,10 +219,21 @@ impl MarketHistoryConfig {
     }
 
     pub fn history_budget_bytes(total_memory_bytes: usize) -> usize {
+        Self::history_budget_bytes_with_budget_percent(
+            total_memory_bytes,
+            DEFAULT_HISTORY_BUDGET_PERCENT,
+        )
+    }
+
+    pub fn history_budget_bytes_with_budget_percent(
+        total_memory_bytes: usize,
+        budget_percent: u16,
+    ) -> usize {
+        let budget_percent = MarketHistorySizing::clamp_budget_percent(budget_percent) as usize;
         if total_memory_bytes < 8 * GIB {
-            total_memory_bytes / 4
+            (total_memory_bytes / 4).saturating_mul(budget_percent) / 100
         } else {
-            total_memory_bytes / 5
+            (total_memory_bytes / 5).saturating_mul(budget_percent) / 100
         }
     }
 

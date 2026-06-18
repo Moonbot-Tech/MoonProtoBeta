@@ -37,6 +37,50 @@ fn small_memory_config_uses_larger_fraction() {
 }
 
 #[test]
+fn auto_budget_percent_clamps_and_scales_memory_budget() {
+    let total = 16 * GIB;
+
+    assert_eq!(
+        MarketHistorySizing::clamp_budget_percent(1),
+        MarketHistorySizing::MIN_BUDGET_PERCENT
+    );
+    assert_eq!(
+        MarketHistorySizing::clamp_budget_percent(900),
+        MarketHistorySizing::MAX_BUDGET_PERCENT
+    );
+    assert_eq!(
+        MarketHistoryConfig::history_budget_bytes_with_budget_percent(total, 250),
+        MarketHistoryConfig::history_budget_bytes(total) * 250 / 100
+    );
+    assert_eq!(
+        MarketHistoryConfig::history_budget_bytes_with_budget_percent(total, 1),
+        MarketHistoryConfig::history_budget_bytes(total)
+    );
+    assert_eq!(
+        MarketHistoryConfig::history_budget_bytes_with_budget_percent(total, 900),
+        MarketHistoryConfig::history_budget_bytes(total) * 800 / 100
+    );
+}
+
+#[test]
+fn auto_sizing_with_budget_percent_preserves_fixed_variant_compatibility() {
+    let total = 16 * GIB;
+    let market_count = 500;
+    let base = MarketHistoryConfig::from_total_memory_bytes(total, market_count);
+    let bigger =
+        MarketHistoryConfig::from_total_memory_bytes_with_budget_percent(total, market_count, 400);
+
+    assert!(bigger.futures_trades_capacity >= base.futures_trades_capacity);
+    assert!(bigger.last_price_capacity >= base.last_price_capacity);
+
+    let fixed = MarketHistoryConfig::default();
+    assert_eq!(
+        MarketHistorySizing::fixed(fixed).resolve(market_count),
+        fixed
+    );
+}
+
+#[test]
 fn default_config_is_safe_for_all_markets_subscription() {
     let cfg = MarketHistoryConfig::default();
     let assumed_large_market_universe = 1_000;
