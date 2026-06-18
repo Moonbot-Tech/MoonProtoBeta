@@ -89,10 +89,16 @@ pub(crate) fn decrypt_command(
 
     let hdr = CryptoHeader::from_bytes(&plaintext)?;
 
-    // Replay protection via slider
+    // Replay protection via slider. Duplicates are expected with UDP retries and
+    // are a normal drop path, so keep them out of the default warning log.
     let is_new = slider.check_revd(hdr.msg_num);
     if !is_new {
-        warn!(target: "moonproto::crypted", "replay/duplicate detected: msg_num={} cmd={}", hdr.msg_num, hdr.cmd);
+        log::trace!(
+            target: "moonproto::crypted",
+            "replay/duplicate detected: msg_num={} cmd={}",
+            hdr.msg_num,
+            hdr.cmd
+        );
         return None;
     }
 
