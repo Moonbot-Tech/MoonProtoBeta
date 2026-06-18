@@ -145,7 +145,7 @@ let cursor = reader.cursor_at_or_after_time(time);
 reader.copy_from_cursor(cursor, limit, &mut out);
 reader.with_from_cursor(cursor, limit, |view| { /* zero-copy slices */ });
 reader.copy_new_since(&mut cursor, limit, &mut out);
-let drain = reader.copy_new_since_bounded_all(&mut cursor, limit, &mut out);
+let drain = reader.drain_new_bounded(&mut cursor, limit, &mut out);
 let ((min_price, max_price), meta) =
     reader.scan_from_cursor(cursor, limit, (f32::MAX, f32::MIN), |acc, row| {
         (acc.0.min(row.price), acc.1.max(row.price))
@@ -163,7 +163,7 @@ Raw sequence-number helpers are diagnostics/test-only; normal terminal code uses
 cursor and time APIs.
 
 For high-throughput consumers that drain in bounded batches, prefer
-`copy_new_since_bounded_all`. It returns a compact public status:
+`drain_new_bounded`. It returns a compact public status:
 
 ```rust
 pub struct SeqRingDrainMeta {
@@ -184,8 +184,11 @@ for future backends that cannot keep the read range stable without retry.
 `scan_from_cursor` is for retained range queries that should not build a second
 long-lived history. It visits rows under the ring read lock in retained sequence
 order and returns caller-defined aggregate state plus the same read metadata.
-Use it for min/max or similar analytics over a retained range; use copy methods
-when the caller needs owned rows.
+Use it for min/max or similar analytics over a retained range. The closure must
+be short and non-blocking: do simple CPU work over the row, not UI rendering,
+logging, I/O, sleeps, or calls back into client code. Use copy methods when the
+caller needs owned rows or wants to do heavier work after releasing the ring
+read lock.
 
 Retained rows preserve receive/store order. UDP resend rows can arrive late, so
 timestamp order is not guaranteed. Time-range reads scan/filter retained rows
