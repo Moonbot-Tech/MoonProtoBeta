@@ -108,6 +108,26 @@ impl Slider {
 
         (ack_start, local_buf[..count].to_vec())
     }
+
+    /// Returns true when this server ACK bitmap confirms the outgoing message.
+    ///
+    /// This is the same range/bit test that Delphi `ApplyRegularHLAck` performs
+    /// against `RecvdSlider`: messages before `StartNum` or outside `RCount`
+    /// are not acknowledged; an in-window set bit means the pending High packet
+    /// can be removed.
+    pub(crate) fn ack_confirms_msg(&self, msg_num: u64) -> bool {
+        if msg_num < self.start_num {
+            return false;
+        }
+        let limit = (self.r_count.max(0) as u64) * 64;
+        let offset = msg_num - self.start_num;
+        if offset >= limit {
+            return false;
+        }
+        let word_idx = (offset >> 6) as usize;
+        let bit_idx = offset & 63;
+        (self.bit_field[word_idx] >> bit_idx) & 1 != 0
+    }
 }
 
 #[cfg(test)]
@@ -120,6 +140,32 @@ mod tests {
         assert!(s.check_revd(1));
         assert!(s.check_revd(2));
         assert!(s.check_revd(100));
+    }
+
+    #[test]
+    fn ack_confirms_only_set_bits_inside_rcount_window() {
+        let mut s = Slider::new();
+        s.start_num = 128;
+        s.r_count = 2;
+        s.bit_field[0] = 1 << 3;
+        s.bit_field[1] = 1 << 5;
+        s.bit_field[2] = u64::MAX;
+
+        assert!(!s.ack_confirms_msg(127));
+        assert!(s.ack_confirms_msg(131));
+        assert!(!s.ack_confirms_msg(132));
+        assert!(s.ack_confirms_msg(128 + 64 + 5));
+        assert!(!s.ack_confirms_msg(128 + 128));
+    }
+
+    #[test]
+    fn ack_confirms_negative_rcount_as_empty_window() {
+        let mut s = Slider::new();
+        s.start_num = 10;
+        s.r_count = -1;
+        s.bit_field[0] = u64::MAX;
+
+        assert!(!s.ack_confirms_msg(10));
     }
 
     #[test]

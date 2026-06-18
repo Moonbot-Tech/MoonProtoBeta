@@ -108,7 +108,12 @@ pub(super) fn poll_auto_candles(
                 let request_uid = merged.uid;
                 #[cfg(any(test, feature = "diagnostics"))]
                 let fallback_uid = pending.auto_candles[i].uid;
-                let summary = dispatcher.apply_candles_snapshot(&merged.markets, client.now_ms());
+                let summary = dispatcher.apply_candles_snapshot(
+                    &merged.markets,
+                    client.now_ms(),
+                    #[cfg(any(test, feature = "diagnostics"))]
+                    Some(client.metrics.protocol_metrics.as_ref()),
+                );
                 pending.auto_candles.swap_remove(i);
                 if let Some(summary) = summary {
                     if let Some(rx) = dispatcher.market_history_barrier_async() {

@@ -93,7 +93,7 @@ pub(crate) use self::reader::parse_strategy_batch_with_schema;
 #[cfg(test)]
 pub(crate) use self::reader::try_read_field_value;
 pub(crate) use self::reader::{
-    parse_strategy_batch_for_each_with_schema_field_types,
+    parse_strategy_batch_for_each_with_schema_field_types_skip_old,
     parse_strategy_batch_with_schema_field_types,
 };
 #[cfg(test)]

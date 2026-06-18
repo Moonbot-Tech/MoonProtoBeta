@@ -157,18 +157,12 @@ impl Client {
             // Merge ACK flags (set union, like Delphi Flags := Flags + ACK.Flags).
             // If no new flag appears, Delphi `ApplyACK` exits before touching
             // the piece list; keep the same no-op machine effect.
-            let mut changed = false;
-            for (dst, src) in s.ack_flags.iter_mut().zip(ack.flags) {
-                let before = *dst;
-                *dst |= src;
-                changed |= before != *dst;
-            }
+            let changed = s.merge_ack_flags(ack.flags);
             if changed {
                 // Delphi server/client fix: ACK progress proves the peer is
                 // alive, so the datagram retry budget starts over.
                 s.retry_count = 0;
-                let complete = (0..s.blocks_count).all(|block| s.is_block_acked(block));
-                if complete {
+                if s.is_fully_acked() {
                     if s.blocks_count > 0 {
                         completed_ratio =
                             Some((s.sent_count as f64 / s.blocks_count as f64 - 1.0) * 100.0);
@@ -191,14 +185,11 @@ impl Client {
                     // datagram clock from unACKed blocks instead of zeroing them.
                     s.refresh_last_checked_from_unacked(_now_ms);
                     if trace_io_enabled() {
-                        let acked = (0..s.blocks_count)
-                            .filter(|&block| s.is_block_acked(block))
-                            .count();
                         eprintln!(
                             "[mp-sliced-ack] t={} d={} acked={}/{} complete=false last_checked={}",
                             trace_elapsed_ms(),
                             s.datagram_num,
-                            acked,
+                            s.acked_count(),
                             s.blocks_count,
                             s.last_checked
                         );

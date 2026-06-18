@@ -2344,7 +2344,12 @@ fn candles_snapshot_ready_after_worker_barrier_exposes_reader_rows() {
     }];
 
     let summary = d
-        .apply_candles_snapshot(&markets, 0)
+        .apply_candles_snapshot(
+            &markets,
+            0,
+            #[cfg(any(test, feature = "diagnostics"))]
+            None,
+        )
         .expect("snapshot is queued to retained history");
     let barrier = d
         .market_history_barrier_async()

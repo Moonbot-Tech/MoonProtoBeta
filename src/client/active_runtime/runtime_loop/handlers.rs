@@ -21,7 +21,7 @@ pub(super) fn drain_commands(
                 return (true, changed);
             }
             Ok(cmd) => {
-                changed |= handle_command(client, dispatcher, cmd, pending);
+                changed |= handle_command_profiled(client, dispatcher, cmd, pending);
             }
             Err(mpsc::TryRecvError::Empty) => return (false, changed),
         }
@@ -54,11 +54,36 @@ pub(super) fn drain_deferred_and_live_commands(
     while let Some(cmd) = deferred.pop_front() {
         match cmd {
             RuntimeCommand::Stop => return (true, changed),
-            cmd => changed |= handle_command(client, dispatcher, cmd, pending),
+            cmd => changed |= handle_command_profiled(client, dispatcher, cmd, pending),
         }
     }
     let (stop, live_changed) = drain_commands(client, dispatcher, rx, pending);
     (stop, changed || live_changed)
+}
+
+fn handle_command_profiled(
+    client: &mut Client,
+    dispatcher: &mut crate::events::EventDispatcher,
+    cmd: RuntimeCommand,
+    pending: &mut RuntimePending,
+) -> bool {
+    #[cfg(any(test, feature = "diagnostics"))]
+    let (kind, payload_len) = cmd.profile_source();
+    #[cfg(any(test, feature = "diagnostics"))]
+    let start = Instant::now();
+    let changed = handle_command(client, dispatcher, cmd, pending);
+    #[cfg(any(test, feature = "diagnostics"))]
+    client
+        .metrics
+        .protocol_metrics
+        .record_profile_phase_labeled(
+            ProfilePhase::RuntimeCommandDispatch,
+            start.elapsed(),
+            crate::client::metrics::RUNTIME_PROFILE_CMD,
+            kind,
+            payload_len,
+        );
+    changed
 }
 
 pub(super) fn handle_command(
@@ -417,16 +442,69 @@ fn handle_strategy_snapshot_batch(
     dispatcher: &mut crate::events::EventDispatcher,
     strategies: Vec<crate::commands::strategy_serializer::StrategySnapshot>,
 ) -> bool {
-    let Some(schema) = dispatcher.strats().strategy_schema().cloned() else {
+    #[cfg(any(test, feature = "diagnostics"))]
+    let strategy_count = strategies.len();
+    if dispatcher.strats().strategy_schema().is_none() {
         log::warn!(
             target: "moonproto::active_runtime",
             "strategy snapshot batch ignored: live strategy schema is not available"
         );
         return false;
-    };
+    }
     let server_epoch = dispatcher.mark_local_strategies_changed();
-    dispatcher.set_local_strategies(&strategies);
-    client.strat_send_snapshot_batch(server_epoch, false, &schema, &strategies);
+    #[cfg(any(test, feature = "diagnostics"))]
+    let state_started = Instant::now();
+    dispatcher.set_local_strategies_owned(strategies);
+    #[cfg(any(test, feature = "diagnostics"))]
+    client
+        .metrics
+        .protocol_metrics
+        .record_profile_phase_labeled(
+            ProfilePhase::StrategySnapshotState,
+            state_started.elapsed(),
+            crate::client::metrics::RUNTIME_PROFILE_CMD,
+            50,
+            strategy_count,
+        );
+    #[cfg(any(test, feature = "diagnostics"))]
+    let serialize_started = Instant::now();
+    let Some(reply) = dispatcher.local_strategy_snapshot_reply() else {
+        log::warn!(
+            target: "moonproto::active_runtime",
+            "strategy snapshot batch ignored: local strategy payload could not be serialized"
+        );
+        return true;
+    };
+    #[cfg(any(test, feature = "diagnostics"))]
+    client
+        .metrics
+        .protocol_metrics
+        .record_profile_phase_labeled(
+            ProfilePhase::StrategySnapshotSerialize,
+            serialize_started.elapsed(),
+            crate::client::metrics::RUNTIME_PROFILE_CMD,
+            50,
+            reply.data.len(),
+        );
+    #[cfg(any(test, feature = "diagnostics"))]
+    let send_started = Instant::now();
+    client.strat_send_snapshot_payload(
+        server_epoch,
+        reply.client_max_last_date,
+        false,
+        &reply.data,
+    );
+    #[cfg(any(test, feature = "diagnostics"))]
+    client
+        .metrics
+        .protocol_metrics
+        .record_profile_phase_labeled(
+            ProfilePhase::StrategySnapshotSend,
+            send_started.elapsed(),
+            crate::client::metrics::RUNTIME_PROFILE_CMD,
+            50,
+            reply.data.len(),
+        );
     true
 }
 

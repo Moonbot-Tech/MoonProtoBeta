@@ -2,17 +2,23 @@
 
 use std::sync::Arc;
 
-use crate::commands::candles::{current_local_time_shift_minutes, DeepPrice};
+use crate::commands::candles::current_local_time_shift_minutes;
+#[cfg(test)]
+use crate::commands::candles::DeepPrice;
 use crate::commands::market::{
     apply_delphi_local_funding_shift, CorrMarketPriceUpdate, EngineStreamReader, Market,
     MarketPriceUpdate, MarketsPricesResponse, CORR_PRICE_ROW_MIN_SIZE,
     MARKET_PRICE_ROW_MIN_SIZE_NO_FUNDING, MARKET_PRICE_ROW_MIN_SIZE_WITH_FUNDING,
     MAX_MARKET_PRICE_UPDATE_ROWS,
 };
+#[cfg(test)]
 use crate::time::MILLIS_PER_HOUR;
+#[cfg(test)]
 use crate::MoonTime;
 
-use super::{same_text_ascii, MarketLastPriceHistoryInput, MarketsEvent, MarketsState};
+use super::{
+    same_text_ascii, MarketHandle, MarketLastPriceHistoryInput, MarketsEvent, MarketsState,
+};
 
 impl MarketsState {
     /// Apply the `emk_UpdateMarketsList` response.
@@ -297,6 +303,7 @@ impl MarketsState {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn apply_candles_delta_baselines<'a, I>(
         &mut self,
         markets: I,
@@ -317,33 +324,62 @@ impl MarketsState {
             else {
                 continue;
             };
-            handle.with_mut(|market| {
-                market.delta_state.coin_1h_avg = baseline.coin_1h_avg;
-                market.delta_state.coin_24h_avg = baseline.coin_24h_avg;
-                market.delta_state.last_update_avg_ms = now_ms;
-                if baseline.coin_1h_avg <= self.eps_profile.eps {
-                    market.delta_state.coin_1h_delta = 0.0;
-                    market.delta_state.coin_1h_delta_ema = 0.0;
-                }
-                if baseline.coin_24h_avg <= self.eps_profile.eps {
-                    market.delta_state.coin_24h_delta = 0.0;
-                    market.delta_state.coin_24h_delta_ema = 0.0;
-                }
-            });
-            if is_global_btc_base_market {
-                if baseline.btc_1h_avg > self.eps_profile.eps {
-                    self.global_deltas.btc_1h_avg = baseline.btc_1h_avg;
-                }
-                if baseline.btc_24h_avg > self.eps_profile.eps {
-                    self.global_deltas.btc_24h_avg = baseline.btc_24h_avg;
-                }
-                if baseline.btc_72h_avg > self.eps_profile.eps {
-                    self.global_deltas.btc_72h_avg = baseline.btc_72h_avg;
-                }
-                self.last_update_delta500_ms = now_ms;
-            }
+            self.apply_candle_delta_baseline(handle, baseline, now_ms, is_global_btc_base_market);
         }
         self.refresh_exchange_signed_deltas();
+    }
+
+    pub(crate) fn apply_candles_delta_baselines_precomputed<'a, I>(
+        &mut self,
+        markets: I,
+        now_ms: i64,
+    ) where
+        I: IntoIterator<Item = (&'a str, CandleDeltaBaseline)>,
+    {
+        let base_usdt_context = self.base_usdt_market_context();
+        for (market_name, baseline) in markets {
+            let Some(handle) = self.handles_by_name.get(market_name).cloned() else {
+                continue;
+            };
+            let is_global_btc_base_market =
+                handle.with(|market| base_usdt_context.is_global_btc_base_market(market));
+            self.apply_candle_delta_baseline(handle, baseline, now_ms, is_global_btc_base_market);
+        }
+        self.refresh_exchange_signed_deltas();
+    }
+
+    fn apply_candle_delta_baseline(
+        &mut self,
+        handle: MarketHandle,
+        baseline: CandleDeltaBaseline,
+        now_ms: i64,
+        is_global_btc_base_market: bool,
+    ) {
+        handle.with_mut(|market| {
+            market.delta_state.coin_1h_avg = baseline.coin_1h_avg;
+            market.delta_state.coin_24h_avg = baseline.coin_24h_avg;
+            market.delta_state.last_update_avg_ms = now_ms;
+            if baseline.coin_1h_avg <= self.eps_profile.eps {
+                market.delta_state.coin_1h_delta = 0.0;
+                market.delta_state.coin_1h_delta_ema = 0.0;
+            }
+            if baseline.coin_24h_avg <= self.eps_profile.eps {
+                market.delta_state.coin_24h_delta = 0.0;
+                market.delta_state.coin_24h_delta_ema = 0.0;
+            }
+        });
+        if is_global_btc_base_market {
+            if baseline.btc_1h_avg > self.eps_profile.eps {
+                self.global_deltas.btc_1h_avg = baseline.btc_1h_avg;
+            }
+            if baseline.btc_24h_avg > self.eps_profile.eps {
+                self.global_deltas.btc_24h_avg = baseline.btc_24h_avg;
+            }
+            if baseline.btc_72h_avg > self.eps_profile.eps {
+                self.global_deltas.btc_72h_avg = baseline.btc_72h_avg;
+            }
+            self.last_update_delta500_ms = now_ms;
+        }
     }
 
     fn apply_global_btc_delta_from_base_price(&mut self, x_avg: f64, now_ms: i64) {
@@ -405,15 +441,16 @@ impl MarketsState {
     }
 }
 
-#[derive(Default)]
-struct CandleDeltaBaseline {
-    coin_1h_avg: f64,
-    coin_24h_avg: f64,
-    btc_1h_avg: f64,
-    btc_24h_avg: f64,
-    btc_72h_avg: f64,
+#[derive(Clone, Copy, Default)]
+pub(crate) struct CandleDeltaBaseline {
+    pub(crate) coin_1h_avg: f64,
+    pub(crate) coin_24h_avg: f64,
+    pub(crate) btc_1h_avg: f64,
+    pub(crate) btc_24h_avg: f64,
+    pub(crate) btc_72h_avg: f64,
 }
 
+#[cfg(test)]
 fn candle_delta_baseline(
     candles: &[DeepPrice],
     now_time: MoonTime,
@@ -475,6 +512,7 @@ fn candle_delta_baseline(
     })
 }
 
+#[cfg(test)]
 fn avg_or_zero(sum: f64, count: usize) -> f64 {
     if count == 0 {
         0.0

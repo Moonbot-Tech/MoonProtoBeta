@@ -91,6 +91,25 @@ pub struct ProtocolMetricsSnapshot {
     pub reader_protocol_over_100us: u64,
     pub reader_protocol_over_1ms: u64,
     pub reader_protocol_over_5ms: u64,
+    /// OS thread CPU time for the same reader-side segments when the platform
+    /// exposes a cheap per-thread clock. This excludes scheduler preemption
+    /// that `Instant` wall timings include.
+    pub reader_thread_cpu_count: u64,
+    pub reader_thread_cpu_ns: u64,
+    pub reader_thread_cpu_max_ns: u64,
+    pub reader_thread_cpu_max_cmd: u8,
+    pub reader_thread_cpu_max_payload_len: u64,
+    pub reader_thread_cpu_over_100us: u64,
+    pub reader_thread_cpu_over_1ms: u64,
+    pub reader_thread_cpu_over_5ms: u64,
+    /// Per-thread CPU cycles where the platform exposes them cheaply
+    /// (Windows `QueryThreadCycleTime`). This is unitless but high-resolution,
+    /// so it is useful when wall time spikes and duration CPU clocks are absent.
+    pub reader_thread_cycles_count: u64,
+    pub reader_thread_cycles_total: u64,
+    pub reader_thread_cycles_max: u64,
+    pub reader_thread_cycles_max_cmd: u8,
+    pub reader_thread_cycles_max_payload_len: u64,
     /// Deliberate Delphi-compatible waits inside reader-side protocol handlers.
     ///
     /// These are not CPU work. The known example is the 32 ms `WhoAreYou` ->
@@ -116,6 +135,16 @@ pub struct ProtocolMetricsSnapshot {
     pub writer_cpu_over_100us: u64,
     pub writer_cpu_over_1ms: u64,
     pub writer_cpu_over_5ms: u64,
+    /// OS thread CPU time for writer/orchestrator CPU-ish segments.
+    pub writer_thread_cpu_count: u64,
+    pub writer_thread_cpu_ns: u64,
+    pub writer_thread_cpu_max_ns: u64,
+    pub writer_thread_cpu_over_100us: u64,
+    pub writer_thread_cpu_over_1ms: u64,
+    pub writer_thread_cpu_over_5ms: u64,
+    pub writer_thread_cycles_count: u64,
+    pub writer_thread_cycles_total: u64,
+    pub writer_thread_cycles_max: u64,
     /// App/event enqueue work done by the protocol owner before user callbacks.
     pub app_enqueue_count: u64,
     pub app_enqueue_ns: u64,
@@ -149,6 +178,16 @@ pub struct ProtocolMetricsSnapshot {
     pub active_dispatch_over_100us: u64,
     pub active_dispatch_over_1ms: u64,
     pub active_dispatch_over_5ms: u64,
+    /// OS thread CPU time / cycles for active/domain dispatch.
+    pub active_dispatch_thread_cpu_count: u64,
+    pub active_dispatch_thread_cpu_ns: u64,
+    pub active_dispatch_thread_cpu_max_ns: u64,
+    pub active_dispatch_thread_cpu_over_100us: u64,
+    pub active_dispatch_thread_cpu_over_1ms: u64,
+    pub active_dispatch_thread_cpu_over_5ms: u64,
+    pub active_dispatch_thread_cycles_count: u64,
+    pub active_dispatch_thread_cycles_total: u64,
+    pub active_dispatch_thread_cycles_max: u64,
     /// Total nanoseconds spent in the send/maintenance phase.
     pub send_phase_ns: u64,
     /// Maximum single send/maintenance phase duration, in nanoseconds.
@@ -161,6 +200,149 @@ pub struct ProtocolMetricsSnapshot {
     /// FireTest prints this so Linux/VPS runs prove the PMTU probing result
     /// instead of leaving it hidden in the transport state.
     pub last_pmtu: u16,
+    /// Detailed diagnostics-only profile phases. These split the broad
+    /// reader/writer/dispatch counters into concrete protocol sections.
+    pub profile_phases: Vec<ProtocolProfilePhaseSnapshot>,
+}
+
+#[cfg(any(test, feature = "diagnostics"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtocolProfilePhaseSnapshot {
+    pub name: &'static str,
+    pub count: u64,
+    pub total_ns: u64,
+    pub max_ns: u64,
+    pub max_cmd: u8,
+    pub max_api_method: u8,
+    pub max_payload_len: u64,
+    pub over_100us: u64,
+    pub over_1ms: u64,
+    pub over_5ms: u64,
+}
+
+#[cfg(any(test, feature = "diagnostics"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProfilePhase {
+    RecvUnpack,
+    RecvRoute,
+    SlicedRecv,
+    DecodeShared,
+    DecodeOwned,
+    DispatchDecoded,
+    ActiveDecode,
+    ActiveDispatch,
+    ActiveActions,
+    DrainEvents,
+    SendMaintenance,
+    SendLockSnapshot,
+    CheckSeningData,
+    RetryPendingH,
+    RetrySliced,
+    InitStep,
+    RuntimePending,
+    PendingAutoCandles,
+    PendingCoinCard,
+    PendingTransferAssets,
+    PendingAccount,
+    PendingEngineActions,
+    RuntimeCommandDrain,
+    RuntimeCommandDispatch,
+    StrategySnapshotState,
+    StrategySnapshotSerialize,
+    StrategySnapshotSend,
+    SnapshotPublish,
+    CandlesSnapshotSync,
+    CandlesSnapshotBaselines,
+    CandlesSnapshotBuildRows,
+    CandlesSnapshotQueue,
+}
+
+#[cfg(any(test, feature = "diagnostics"))]
+pub(crate) const RUNTIME_PROFILE_CMD: u8 = 254;
+
+#[cfg(any(test, feature = "diagnostics"))]
+const PROFILE_PHASE_COUNT: usize = 32;
+
+#[cfg(any(test, feature = "diagnostics"))]
+impl ProfilePhase {
+    #[inline]
+    fn idx(self) -> usize {
+        self as usize
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::RecvUnpack => "recv.unpack",
+            Self::RecvRoute => "recv.route",
+            Self::SlicedRecv => "sliced.recv",
+            Self::DecodeShared => "decode.shared",
+            Self::DecodeOwned => "decode.owned",
+            Self::DispatchDecoded => "dispatch.decoded",
+            Self::ActiveDecode => "active.decode",
+            Self::ActiveDispatch => "active.dispatch",
+            Self::ActiveActions => "active.actions",
+            Self::DrainEvents => "events.drain",
+            Self::SendMaintenance => "send.maintenance",
+            Self::SendLockSnapshot => "send.lock_snapshot",
+            Self::CheckSeningData => "send.check_sening_data",
+            Self::RetryPendingH => "send.retry_pending_h",
+            Self::RetrySliced => "send.retry_sliced",
+            Self::InitStep => "init.step",
+            Self::RuntimePending => "runtime.pending",
+            Self::PendingAutoCandles => "pending.auto_candles",
+            Self::PendingCoinCard => "pending.coin_card",
+            Self::PendingTransferAssets => "pending.transfer_assets",
+            Self::PendingAccount => "pending.account",
+            Self::PendingEngineActions => "pending.engine_actions",
+            Self::RuntimeCommandDrain => "runtime.command_drain",
+            Self::RuntimeCommandDispatch => "runtime.command_dispatch",
+            Self::StrategySnapshotState => "strategy_snapshot.state",
+            Self::StrategySnapshotSerialize => "strategy_snapshot.serialize",
+            Self::StrategySnapshotSend => "strategy_snapshot.send",
+            Self::SnapshotPublish => "snapshot.publish",
+            Self::CandlesSnapshotSync => "candles.snapshot.sync",
+            Self::CandlesSnapshotBaselines => "candles.snapshot.baselines",
+            Self::CandlesSnapshotBuildRows => "candles.snapshot.build_rows",
+            Self::CandlesSnapshotQueue => "candles.snapshot.queue",
+        }
+    }
+
+    fn all() -> [Self; PROFILE_PHASE_COUNT] {
+        [
+            Self::RecvUnpack,
+            Self::RecvRoute,
+            Self::SlicedRecv,
+            Self::DecodeShared,
+            Self::DecodeOwned,
+            Self::DispatchDecoded,
+            Self::ActiveDecode,
+            Self::ActiveDispatch,
+            Self::ActiveActions,
+            Self::DrainEvents,
+            Self::SendMaintenance,
+            Self::SendLockSnapshot,
+            Self::CheckSeningData,
+            Self::RetryPendingH,
+            Self::RetrySliced,
+            Self::InitStep,
+            Self::RuntimePending,
+            Self::PendingAutoCandles,
+            Self::PendingCoinCard,
+            Self::PendingTransferAssets,
+            Self::PendingAccount,
+            Self::PendingEngineActions,
+            Self::RuntimeCommandDrain,
+            Self::RuntimeCommandDispatch,
+            Self::StrategySnapshotState,
+            Self::StrategySnapshotSerialize,
+            Self::StrategySnapshotSend,
+            Self::SnapshotPublish,
+            Self::CandlesSnapshotSync,
+            Self::CandlesSnapshotBaselines,
+            Self::CandlesSnapshotBuildRows,
+            Self::CandlesSnapshotQueue,
+        ]
+    }
 }
 
 #[cfg(any(test, feature = "diagnostics"))]
@@ -175,6 +357,19 @@ pub(crate) struct ProtocolMetrics {
     reader_protocol_over_100us: AtomicU64,
     reader_protocol_over_1ms: AtomicU64,
     reader_protocol_over_5ms: AtomicU64,
+    reader_thread_cpu_count: AtomicU64,
+    reader_thread_cpu_ns: AtomicU64,
+    reader_thread_cpu_max_ns: AtomicU64,
+    reader_thread_cpu_max_cmd: AtomicU64,
+    reader_thread_cpu_max_payload_len: AtomicU64,
+    reader_thread_cpu_over_100us: AtomicU64,
+    reader_thread_cpu_over_1ms: AtomicU64,
+    reader_thread_cpu_over_5ms: AtomicU64,
+    reader_thread_cycles_count: AtomicU64,
+    reader_thread_cycles_total: AtomicU64,
+    reader_thread_cycles_max: AtomicU64,
+    reader_thread_cycles_max_cmd: AtomicU64,
+    reader_thread_cycles_max_payload_len: AtomicU64,
     reader_protocol_wait_count: AtomicU64,
     reader_protocol_wait_ns: AtomicU64,
     reader_protocol_wait_max_ns: AtomicU64,
@@ -189,6 +384,15 @@ pub(crate) struct ProtocolMetrics {
     writer_cpu_over_100us: AtomicU64,
     writer_cpu_over_1ms: AtomicU64,
     writer_cpu_over_5ms: AtomicU64,
+    writer_thread_cpu_count: AtomicU64,
+    writer_thread_cpu_ns: AtomicU64,
+    writer_thread_cpu_max_ns: AtomicU64,
+    writer_thread_cpu_over_100us: AtomicU64,
+    writer_thread_cpu_over_1ms: AtomicU64,
+    writer_thread_cpu_over_5ms: AtomicU64,
+    writer_thread_cycles_count: AtomicU64,
+    writer_thread_cycles_total: AtomicU64,
+    writer_thread_cycles_max: AtomicU64,
     app_enqueue_count: AtomicU64,
     app_enqueue_ns: AtomicU64,
     app_enqueue_max_ns: AtomicU64,
@@ -211,9 +415,27 @@ pub(crate) struct ProtocolMetrics {
     active_dispatch_over_100us: AtomicU64,
     active_dispatch_over_1ms: AtomicU64,
     active_dispatch_over_5ms: AtomicU64,
+    active_dispatch_thread_cpu_count: AtomicU64,
+    active_dispatch_thread_cpu_ns: AtomicU64,
+    active_dispatch_thread_cpu_max_ns: AtomicU64,
+    active_dispatch_thread_cpu_over_100us: AtomicU64,
+    active_dispatch_thread_cpu_over_1ms: AtomicU64,
+    active_dispatch_thread_cpu_over_5ms: AtomicU64,
+    active_dispatch_thread_cycles_count: AtomicU64,
+    active_dispatch_thread_cycles_total: AtomicU64,
+    active_dispatch_thread_cycles_max: AtomicU64,
     send_phase_ns: AtomicU64,
     send_phase_max_ns: AtomicU64,
     last_pmtu: AtomicU64,
+    profile_count: [AtomicU64; PROFILE_PHASE_COUNT],
+    profile_ns: [AtomicU64; PROFILE_PHASE_COUNT],
+    profile_max_ns: [AtomicU64; PROFILE_PHASE_COUNT],
+    profile_max_cmd: [AtomicU64; PROFILE_PHASE_COUNT],
+    profile_max_api_method: [AtomicU64; PROFILE_PHASE_COUNT],
+    profile_max_payload_len: [AtomicU64; PROFILE_PHASE_COUNT],
+    profile_over_100us: [AtomicU64; PROFILE_PHASE_COUNT],
+    profile_over_1ms: [AtomicU64; PROFILE_PHASE_COUNT],
+    profile_over_5ms: [AtomicU64; PROFILE_PHASE_COUNT],
 }
 
 #[cfg(not(any(test, feature = "diagnostics")))]
@@ -254,6 +476,26 @@ impl ProtocolMetrics {
             &self.writer_cpu_over_5ms,
             duration,
         );
+    }
+
+    pub(crate) fn record_writer_thread_cpu(&self, duration: Duration) {
+        record_timing(
+            &self.writer_thread_cpu_count,
+            &self.writer_thread_cpu_ns,
+            &self.writer_thread_cpu_max_ns,
+            &self.writer_thread_cpu_over_100us,
+            &self.writer_thread_cpu_over_1ms,
+            &self.writer_thread_cpu_over_5ms,
+            duration,
+        );
+    }
+
+    pub(crate) fn record_writer_thread_cycles(&self, cycles: u64) {
+        self.writer_thread_cycles_count
+            .fetch_add(1, Ordering::Relaxed);
+        self.writer_thread_cycles_total
+            .fetch_add(cycles, Ordering::Relaxed);
+        let _ = store_max(&self.writer_thread_cycles_max, cycles);
     }
 
     pub(crate) fn record_app_enqueue_labeled(
@@ -318,6 +560,26 @@ impl ProtocolMetrics {
         }
     }
 
+    pub(crate) fn record_active_dispatch_thread_cpu(&self, duration: Duration) {
+        record_timing(
+            &self.active_dispatch_thread_cpu_count,
+            &self.active_dispatch_thread_cpu_ns,
+            &self.active_dispatch_thread_cpu_max_ns,
+            &self.active_dispatch_thread_cpu_over_100us,
+            &self.active_dispatch_thread_cpu_over_1ms,
+            &self.active_dispatch_thread_cpu_over_5ms,
+            duration,
+        );
+    }
+
+    pub(crate) fn record_active_dispatch_thread_cycles(&self, cycles: u64) {
+        self.active_dispatch_thread_cycles_count
+            .fetch_add(1, Ordering::Relaxed);
+        self.active_dispatch_thread_cycles_total
+            .fetch_add(cycles, Ordering::Relaxed);
+        let _ = store_max(&self.active_dispatch_thread_cycles_max, cycles);
+    }
+
     pub(crate) fn snapshot(&self, public_event_queue_len: usize) -> ProtocolMetricsSnapshot {
         ProtocolMetricsSnapshot {
             recv_count: self.recv_count.load(Ordering::Relaxed),
@@ -331,6 +593,24 @@ impl ProtocolMetrics {
             reader_protocol_over_100us: self.reader_protocol_over_100us.load(Ordering::Relaxed),
             reader_protocol_over_1ms: self.reader_protocol_over_1ms.load(Ordering::Relaxed),
             reader_protocol_over_5ms: self.reader_protocol_over_5ms.load(Ordering::Relaxed),
+            reader_thread_cpu_count: self.reader_thread_cpu_count.load(Ordering::Relaxed),
+            reader_thread_cpu_ns: self.reader_thread_cpu_ns.load(Ordering::Relaxed),
+            reader_thread_cpu_max_ns: self.reader_thread_cpu_max_ns.load(Ordering::Relaxed),
+            reader_thread_cpu_max_cmd: self.reader_thread_cpu_max_cmd.load(Ordering::Relaxed) as u8,
+            reader_thread_cpu_max_payload_len: self
+                .reader_thread_cpu_max_payload_len
+                .load(Ordering::Relaxed),
+            reader_thread_cpu_over_100us: self.reader_thread_cpu_over_100us.load(Ordering::Relaxed),
+            reader_thread_cpu_over_1ms: self.reader_thread_cpu_over_1ms.load(Ordering::Relaxed),
+            reader_thread_cpu_over_5ms: self.reader_thread_cpu_over_5ms.load(Ordering::Relaxed),
+            reader_thread_cycles_count: self.reader_thread_cycles_count.load(Ordering::Relaxed),
+            reader_thread_cycles_total: self.reader_thread_cycles_total.load(Ordering::Relaxed),
+            reader_thread_cycles_max: self.reader_thread_cycles_max.load(Ordering::Relaxed),
+            reader_thread_cycles_max_cmd: self.reader_thread_cycles_max_cmd.load(Ordering::Relaxed)
+                as u8,
+            reader_thread_cycles_max_payload_len: self
+                .reader_thread_cycles_max_payload_len
+                .load(Ordering::Relaxed),
             reader_protocol_wait_count: self.reader_protocol_wait_count.load(Ordering::Relaxed),
             reader_protocol_wait_ns: self.reader_protocol_wait_ns.load(Ordering::Relaxed),
             reader_protocol_wait_max_ns: self.reader_protocol_wait_max_ns.load(Ordering::Relaxed),
@@ -348,6 +628,15 @@ impl ProtocolMetrics {
             writer_cpu_over_100us: self.writer_cpu_over_100us.load(Ordering::Relaxed),
             writer_cpu_over_1ms: self.writer_cpu_over_1ms.load(Ordering::Relaxed),
             writer_cpu_over_5ms: self.writer_cpu_over_5ms.load(Ordering::Relaxed),
+            writer_thread_cpu_count: self.writer_thread_cpu_count.load(Ordering::Relaxed),
+            writer_thread_cpu_ns: self.writer_thread_cpu_ns.load(Ordering::Relaxed),
+            writer_thread_cpu_max_ns: self.writer_thread_cpu_max_ns.load(Ordering::Relaxed),
+            writer_thread_cpu_over_100us: self.writer_thread_cpu_over_100us.load(Ordering::Relaxed),
+            writer_thread_cpu_over_1ms: self.writer_thread_cpu_over_1ms.load(Ordering::Relaxed),
+            writer_thread_cpu_over_5ms: self.writer_thread_cpu_over_5ms.load(Ordering::Relaxed),
+            writer_thread_cycles_count: self.writer_thread_cycles_count.load(Ordering::Relaxed),
+            writer_thread_cycles_total: self.writer_thread_cycles_total.load(Ordering::Relaxed),
+            writer_thread_cycles_max: self.writer_thread_cycles_max.load(Ordering::Relaxed),
             app_enqueue_count: self.app_enqueue_count.load(Ordering::Relaxed),
             app_enqueue_ns: self.app_enqueue_ns.load(Ordering::Relaxed),
             app_enqueue_max_ns: self.app_enqueue_max_ns.load(Ordering::Relaxed),
@@ -375,10 +664,38 @@ impl ProtocolMetrics {
             active_dispatch_over_100us: self.active_dispatch_over_100us.load(Ordering::Relaxed),
             active_dispatch_over_1ms: self.active_dispatch_over_1ms.load(Ordering::Relaxed),
             active_dispatch_over_5ms: self.active_dispatch_over_5ms.load(Ordering::Relaxed),
+            active_dispatch_thread_cpu_count: self
+                .active_dispatch_thread_cpu_count
+                .load(Ordering::Relaxed),
+            active_dispatch_thread_cpu_ns: self
+                .active_dispatch_thread_cpu_ns
+                .load(Ordering::Relaxed),
+            active_dispatch_thread_cpu_max_ns: self
+                .active_dispatch_thread_cpu_max_ns
+                .load(Ordering::Relaxed),
+            active_dispatch_thread_cpu_over_100us: self
+                .active_dispatch_thread_cpu_over_100us
+                .load(Ordering::Relaxed),
+            active_dispatch_thread_cpu_over_1ms: self
+                .active_dispatch_thread_cpu_over_1ms
+                .load(Ordering::Relaxed),
+            active_dispatch_thread_cpu_over_5ms: self
+                .active_dispatch_thread_cpu_over_5ms
+                .load(Ordering::Relaxed),
+            active_dispatch_thread_cycles_count: self
+                .active_dispatch_thread_cycles_count
+                .load(Ordering::Relaxed),
+            active_dispatch_thread_cycles_total: self
+                .active_dispatch_thread_cycles_total
+                .load(Ordering::Relaxed),
+            active_dispatch_thread_cycles_max: self
+                .active_dispatch_thread_cycles_max
+                .load(Ordering::Relaxed),
             send_phase_ns: self.send_phase_ns.load(Ordering::Relaxed),
             send_phase_max_ns: self.send_phase_max_ns.load(Ordering::Relaxed),
             public_event_queue_len,
             last_pmtu: self.last_pmtu.load(Ordering::Relaxed) as u16,
+            profile_phases: self.profile_snapshot(),
         }
     }
 
@@ -400,6 +717,46 @@ impl ProtocolMetrics {
             self.reader_protocol_max_cmd
                 .store(u64::from(source_cmd), Ordering::Relaxed);
             self.reader_protocol_max_payload_len
+                .store(payload_len as u64, Ordering::Relaxed);
+        }
+    }
+
+    pub(crate) fn record_reader_thread_cpu_labeled(
+        &self,
+        duration: Duration,
+        source_cmd: u8,
+        payload_len: usize,
+    ) {
+        if record_timing(
+            &self.reader_thread_cpu_count,
+            &self.reader_thread_cpu_ns,
+            &self.reader_thread_cpu_max_ns,
+            &self.reader_thread_cpu_over_100us,
+            &self.reader_thread_cpu_over_1ms,
+            &self.reader_thread_cpu_over_5ms,
+            duration,
+        ) {
+            self.reader_thread_cpu_max_cmd
+                .store(u64::from(source_cmd), Ordering::Relaxed);
+            self.reader_thread_cpu_max_payload_len
+                .store(payload_len as u64, Ordering::Relaxed);
+        }
+    }
+
+    pub(crate) fn record_reader_thread_cycles_labeled(
+        &self,
+        cycles: u64,
+        source_cmd: u8,
+        payload_len: usize,
+    ) {
+        self.reader_thread_cycles_count
+            .fetch_add(1, Ordering::Relaxed);
+        self.reader_thread_cycles_total
+            .fetch_add(cycles, Ordering::Relaxed);
+        if store_max(&self.reader_thread_cycles_max, cycles) {
+            self.reader_thread_cycles_max_cmd
+                .store(u64::from(source_cmd), Ordering::Relaxed);
+            self.reader_thread_cycles_max_payload_len
                 .store(payload_len as u64, Ordering::Relaxed);
         }
     }
@@ -428,6 +785,52 @@ impl ProtocolMetrics {
         self.writer_tick_count.fetch_add(1, Ordering::Relaxed);
         self.writer_tick_ns.fetch_add(ns, Ordering::Relaxed);
         let _ = store_max(&self.writer_tick_max_ns, ns);
+    }
+
+    pub(crate) fn record_profile_phase_labeled(
+        &self,
+        phase: ProfilePhase,
+        duration: Duration,
+        source_cmd: u8,
+        source_api_method: u8,
+        payload_len: usize,
+    ) {
+        let idx = phase.idx();
+        if record_timing(
+            &self.profile_count[idx],
+            &self.profile_ns[idx],
+            &self.profile_max_ns[idx],
+            &self.profile_over_100us[idx],
+            &self.profile_over_1ms[idx],
+            &self.profile_over_5ms[idx],
+            duration,
+        ) {
+            self.profile_max_cmd[idx].store(u64::from(source_cmd), Ordering::Relaxed);
+            self.profile_max_api_method[idx].store(u64::from(source_api_method), Ordering::Relaxed);
+            self.profile_max_payload_len[idx].store(payload_len as u64, Ordering::Relaxed);
+        }
+    }
+
+    fn profile_snapshot(&self) -> Vec<ProtocolProfilePhaseSnapshot> {
+        ProfilePhase::all()
+            .into_iter()
+            .filter_map(|phase| {
+                let idx = phase.idx();
+                let count = self.profile_count[idx].load(Ordering::Relaxed);
+                (count > 0).then(|| ProtocolProfilePhaseSnapshot {
+                    name: phase.name(),
+                    count,
+                    total_ns: self.profile_ns[idx].load(Ordering::Relaxed),
+                    max_ns: self.profile_max_ns[idx].load(Ordering::Relaxed),
+                    max_cmd: self.profile_max_cmd[idx].load(Ordering::Relaxed) as u8,
+                    max_api_method: self.profile_max_api_method[idx].load(Ordering::Relaxed) as u8,
+                    max_payload_len: self.profile_max_payload_len[idx].load(Ordering::Relaxed),
+                    over_100us: self.profile_over_100us[idx].load(Ordering::Relaxed),
+                    over_1ms: self.profile_over_1ms[idx].load(Ordering::Relaxed),
+                    over_5ms: self.profile_over_5ms[idx].load(Ordering::Relaxed),
+                })
+            })
+            .collect()
     }
 }
 

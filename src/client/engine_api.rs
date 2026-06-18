@@ -150,7 +150,12 @@ impl Client {
         match self.wait_for_receiver_in_owned_runtime(dispatcher, &rx, timeout) {
             Ok(merged) => {
                 if dispatcher
-                    .apply_candles_snapshot(&merged.markets, self.now_ms())
+                    .apply_candles_snapshot(
+                        &merged.markets,
+                        self.now_ms(),
+                        #[cfg(any(test, feature = "diagnostics"))]
+                        None,
+                    )
                     .is_some()
                 {
                     if let Some(rx) = dispatcher.market_history_barrier_async() {

@@ -18,7 +18,7 @@ use std::io::Write;
 /// defaults.
 #[derive(Debug)]
 pub(crate) struct StrategyBatchBuilder<'a> {
-    schema: &'a StrategySchema,
+    field_by_name: HashMap<&'a str, (usize, &'a StrategySchemaField)>,
     name_dict: Vec<String>,
     name_idx: HashMap<String, u16>,
     path_dict: Vec<String>,
@@ -29,8 +29,14 @@ pub(crate) struct StrategyBatchBuilder<'a> {
 
 impl<'a> StrategyBatchBuilder<'a> {
     pub(crate) fn new(schema: &'a StrategySchema) -> Self {
+        let field_by_name = schema
+            .fields
+            .iter()
+            .enumerate()
+            .map(|(idx, field)| (field.name.as_str(), (idx, field)))
+            .collect();
         Self {
-            schema,
+            field_by_name,
             name_dict: Vec::new(),
             name_idx: HashMap::new(),
             path_dict: Vec::new(),
@@ -82,18 +88,25 @@ impl<'a> StrategyBatchBuilder<'a> {
         self.body.extend_from_slice(&[0u8, 0u8]);
         let mut field_count = 0u16;
 
-        // Schema fields are written in Delphi RTTI declaration order. The
-        // visibility bitset is exactly `GetStrategyPropMask(kind)`.
-        for field in &self.schema.fields {
+        // Write in schema/RTTI declaration order, but start from the actual
+        // dense strategy fields. This avoids the old hot-path shape of
+        // scanning every schema field and doing a linear lookup in the strategy
+        // field vector on each step.
+        let mut fields_to_write = Vec::with_capacity(s.fields.len());
+        for (name, value) in s.fields.iter() {
+            let Some((schema_idx, field)) = self.field_by_name.get(name.as_ref()).copied() else {
+                continue;
+            };
             if !field.visible_for_kind(s.kind) {
                 continue;
             }
-            let Some(value) = s.fields.get(field.name.as_str()) else {
-                continue;
-            };
             if !strategy_schema_field_should_write(field, value) {
                 continue;
             }
+            fields_to_write.push((schema_idx, field, value));
+        }
+        fields_to_write.sort_unstable_by_key(|(schema_idx, _, _)| *schema_idx);
+        for (_, field, value) in fields_to_write {
             let idx = self.name_index(&field.name);
             self.body.extend_from_slice(&idx.to_le_bytes());
             write_field(&mut self.body, value);

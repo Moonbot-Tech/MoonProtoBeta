@@ -22,6 +22,8 @@ impl ProtocolCore<'_> {
             let drained_any = self.recv_one_phase(cur_tm, mode);
             #[cfg(any(test, feature = "diagnostics"))]
             let cpu_start = Instant::now();
+            #[cfg(any(test, feature = "diagnostics"))]
+            let thread_cpu_start = crate::client::thread_cpu::ThreadCpuTimer::start();
             self.drain_app_commands(cur_tm, mode);
             #[cfg(any(test, feature = "diagnostics"))]
             self.send_maintenance_phase(cur_tm, mode, &protocol_metrics);
@@ -29,6 +31,16 @@ impl ProtocolCore<'_> {
             self.send_maintenance_phase(cur_tm, mode);
             #[cfg(any(test, feature = "diagnostics"))]
             protocol_metrics.record_writer_cpu(cpu_start.elapsed());
+            #[cfg(any(test, feature = "diagnostics"))]
+            {
+                let cpu_elapsed = thread_cpu_start.elapsed();
+                if let Some(cpu_duration) = cpu_elapsed.time {
+                    protocol_metrics.record_writer_thread_cpu(cpu_duration);
+                }
+                if let Some(cpu_cycles) = cpu_elapsed.cycles {
+                    protocol_metrics.record_writer_thread_cycles(cpu_cycles);
+                }
+            }
             if !drained_any {
                 self.wait_5ms();
             }
@@ -37,6 +49,16 @@ impl ProtocolCore<'_> {
             let cpu_start = Instant::now();
             #[cfg(any(test, feature = "diagnostics"))]
             protocol_metrics.record_writer_cpu(cpu_start.elapsed());
+            #[cfg(any(test, feature = "diagnostics"))]
+            {
+                let cpu_elapsed = crate::client::thread_cpu::ThreadCpuTimer::start().elapsed();
+                if let Some(cpu_duration) = cpu_elapsed.time {
+                    protocol_metrics.record_writer_thread_cpu(cpu_duration);
+                }
+                if let Some(cpu_cycles) = cpu_elapsed.cycles {
+                    protocol_metrics.record_writer_thread_cycles(cpu_cycles);
+                }
+            }
             thread::sleep(Duration::from_millis(DEFAULT_SLEEP_MS));
         }
 

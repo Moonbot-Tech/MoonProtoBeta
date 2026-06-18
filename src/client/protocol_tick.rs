@@ -67,7 +67,17 @@ impl ProtocolCore<'_> {
     ) {
         #[cfg(any(test, feature = "diagnostics"))]
         let send_phase_start = Instant::now();
+        #[cfg(any(test, feature = "diagnostics"))]
+        let send_maintenance_start = Instant::now();
         self.transport_writer_maintenance_tick(cur_tm);
+        #[cfg(any(test, feature = "diagnostics"))]
+        protocol_metrics.record_profile_phase_labeled(
+            ProfilePhase::SendMaintenance,
+            send_maintenance_start.elapsed(),
+            u8::MAX,
+            u8::MAX,
+            0,
+        );
         #[cfg(any(test, feature = "diagnostics"))]
         protocol_metrics.record_send_phase(send_phase_start.elapsed());
 

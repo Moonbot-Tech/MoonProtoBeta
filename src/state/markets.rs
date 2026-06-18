@@ -24,6 +24,7 @@ mod tags;
 mod text;
 mod types;
 
+pub(crate) use self::prices::CandleDeltaBaseline;
 use self::text::{contains_text_ascii, same_text_ascii, starts_text_ascii};
 pub(crate) use self::types::MarketLastPriceHistoryInput;
 #[cfg(feature = "diagnostics")]

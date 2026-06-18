@@ -76,12 +76,7 @@ impl ProtocolCore<'_> {
         let _ = recv_bytes;
         match cmd {
             Command::WrongHello => {
-                if matches!(
-                    self.client.hello_wait_state,
-                    HelloWaitState::PrimaryHelloCold
-                        | HelloWaitState::PrimaryHelloNewSession
-                        | HelloWaitState::PrimaryImFriendSent
-                ) {
+                if self.client.hello_wait_state.allows_wrong_hello() {
                     self.apply_wrong_hello();
                 }
             }
@@ -99,10 +94,7 @@ impl ProtocolCore<'_> {
                     let _ = timestamp_ms;
                     return;
                 };
-                if !self.client.same_handshake_rnd(&hello.rnd)
-                    || hello.server_token != 0
-                    || hello.peer_mix != 0
-                {
+                if !self.client.matches_request_bound_reset(&hello) {
                     let _ = timestamp_ms;
                     return;
                 }
@@ -130,7 +122,7 @@ impl ProtocolCore<'_> {
             Command::WhoAreYou.to_byte(),
             payload,
         ) {
-            if !self.client.same_handshake_rnd(&hello.rnd) {
+            if !self.client.matches_current_handshake(&hello) {
                 let _ = (recv_bytes, timestamp_ms);
                 return Duration::ZERO;
             }
@@ -177,7 +169,7 @@ impl ProtocolCore<'_> {
                 let _ = (recv_bytes, timestamp_ms);
                 return;
             };
-            if !self.client.same_handshake_rnd(&hello.rnd) || hello.peer_mix != 0 {
+            if !self.client.matches_current_fine(&hello) {
                 let _ = (recv_bytes, timestamp_ms);
                 return;
             }
@@ -200,11 +192,35 @@ impl ProtocolCore<'_> {
             let _ = (recv_bytes, timestamp_ms);
             return true;
         }
+        #[cfg(any(test, feature = "diagnostics"))]
+        let sliced_start = Instant::now();
         let (assembled, ack) = self
             .client
             .transport
             .recv_slicer
             .on_new_sliced_with_session(payload, self.client.ack_session32_value);
+        #[cfg(any(test, feature = "diagnostics"))]
+        let (profile_cmd, profile_api_method, profile_payload_len) =
+            if let Some((_, cmd, assembled_payload, _, _)) = assembled.as_ref() {
+                (
+                    *cmd,
+                    metric_api_method(Command::from_byte(*cmd), assembled_payload),
+                    assembled_payload.len(),
+                )
+            } else {
+                (Command::Sliced.to_byte(), u8::MAX, payload.len())
+            };
+        #[cfg(any(test, feature = "diagnostics"))]
+        self.client
+            .metrics
+            .protocol_metrics
+            .record_profile_phase_labeled(
+                ProfilePhase::SlicedRecv,
+                sliced_start.elapsed(),
+                profile_cmd,
+                profile_api_method,
+                profile_payload_len,
+            );
 
         if slicing::trace_enabled() {
             if let Some(hdr) = slicing::SliceHeader::from_bytes(payload) {

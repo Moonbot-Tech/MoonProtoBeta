@@ -114,6 +114,8 @@ impl ProtocolCore<'_> {
 
         mode.payload_buf.clear();
         let authorized_before = self.client.authorized;
+        #[cfg(any(test, feature = "diagnostics"))]
+        let active_decode_start = Instant::now();
         let decode_result = catch_unwind(AssertUnwindSafe(|| {
             self.client.client_new_data_decoded(
                 cmd,
@@ -123,6 +125,17 @@ impl ProtocolCore<'_> {
                 &mut mode.payload_buf,
             );
         }));
+        #[cfg(any(test, feature = "diagnostics"))]
+        self.client
+            .metrics
+            .protocol_metrics
+            .record_profile_phase_labeled(
+                ProfilePhase::ActiveDecode,
+                active_decode_start.elapsed(),
+                cmd,
+                u8::MAX,
+                mode.payload_buf.iter().map(|(_, p)| p.len()).sum::<usize>(),
+            );
         if let Err(panic_payload) = decode_result {
             if trace_runtime_state {
                 eprintln!(
@@ -182,6 +195,11 @@ impl ProtocolCore<'_> {
                 let ctx = crate::events::ActiveDispatchContext::from_client(self.client);
                 #[cfg(any(test, feature = "diagnostics"))]
                 let active_dispatch_start = Instant::now();
+                #[cfg(any(test, feature = "diagnostics"))]
+                let active_dispatch_thread_cpu_start =
+                    crate::client::thread_cpu::ThreadCpuTimer::start();
+                #[cfg(any(test, feature = "diagnostics"))]
+                let active_dispatch_inner_start = Instant::now();
                 mode.dispatcher.dispatch_into_active_actions(
                     c,
                     &p,
@@ -190,6 +208,17 @@ impl ProtocolCore<'_> {
                     &ctx,
                     &mut mode.active_actions_buf,
                 );
+                #[cfg(any(test, feature = "diagnostics"))]
+                self.client
+                    .metrics
+                    .protocol_metrics
+                    .record_profile_phase_labeled(
+                        ProfilePhase::ActiveDispatch,
+                        active_dispatch_inner_start.elapsed(),
+                        c.to_byte(),
+                        metric_api_method(c, &p),
+                        p.len(),
+                    );
                 if trace_runtime_dispatch {
                     eprintln!(
                         "[mp-runtime-state] t={} stage=dispatch_decoded payload_hash={:016X} event_count={} action_count={}",
@@ -203,8 +232,21 @@ impl ProtocolCore<'_> {
                 let event_count = mode.event_buf.len();
                 #[cfg(any(test, feature = "diagnostics"))]
                 let action_count = mode.active_actions_buf.len();
+                #[cfg(any(test, feature = "diagnostics"))]
+                let active_actions_start = Instant::now();
                 self.client
                     .apply_active_actions(mode.active_actions_buf.drain(..));
+                #[cfg(any(test, feature = "diagnostics"))]
+                self.client
+                    .metrics
+                    .protocol_metrics
+                    .record_profile_phase_labeled(
+                        ProfilePhase::ActiveActions,
+                        active_actions_start.elapsed(),
+                        c.to_byte(),
+                        metric_api_method(c, &p),
+                        p.len(),
+                    );
                 #[cfg(any(test, feature = "diagnostics"))]
                 self.client
                     .metrics
@@ -217,12 +259,41 @@ impl ProtocolCore<'_> {
                         event_count,
                         action_count,
                     );
+                #[cfg(any(test, feature = "diagnostics"))]
+                {
+                    let thread_cpu_elapsed = active_dispatch_thread_cpu_start.elapsed();
+                    if let Some(duration) = thread_cpu_elapsed.time {
+                        self.client
+                            .metrics
+                            .protocol_metrics
+                            .record_active_dispatch_thread_cpu(duration);
+                    }
+                    if let Some(cycles) = thread_cpu_elapsed.cycles {
+                        self.client
+                            .metrics
+                            .protocol_metrics
+                            .record_active_dispatch_thread_cycles(cycles);
+                    }
+                }
+                #[cfg(any(test, feature = "diagnostics"))]
+                let drain_events_start = Instant::now();
                 mode.drain_events(
                     &self.client.metrics.protocol_metrics,
                     Some(c),
                     metric_api_method(c, &p),
                     p.len(),
                 );
+                #[cfg(any(test, feature = "diagnostics"))]
+                self.client
+                    .metrics
+                    .protocol_metrics
+                    .record_profile_phase_labeled(
+                        ProfilePhase::DrainEvents,
+                        drain_events_start.elapsed(),
+                        c.to_byte(),
+                        metric_api_method(c, &p),
+                        p.len(),
+                    );
                 if trace_runtime_dispatch {
                     eprintln!(
                         "[mp-runtime-state] t={} stage=dispatch_done payload_hash={:016X}",

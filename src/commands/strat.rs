@@ -20,10 +20,11 @@
 //! ~1118 lines). The decoder and writer live in `commands::strategy_serializer`.
 
 use super::registry::{read_string, write_string, CURRENT_PROTO_CMD_VER};
+#[cfg(test)]
 use super::strategy_schema::StrategySchema;
-use super::strategy_serializer::{
-    StrategyBatchBuilder, StrategySnapshot as StrategySerializerSnapshot,
-};
+use super::strategy_serializer::StrategyBatchBuilder;
+#[cfg(test)]
+use super::strategy_serializer::StrategySnapshot as StrategySerializerSnapshot;
 use zerocopy::byteorder::little_endian::U64 as LeU64;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
@@ -544,6 +545,7 @@ pub(crate) fn build_snapshot(
 /// computes `ClientMaxLastDate`, and wraps the result as CmdId=2. The builder
 /// needs live `TStratSchema` for Delphi field order/default parity.
 #[doc(hidden)]
+#[cfg(test)]
 pub(crate) fn build_snapshot_from_strategies(
     uid: u64,
     server_epoch: u64,

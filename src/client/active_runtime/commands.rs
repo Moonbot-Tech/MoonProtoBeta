@@ -159,3 +159,109 @@ pub(super) enum RuntimeTradeCommandKind {
         market_name: String,
     },
 }
+
+#[cfg(any(test, feature = "diagnostics"))]
+impl RuntimeCommand {
+    pub(super) fn profile_source(&self) -> (u8, usize) {
+        match self {
+            Self::Stop => (0, 0),
+            Self::SubscribeOrderBook(_) => (1, 1),
+            Self::SubscribeOrderBooks(names) => (2, names.len()),
+            Self::UnsubscribeOrderBook(_) => (3, 1),
+            Self::UnsubscribeOrderBooks(names) => (4, names.len()),
+            Self::UnsubscribeAllOrderBooks => (5, 0),
+            Self::SubscribeAllTrades(_) => (6, 0),
+            Self::SubscribeTradesFor { markets, .. } => (7, markets.len()),
+            Self::UnsubscribeAllTrades => (8, 0),
+            Self::BalanceRefresh => (9, 0),
+            Self::AccountHedgeModeRefresh => (10, 0),
+            Self::AccountApiExpirationRefresh => (11, 0),
+            Self::OrderSnapshotRefresh => (12, 0),
+            Self::TransferAssetsRefresh => (13, 0),
+            Self::TransferAssetsRefreshKind(_) => (14, 1),
+            Self::SetExcludeBlacklistedMarketsFromExchangeDelta(_) => (15, 0),
+            Self::EngineAction { payload, .. } => (16, payload.len()),
+            Self::CoinCardCandles { payload, .. } => (17, payload.len()),
+            Self::Ui(cmd) => cmd.profile_source(),
+            Self::Strat(cmd) => cmd.profile_source(),
+            Self::StrategySnapshotBatch(strategies) => (50, strategies.len()),
+            Self::StrategySetChecked { .. } => (51, 1),
+            Self::StrategySendCheckedDelta => (52, 0),
+            Self::StrategyStartStop { .. } => (53, 0),
+            #[cfg(any(test, feature = "diagnostics"))]
+            Self::DebugOutgoingBlackhole(_) => (54, 0),
+            #[cfg(any(test, feature = "diagnostics"))]
+            Self::DebugResetErrEmuDiagnostics => (55, 0),
+            Self::OrderAction(kind) => kind.profile_source(),
+            Self::TradeAction(kind) => kind.profile_source(),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "diagnostics"))]
+impl UiRuntimeCommand {
+    fn profile_source(&self) -> (u8, usize) {
+        match self {
+            Self::SettingsRequest => (20, 0),
+            Self::MmSubscribe(_) => (21, 0),
+            Self::SendSettings(_) => (22, 1),
+            Self::UpdateVersion { .. } => (23, 0),
+            Self::SwitchDex(_) => (24, 1),
+            Self::SwitchSpot(_) => (25, 1),
+            Self::LevManage(_) => (26, 1),
+            Self::EmuTrades { points, .. } => (27, points.len()),
+            Self::TriggerManage { markets, keys, .. } => (28, markets.len() + keys.len()),
+            Self::ResetProfit(_) => (29, 1),
+            Self::ArbActivateNotify(_) => (30, 1),
+            Self::AlertObject(_) => (31, 1),
+            Self::AlertSnapshotRequest => (32, 0),
+            Self::ChartTextState(_) => (33, 1),
+            Self::OrdersHistoryRequest(_) => (34, 1),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "diagnostics"))]
+impl StratRuntimeCommand {
+    fn profile_source(&self) -> (u8, usize) {
+        match self {
+            Self::SellPriceUpdate { .. } => (40, 1),
+            Self::Delete { .. } => (41, 1),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "diagnostics"))]
+impl RuntimeCommandKind {
+    fn profile_source(&self) -> (u8, usize) {
+        match self {
+            Self::MoveOrder { .. } => (60, 1),
+            Self::CancelOrder { .. } => (61, 1),
+            Self::UpdateStops { .. } => (62, 1),
+            Self::UpdateVStop { .. } => (63, 1),
+            Self::SetImmune { items } => (64, items.len()),
+            Self::TurnOrderPanicSell { .. } => (65, 1),
+            Self::RequestOrderStatus { .. } => (66, 1),
+            Self::SwitchPanicSellByMarket { .. } => (67, 1),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "diagnostics"))]
+impl RuntimeTradeCommandKind {
+    fn profile_source(&self) -> (u8, usize) {
+        match self {
+            Self::NewOrder { .. } => (80, 1),
+            Self::JoinOrders { .. } => (81, 1),
+            Self::SplitOrder(_) => (82, 1),
+            Self::MoveAllSells { .. } => (83, 1),
+            Self::MoveAllBuys { .. } => (84, 1),
+            Self::ClosePosition(_) => (85, 1),
+            Self::LimitClosePosition { .. } => (86, 1),
+            Self::SplitPosition { .. } => (87, 1),
+            Self::SellOrder(_) => (88, 1),
+            Self::MarketSplitPosition { .. } => (89, 1),
+            Self::Penalty { .. } => (90, 1),
+        }
+    }
+}

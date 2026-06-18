@@ -1,29 +1,27 @@
 use super::protocol_core::ProtocolCore;
 use super::*;
 
+fn pending_h_path_delay(round_trip_delay: i64) -> i64 {
+    // Delphi: Max(200, Min(500, round(Client.RoundTripDelay * 1.1 + 10)))
+    ((round_trip_delay as f64 * 1.1 + 10.0).round() as i64).clamp(200, 500)
+}
+
+#[inline]
+fn retry_due(last_sent_at: i64, cur_tm: i64, path_delay: i64) -> bool {
+    (last_sent_at - cur_tm).abs() > path_delay
+}
+
 impl ProtocolCore<'_> {
     pub(crate) fn apply_regular_hl_ack(&mut self) {
-        let recvd_slider = {
-            if !self.client.recv.recvd_slider.has_new_data {
-                return;
-            }
-            self.client.recv.recvd_slider.has_new_data = false;
-            self.client.recv.recvd_slider.clone()
-        };
-
-        let limit = (recvd_slider.r_count.max(0) as u64) * 64;
-        self.client.pending_h.retain(|d| {
-            if d.msg_num < recvd_slider.start_num {
-                return true;
-            }
-            let offset = d.msg_num - recvd_slider.start_num;
-            if offset >= limit {
-                return true;
-            }
-            let word_idx = (offset >> 6) as usize;
-            let bit_idx = offset & 63;
-            (recvd_slider.bit_field[word_idx] >> bit_idx) & 1 == 0
-        });
+        let client = &mut *self.client;
+        let recvd_slider = &mut client.recv.recvd_slider;
+        if !recvd_slider.has_new_data {
+            return;
+        }
+        recvd_slider.has_new_data = false;
+        client
+            .pending_h
+            .retain(|d| !recvd_slider.ack_confirms_msg(d.msg_num));
     }
 
     pub(crate) fn apply_high_send_u_key_cleanup(&mut self, h_items: &[SendItem]) {
@@ -107,14 +105,16 @@ impl ProtocolCore<'_> {
     }
 
     pub(crate) fn retry_pending_h(&mut self, cur_tm: i64) {
-        // Delphi: Max(200, Min(500, round(Client.RoundTripDelay * 1.1 + 10)))
-        let path_delay =
-            ((self.client.round_trip_delay as f64 * 1.1 + 10.0).round() as i64).clamp(200, 500);
+        #[cfg(any(test, feature = "diagnostics"))]
+        let retry_start = Instant::now();
+        #[cfg(any(test, feature = "diagnostics"))]
+        let pending_count = self.client.pending_h.len();
+        let path_delay = pending_h_path_delay(self.client.round_trip_delay);
         let mut to_drop = Vec::new();
         let mut to_resend = Vec::new();
 
         for (idx, item) in self.client.pending_h.iter_mut().enumerate() {
-            if (item.last_sent_at - cur_tm).abs() > path_delay {
+            if retry_due(item.last_sent_at, cur_tm, path_delay) {
                 item.last_sent_at = cur_tm;
                 // 1+2. First clone with the CURRENT retry_left and queue for resend.
                 //      WantACK is computed in send_h_item as `retry_left > 0` — on the last
@@ -138,6 +138,17 @@ impl ProtocolCore<'_> {
         for mut item in to_resend {
             self.send_h_item(&mut item, cur_tm);
         }
+        #[cfg(any(test, feature = "diagnostics"))]
+        self.client
+            .metrics
+            .protocol_metrics
+            .record_profile_phase_labeled(
+                ProfilePhase::RetryPendingH,
+                retry_start.elapsed(),
+                u8::MAX,
+                u8::MAX,
+                pending_count,
+            );
     }
 
     pub(crate) fn batch_send_direct(&mut self, item: &SendItem) {
@@ -259,5 +270,25 @@ impl ProtocolCore<'_> {
         } else {
             self.push_tmp_send_item(wire_cmd, wire_data, accounted_size);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_h_path_delay_matches_delphi_bounds() {
+        assert_eq!(pending_h_path_delay(0), 200);
+        assert_eq!(pending_h_path_delay(200), 230);
+        assert_eq!(pending_h_path_delay(10_000), 500);
+    }
+
+    #[test]
+    fn retry_due_uses_strict_delphi_abs_threshold() {
+        assert!(!retry_due(1000, 1200, 200));
+        assert!(retry_due(1000, 1201, 200));
+        assert!(!retry_due(1200, 1000, 200));
+        assert!(retry_due(1201, 1000, 200));
     }
 }

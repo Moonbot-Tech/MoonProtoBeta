@@ -225,107 +225,20 @@ The regular application model is `MoonClient`: one runtime owner, event sink,
 snapshots, and fire-and-forget user intents. Public code should not model the
 session as "run the protocol for N seconds".
 
-## Packet Loss Test Hook
+## Diagnostics And FireTest
 
-This section is available only when the crate is built with
-`--features diagnostics`. Regular applications should leave that feature off;
-the production Active Lib surface does not expose packet-loss emulation,
-per-packet CPU counters, or debug blackhole hooks.
+Production applications should build MoonProto without `--features diagnostics`.
+The normal Active Lib surface does not expose packet-loss emulation, per-packet
+CPU counters, or blackhole hooks.
 
-`moonproto::client::set_err_emu(percent)` enables client-side packet loss
-emulation for tests. It is process-global, affects every `Client` in the
-process, and drops only incoming packets after MoonProto transport verification
-succeeds. A valid packet selected for emulated drop still updates transport side
-effects first (`total_recv`, online timestamp, receive counters); it is then
-withheld from the protocol dispatcher.
-Outgoing packets are still sent normally.
+The `diagnostics` feature exists for live health tests and protocol audits:
+FireTest uses it to emulate packet loss, attribute sliced-response recovery, and
+check that receive/apply/enqueue paths stay bounded. These counters are passive;
+they never change retry, ACK, reconnect, queueing, or drop decisions.
 
-Service packets use half of the configured drop rate: `Ping`,
-handshake/reconnect commands, MTU probes, and `SlicedACK`.
-
-For reconnect/handshake health gates this matters mathematically. With
-`set_err_emu(50)`, service packets are dropped at 25% and delivered at 75%.
-Ten reconnect attempts fail with `0.25^10 = 0.000095%` when only the Rust client
-emulates loss. If a test server also runs the same 50% emulator on its side, one
-attempt needs both directions and succeeds with `0.75 * 0.75 = 56.25%`; ten
-attempts fail with about `0.0257%`. A repeated failure of simple reconnect/API
-operations under this gate should be treated as a protocol bug until proven
-otherwise, not dismissed as random FireTest noise.
-
-For stress tests that target Engine API, candles, and sliced response recovery,
-enable `set_err_emu` after the runtime reaches `LifecycleEvent::Ready`. Enabling
-it before connection intentionally tests handshake/reconnect loss and can
-prevent the client from reaching the API phase at all.
-
-For live health tests, `err_emu_diagnostics_snapshot()` returns loss counters
-collected while `set_err_emu` is enabled. It is available on both the low-level
-`Client` and the high-level `MoonClient`, so a health/stress harness on either
-path reads the same counters. Use the matching hidden reset hook in diagnostic
-tests to start a new measurement window without changing the loss rate. This
-whole facility is a test/diagnostic hook; production applications never enable
-ErrEmu.
-
-The snapshot includes total valid/delivered/dropped incoming packets,
-per-command counters, test-only outgoing drop counters, and per-sliced-datagram
-counters. For sliced datagrams the API
-reports:
-
-- `datagram_num`, `blocks_count`, delivered/dropped packet attempts, and
-  per-block delivered/dropped counters;
-- optional raw diagnostic identifiers when the first block or completed payload
-  was observed;
-- `completed_cmd` and `completed_payload_len`;
-- for completed Engine API responses:
-  `completed_api_method`, `completed_api_uid`, and `completed_api_success`.
-
-This is diagnostic API, not production control flow. Its purpose is to
-distinguish three cases in tests: the server did not send a response, the server
-sent/retried it but all needed packets were dropped by emulation, or packets
-arrived but reassembly/parsing failed.
-
-Low-level packet diagnostics are compile-gated behind the `diagnostic-trace`
-feature. Build with that feature and set `MOONPROTO_TRACE_IO=1` or
-`MOONPROTO_TRACE_SLICES=1` to print transport send/receive and sliced reassembly
-logs.
-
-## Protocol Metrics
-
-This section also requires `--features diagnostics`.
-
-`MoonClient::protocol_metrics_snapshot()` returns passive protocol-loop counters:
-UDP receive count, the last PMTU value reported by server `Ping`,
-receive-side protocol nanoseconds, writer tick nanoseconds, and
-send/maintenance nanoseconds. The old internal receive-decoded bridge is not
-part of the public metrics API because production decoded delivery is direct.
-
-The snapshot also separates CPU-ish protocol work from wall-clock waits:
-`writer_cpu_*` excludes the fixed 5 ms writer sleep, `reader_protocol_*`
-is the protocol recv path excluding deliberate protocol barriers, and
-`reader_protocol_wait_*` accounts for those barriers separately
-(currently the `WhoAreYou` -> duplicate `ImFriend` 32 ms wait).
-`active_dispatch_*` / `app_enqueue_*` measure typed Active Lib state apply and
-event enqueue before user callbacks. In `MoonClient`, the runtime owner applies
-protocol/domain payloads directly to Active Lib state, publishes a snapshot,
-then emits events through the configured sink. Millisecond samples are
-performance red flags. The
-`*_over_100us`, `*_over_1ms`, `*_over_5ms` counters are coarse red flags for
-unexpectedly heavy blocks. These are wall-clock durations of code sections, not
-OS CPU counters, but they intentionally exclude network waits and user callback
-body time.
-
-FireTest treats any `>5ms` sample in CPU-ish sections (`reader_protocol`,
-`writer_cpu`, `active_dispatch`, `app_enqueue`, or send/maintenance phase) as a
-hard health failure. `>1ms` samples stay visible in the summary as watch
-signals, because large initial snapshots and balance/strategy payloads can sit
-near that boundary while still matching the MoonBot core machine effect.
-
-For the current maximum samples, the snapshot carries diagnostic attribution:
-`reader_protocol_max_cmd/payload_len`, `active_dispatch_max_cmd/payload_len`
-plus `events/actions`, and `app_enqueue_max_cmd/payload_len` plus `events/mode`.
-`cmd == u8::MAX` means the sample was not tied to a decoded incoming command.
-
-These metrics are diagnostics only. They never affect retry, ACK, reconnect,
-queueing, or drop decisions.
+For day-to-day development use the test guide in `tests/README.md`. Low-level
+wire tracing is a separate `diagnostic-trace` feature and is intended only for
+investigating concrete packet-flow bugs.
 
 ## Connection Setup
 

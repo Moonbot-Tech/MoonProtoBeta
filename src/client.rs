@@ -45,7 +45,7 @@ mod engine_api;
 mod helpers;
 mod init;
 mod lifecycle;
-mod metrics;
+pub(crate) mod metrics;
 mod protocol_api;
 mod protocol_connect;
 mod protocol_core;
@@ -72,6 +72,8 @@ mod socket;
 mod socket_lifecycle;
 mod subscription_api;
 mod subscriptions;
+#[cfg(any(test, feature = "diagnostics"))]
+mod thread_cpu;
 mod transport_state;
 
 pub use active_runtime::{
@@ -125,6 +127,8 @@ use helpers::*;
 #[cfg(test)]
 pub(crate) use init::{run_base_check_delphi, send_post_init_resync, CriticalInitStatus};
 use lifecycle::ClientLifecycle;
+#[cfg(any(test, feature = "diagnostics"))]
+use metrics::ProfilePhase;
 use metrics::{ClientMetrics, ProtocolMetrics};
 use protocol_core::ProtocolCore;
 use refresh_clocks::{PendingApi, RefreshClocks};
@@ -169,6 +173,14 @@ impl HelloWaitState {
     #[inline]
     pub(crate) fn allows_fine(self) -> bool {
         matches!(self, Self::PrimaryImFriendSent | Self::RebindHelloAgain)
+    }
+
+    #[inline]
+    pub(crate) fn allows_wrong_hello(self) -> bool {
+        matches!(
+            self,
+            Self::PrimaryHelloCold | Self::PrimaryHelloNewSession | Self::PrimaryImFriendSent
+        )
     }
 }
 
@@ -436,6 +448,21 @@ impl Client {
     #[inline]
     pub(crate) fn same_handshake_rnd(&self, rnd: &[u8; 16]) -> bool {
         self.handshake_rnd == *rnd
+    }
+
+    #[inline]
+    pub(crate) fn matches_current_handshake(&self, hello: &handshake::Hello) -> bool {
+        self.same_handshake_rnd(&hello.rnd)
+    }
+
+    #[inline]
+    pub(crate) fn matches_request_bound_reset(&self, hello: &handshake::Hello) -> bool {
+        self.matches_current_handshake(hello) && hello.server_token == 0 && hello.peer_mix == 0
+    }
+
+    #[inline]
+    pub(crate) fn matches_current_fine(&self, hello: &handshake::Hello) -> bool {
+        self.matches_current_handshake(hello) && hello.peer_mix == 0
     }
 
     #[inline]
