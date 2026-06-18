@@ -238,6 +238,16 @@ fn diagnostics_fill_market_history_to_capacity_builds_full_retained_fixture() {
         "diagnostics fill keeps existing live tail rows"
     );
 
+    let futures_trades = readers.futures_trades.as_ref().unwrap();
+    let mut trades = Vec::new();
+    futures_trades.copy_last(5, &mut trades);
+    assert!(
+        trades
+            .iter()
+            .all(|row| row.price > 760.0 && row.price < 790.0),
+        "diagnostics trade fixture should stay near the live market price"
+    );
+
     let mut cursor = last_prices.cursor_from_oldest();
     let drain = last_prices.drain_new_bounded(&mut cursor, 6, &mut rows);
     assert_eq!(drain.copied, 6);

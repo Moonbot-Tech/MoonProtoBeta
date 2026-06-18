@@ -315,10 +315,13 @@ client.diag_fill_market_history_to_capacity(
 The hook is not compiled into regular builds. It asks the retained-history
 worker to fill every configured history ring for the market to its effective
 capacity with chronological synthetic rows. Existing live rows remain at the
-newest end; synthetic rows are inserted before them. After the call returns,
-normal `copy_*`, `drain_new_bounded`, and aggregate reads see the fixture as
-ordinary retained history, so a terminal can test full-capacity GPU upload and
-tail eviction without a second fake data path.
+newest end; synthetic rows are inserted before them. When the library has
+already seen a LastPrice, MarkPrice, trade, or candle for the market, generated
+prices stay near that live price scale, so chart tests use the same Y-axis range
+as the real market. After the call returns, normal `copy_*`,
+`drain_new_bounded`, and aggregate reads see the fixture as ordinary retained
+history, so a terminal can test full-capacity GPU upload and tail eviction
+without a second fake data path.
 
 ## Candles And Derived Analytics
 
