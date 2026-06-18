@@ -161,6 +161,11 @@ retained ring capacity; returned rows start from the oldest still retained row.
 Raw sequence-number helpers are diagnostics/test-only; normal terminal code uses
 cursor and time APIs.
 
+Time-based copy methods always return `SeqRingReadMeta`. An empty time window or
+an empty retained ring is reported as `meta.copied = 0`, not as an error. If the
+requested time is older than retained memory, `meta.clipped = true` and the rows
+start from the oldest retained point.
+
 For high-throughput consumers that drain in bounded batches, prefer
 `drain_new_bounded`. It returns a compact public status:
 
@@ -444,6 +449,9 @@ keeps the same memory-aware split but scales the retained-history budget; values
 are clamped to `100..=800`, with `100` equal to the default. Use
 `MarketHistorySizing::fixed(config)` when the application wants exact capacities
 or wants to disable selected retained categories with `0`.
+`MarketHistorySizing` is non-exhaustive: application code that matches it should
+include a wildcard branch so new sizing policies do not become a source-level
+break.
 
 `MoonClient` creates and owns the default history worker automatically when the
 trades subscription scope becomes active. Regular applications use

@@ -84,7 +84,12 @@ pub struct MarketHistoryConfig {
 /// storage scope and known market list are available. `Fixed` uses the supplied
 /// capacities verbatim; set individual capacities to `0` to disable that
 /// retained public history category.
+///
+/// This enum is non-exhaustive because retained-history sizing can gain new
+/// policies as UI memory controls become more precise. Match with a wildcard
+/// outside this crate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum MarketHistorySizing {
     #[default]
     Auto,
