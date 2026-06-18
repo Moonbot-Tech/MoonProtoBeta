@@ -59,6 +59,30 @@ queue adapter internally and exposes `client.drain_lifecycle_events()` /
 `client.drain_events()` for simple apps and tests. Hot UI loops can use
 `drain_lifecycle_events_into` / `drain_events_into` to reuse buffers.
 
+## GUI Runtime Shape
+
+Do not build a permanent "feed thread" that wakes every few milliseconds just
+to call `drain_events()` and `snapshot()`. `MoonClient` already owns the
+network/protocol runtime thread and keeps the retained state current. A polling
+feed thread on top of it does not receive packets, does not protect the UI from
+blocking protocol work, and usually only adds latency, wakeups, and another
+state-mirroring layer.
+
+For a production terminal, use one of these shapes:
+
+- callback/event-loop UI: connect with `MoonEventSink::callback`, post the event
+  into the framework main loop, and read snapshots from that loop when the view
+  needs them;
+- immediate-mode UI: connect with `MoonEventSink::queue_with_waker`, wake the UI
+  on each event, and drain the queue during the normal update pass;
+- CLI/demo tools: a short `drain_events() + sleep(...)` loop is acceptable when
+  the program is only printing or waiting for a bounded example scenario.
+
+Rendering code should pull from `snapshot()` / `snapshot_versioned()` on its
+normal render/update cadence. Push widgets should react to events delivered by
+the sink. Commands such as order actions, subscriptions, and settings updates go
+through the typed `MoonClient` handles; they do not need a feed loop either.
+
 The queue adapter is intentionally unbounded: the runtime must not drop
 already-produced domain events because of a hidden capacity cap. The application
 side must therefore drain it from its UI tick/event bridge. If a queue adapter

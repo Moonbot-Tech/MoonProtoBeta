@@ -27,6 +27,12 @@ MoonBot server
 
 Use one `MoonClient` per server connection in regular applications.
 
+`MoonClient` already owns the background protocol/runtime thread. A terminal
+does not need an extra feed thread that periodically polls `drain_events()` and
+`snapshot()`. Serious UI integrations should connect events to the host
+framework with `MoonEventSink::callback` or `MoonEventSink::queue_with_waker`;
+the `drain + sleep` loops in examples are bounded CLI/demo loops.
+
 ## Recommended Lifecycle
 
 ```rust

@@ -51,6 +51,13 @@ MoonProto owns the live client runtime:
 - publishes snapshots and events;
 - sends typed user intents back to the core.
 
+Because MoonProto already owns that runtime, a terminal normally does not create
+its own polling "feed thread" on top of the library. Integrate events with your
+UI framework through `MoonEventSink`, and read snapshots from the UI's normal
+update/render path. The `drain_events() + sleep(...)` style used by small
+examples is a CLI/demo loop, not the recommended architecture for a real-time
+terminal.
+
 Your application owns:
 
 - UI;

@@ -138,6 +138,12 @@ emits `LifecycleEvent::Ready`. Startup failure arrives as
 `LifecycleEvent::ConnectFailed`. UI code does not create its own protocol thread
 and does not block a paint/input callback waiting for network readiness.
 
+For serious GUI applications, the event bridge should be tied to the UI
+framework, not to a custom feed loop. Use `MoonEventSink::callback` for
+callback/event-loop frameworks, or `MoonEventSink::queue_with_waker` for
+immediate-mode frameworks. A `drain_events() + sleep(...)` loop is only a
+CLI/demo pattern; it is not a recommended terminal architecture.
+
 Command-line tools, scripts, and tests that do one-shot work after connect can
 use `MoonClient::connect_blocking(cfg, connect, timeout)` instead: it blocks on a
 single channel receive until `Ready` or failure (no busy polling). This is a
