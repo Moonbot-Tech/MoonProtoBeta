@@ -72,6 +72,7 @@ low-level client:
 ```rust
 if let Some(info) = session.client.server_info() {
     let on_binance = info.supports(moonproto::ExchangeTypeMask::SPOT);
+    let exchange_key = info.exchange_code.map(|code| code.stable_id());
     // info.bot_id, info.exchange_code, info.exchange_name,
     // info.exchange_type_mask, info.base_currency_name, ...
 }
@@ -89,3 +90,8 @@ The same values are reachable from a held snapshot via
 `None` until authentication completes; both are always safe to read. Extended
 exchange-specific UI should be enabled only after the corresponding server
 metadata is known (for example, gate it on `info.has_identity()`).
+
+Use `ExchangeCode::stable_id()` when application code needs a compact stable
+identity key for grouping sessions by exchange/platform, for example to pick
+one market-data provider among several cores connected to the same exchange.
+`to_byte()` stays diagnostics/protocol-facing; terminal code should not need it.
