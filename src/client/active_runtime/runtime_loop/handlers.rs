@@ -433,6 +433,10 @@ fn handle_ui_command(
             client.ui_orders_history_request(&market_name);
             false
         }
+        UiRuntimeCommand::RestartNow => {
+            client.ui_restart_now();
+            false
+        }
     }
 }
 

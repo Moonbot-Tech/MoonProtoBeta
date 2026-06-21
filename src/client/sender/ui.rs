@@ -166,4 +166,11 @@ impl ClientSender {
         let raw = crate::commands::ui::build_orders_history_request(rand::random(), market_name);
         self.send_typed_domain_cmd(raw, Command::UI);
     }
+
+    #[doc(hidden)]
+    /// Send `TRestartNowCommand`.
+    pub(crate) fn ui_restart_now(&self) {
+        let raw = crate::commands::ui::build_restart_now(rand::random());
+        self.send_typed_domain_cmd(raw, Command::UI);
+    }
 }

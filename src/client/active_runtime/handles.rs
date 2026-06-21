@@ -686,6 +686,17 @@ impl MoonSettings<'_> {
         self.client.manage_leverage(cmd.clone())
     }
 
+    /// Ask the MoonBot core to start/restart the market runtime now.
+    ///
+    /// The server starts the market runtime if it is stopped, leaves passive
+    /// mode if needed, starts checked strategies, and then broadcasts an updated
+    /// runtime-state snapshot. Completion is observed through
+    /// `SettingsEvent::RuntimeStateUpdated` and
+    /// `snapshot().settings().runtime_state`.
+    pub fn restart_now(&self) -> Result<(), MoonClientError> {
+        self.client.restart_now()
+    }
+
     fn manage_triggers_for_markets_inner<I, S>(
         &self,
         action: crate::commands::ui::TriggerAction,

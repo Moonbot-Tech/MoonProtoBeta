@@ -339,3 +339,11 @@ pub(crate) fn build_orders_history_request(uid: u64, market_name: &str) -> Vec<u
     write_string(&mut out, market_name);
     out
 }
+
+/// CmdId=21 `TRestartNowCommand` (empty body).
+#[doc(hidden)]
+pub(crate) fn build_restart_now(uid: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(11);
+    write_header(&mut out, CMD_RESTART_NOW, uid);
+    out
+}

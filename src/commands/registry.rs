@@ -681,6 +681,22 @@ pub(crate) const UI_COMMANDS: &[CommandDescriptor] = &[
         priority = High,
         direction = Outbound
     ),
+    cmd_desc!(
+        Command::UI,
+        20,
+        "TRuntimeStateCommand",
+        base = Base,
+        priority = High,
+        direction = Inbound
+    ),
+    cmd_desc!(
+        Command::UI,
+        21,
+        "TRestartNowCommand",
+        base = Base,
+        priority = High,
+        direction = Outbound
+    ),
 ];
 
 pub(crate) const STRAT_COMMANDS: &[CommandDescriptor] = &[
@@ -967,7 +983,7 @@ mod tests {
     #[test]
     fn descriptor_map_covers_known_typed_domains() {
         assert_eq!(ORDER_COMMANDS.len(), 32);
-        assert_eq!(UI_COMMANDS.len(), 20);
+        assert_eq!(UI_COMMANDS.len(), 22);
         assert_eq!(STRAT_COMMANDS.len(), 11);
         assert_eq!(BALANCE_COMMANDS.len(), 7);
         assert_eq!(API_COMMANDS.len(), 3);
@@ -1026,6 +1042,19 @@ mod tests {
         assert_eq!(desc.max_retries, 3);
         assert_eq!(desc.unique_kind, UK_NONE);
         assert_eq!(desc.ukey, UKeyRule::None);
+    }
+
+    #[test]
+    fn descriptor_map_includes_runtime_state_and_restart_now() {
+        let state = find_descriptor(Command::UI, 20).unwrap();
+        assert_eq!(state.name, "TRuntimeStateCommand");
+        assert_eq!(state.priority, CommandPriority::High);
+        assert_eq!(state.direction, CommandDirection::Inbound);
+
+        let restart = find_descriptor(Command::UI, 21).unwrap();
+        assert_eq!(restart.name, "TRestartNowCommand");
+        assert_eq!(restart.priority, CommandPriority::High);
+        assert_eq!(restart.direction, CommandDirection::Outbound);
     }
 
     #[test]

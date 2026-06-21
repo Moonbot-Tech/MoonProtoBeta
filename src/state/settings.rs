@@ -7,17 +7,18 @@
 //! ## Tracked State
 //! - `ClientSettings`: full UI settings snapshot.
 //! - `LevManage`: leverage-management settings snapshot.
+//! - `RuntimeState`: started/passive-mode state of the MoonBot core.
 //! - `ArbActivateNotify`: arbitrage-valid-until timestamp.
 //!
 //! Client->server action commands (`SettingsRequest`, `StratStartStop`,
 //! `MMOrdersSubscribe`, `EmuTrades`, `TriggerManage`, `ResetProfit`,
-//! `SwitchDex`, `SwitchSpot`) are sent through high-level handles and ignored
-//! if they ever arrive inbound.
+//! `SwitchDex`, `SwitchSpot`, `RestartNow`) are sent through high-level handles
+//! and ignored if they ever arrive inbound.
 //! `NewMarketNotify` is an internal Active Lib trigger: the dispatcher uses it
 //! to force listing refresh, and user code receives a market event only after
 //! the refreshed list actually inserts new markets.
 
-use crate::commands::ui::{ClientSettingsCommand, LevManage, UICommand};
+use crate::commands::ui::{ClientSettingsCommand, LevManage, RuntimeStateCommand, UICommand};
 use crate::time::MoonTime;
 
 /// Synchronized UI/settings state updated from inbound UI settings packets.
@@ -38,6 +39,8 @@ pub struct SettingsState {
     client_settings_fallback: ClientSettingsCommand,
     /// Current leverage-management settings, if received.
     pub lev_manage: Option<LevManage>,
+    /// Current market-runtime/passive-mode state, if received.
+    pub runtime_state: Option<RuntimeStateCommand>,
     /// Raw `TDateTime` days for diagnostics/parity tests.
     ///
     /// Normal terminal code should use [`Self::arb_valid_until_time`] and
@@ -55,6 +58,8 @@ pub enum SettingsEvent {
     ClientSettingsUpdated,
     /// Leverage-management snapshot changed.
     LevManageUpdated,
+    /// MoonBot core runtime/passive-mode state changed.
+    RuntimeStateUpdated,
     /// Remote update command: version name + release/test flag.
     ///
     /// Terminal clients treat this as a request to run their local updater. The
@@ -139,7 +144,8 @@ impl SettingsState {
             | UICommand::AlertSnapshotRequest { .. }
             | UICommand::ChartTextState(_)
             | UICommand::ChartTextSnapshot(_)
-            | UICommand::OrdersHistoryRequest(_) => None,
+            | UICommand::OrdersHistoryRequest(_)
+            | UICommand::RestartNow { .. } => None,
 
             UICommand::UpdateVersion(u) => Some(SettingsEvent::VersionUpdate {
                 #[cfg(any(test, feature = "diagnostics"))]
@@ -153,6 +159,11 @@ impl SettingsState {
             UICommand::LevManage(l) => {
                 self.lev_manage = Some(l);
                 Some(SettingsEvent::LevManageUpdated)
+            }
+
+            UICommand::RuntimeState(s) => {
+                self.runtime_state = Some(s);
+                Some(SettingsEvent::RuntimeStateUpdated)
             }
 
             UICommand::ArbActivateNotify(a) => {
@@ -305,6 +316,20 @@ mod tests {
     }
 
     #[test]
+    fn runtime_state_stores_snapshot() {
+        let mut st = SettingsState::new();
+        let ev = st.apply(UICommand::RuntimeState(RuntimeStateCommand {
+            uid: 1,
+            is_started: true,
+            auto_detect_active: false,
+        }));
+        assert!(matches!(ev, Some(SettingsEvent::RuntimeStateUpdated)));
+        let runtime = st.runtime_state.unwrap();
+        assert!(runtime.is_started);
+        assert!(!runtime.auto_detect_active);
+    }
+
+    #[test]
     fn action_commands_pass_through_without_state() {
         let mut st = SettingsState::new();
         let ev = st.apply(UICommand::StratStartStop(StratStartStop {
@@ -314,5 +339,9 @@ mod tests {
         assert!(ev.is_none());
         // No retained state changes.
         assert!(st.client_settings.is_none());
+
+        let ev = st.apply(UICommand::RestartNow { uid: 2 });
+        assert!(ev.is_none());
+        assert!(st.runtime_state.is_none());
     }
 }

@@ -452,6 +452,44 @@ fn orders_history_request_roundtrip() {
 }
 
 #[test]
+// parity: MoonProtoUIStruct.pas:TRuntimeStateCommand
+fn runtime_state_roundtrip_and_zero_tail() {
+    let mut raw = header_bytes(CMD_RUNTIME_STATE, 20);
+    raw.push(1);
+    match UICommand::parse(&raw).unwrap() {
+        UICommand::RuntimeState(cmd) => {
+            assert_eq!(cmd.uid, 20);
+            assert!(cmd.is_started);
+            assert!(!cmd.auto_detect_active);
+        }
+        _ => panic!("wrong variant"),
+    }
+
+    let mut raw = header_bytes(CMD_RUNTIME_STATE, 21);
+    raw.push(0);
+    raw.push(1);
+    match UICommand::parse(&raw).unwrap() {
+        UICommand::RuntimeState(cmd) => {
+            assert_eq!(cmd.uid, 21);
+            assert!(!cmd.is_started);
+            assert!(cmd.auto_detect_active);
+        }
+        _ => panic!("wrong variant"),
+    }
+}
+
+#[test]
+// parity: MoonProtoUIStruct.pas:TRestartNowCommand
+fn restart_now_is_empty_ui_command() {
+    let raw = build_restart_now(21);
+    assert_eq!(raw, header_bytes(CMD_RESTART_NOW, 21));
+    match UICommand::parse(&raw).unwrap() {
+        UICommand::RestartNow { uid } => assert_eq!(uid, 21),
+        _ => panic!("wrong variant"),
+    }
+}
+
+#[test]
 fn arb_activate_notify_roundtrip() {
     let raw = build_arb_activate_notify(9, 45678.25);
     match UICommand::parse(&raw).unwrap() {
