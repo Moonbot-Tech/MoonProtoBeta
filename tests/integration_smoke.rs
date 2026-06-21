@@ -17,10 +17,17 @@ use std::time::{Duration, Instant};
 use moonproto::state::OrderBookEvent;
 use moonproto::{
     parse_key_info, ClientConfig, ConnectConfig, Event, InitConfig, InitialStrategies,
-    LifecycleEvent, MoonClient, TradesStreamMode,
+    ExchangeCode, LifecycleEvent, MoonClient, TradesStreamMode,
 };
 
 const STREAM_DURATION_SECS: u64 = 15;
+
+#[test]
+fn exchange_code_stable_id_is_public_without_diagnostics() {
+    assert_eq!(ExchangeCode::Binance.stable_id(), 3);
+    assert_eq!(ExchangeCode::FBinance.stable_id(), 4);
+    assert_eq!(ExchangeCode::FBybit.stable_id(), 2);
+}
 
 fn wait_ready(client: &MoonClient, timeout: Duration) -> Vec<LifecycleEvent> {
     let deadline = Instant::now() + timeout;
