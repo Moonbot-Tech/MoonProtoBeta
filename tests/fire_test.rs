@@ -387,6 +387,21 @@ impl From<&MarketPrice> for MarketProbePrice {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RuntimeStateProbe {
+    is_started: bool,
+    auto_detect_active: bool,
+}
+
+impl From<moonproto::RuntimeStateCommand> for RuntimeStateProbe {
+    fn from(value: moonproto::RuntimeStateCommand) -> Self {
+        Self {
+            is_started: value.is_started,
+            auto_detect_active: value.auto_detect_active,
+        }
+    }
+}
+
 #[derive(Default)]
 struct SessionStats {
     label: String,
@@ -403,6 +418,8 @@ struct SessionStats {
     raw_events: u64,
     server_logs: u64,
     settings_events: u64,
+    runtime_state_events: u64,
+    runtime_state: Option<RuntimeStateProbe>,
     strategy_events: u64,
     strategy_snapshot_events: u64,
     strategy_schema_events: u64,
@@ -470,6 +487,8 @@ impl Clone for SessionStats {
             raw_events: self.raw_events,
             server_logs: self.server_logs,
             settings_events: self.settings_events,
+            runtime_state_events: self.runtime_state_events,
+            runtime_state: self.runtime_state,
             strategy_events: self.strategy_events,
             strategy_snapshot_events: self.strategy_snapshot_events,
             strategy_schema_events: self.strategy_schema_events,
@@ -561,7 +580,7 @@ impl SessionStats {
                 )
             });
         format!(
-            "connected_now={} fresh={} again={} reconnecting={} disconnected={} server_events={} engine={} raw={} logs={} settings={} strats={} strat_snapshots={} schema_events={} schema_kinds={} schema_fields={} strat_runtime_events={} strategies_running={:?} strategy_rows={} markets={} trades={} target_trade_packets={} books={} target_book_full={} target_book_update={} market_probe=[{}] order_events={} balances={} transfer_assets={} mask={:#05b} failures={} coin_card_events={} updates={} failures={} last_count={} parse_failed={}{} candles={}",
+            "connected_now={} fresh={} again={} reconnecting={} disconnected={} server_events={} engine={} raw={} logs={} settings={} runtime_state_events={} runtime_state={:?} strats={} strat_snapshots={} schema_events={} schema_kinds={} schema_fields={} strat_runtime_events={} strategies_running={:?} strategy_rows={} markets={} trades={} target_trade_packets={} books={} target_book_full={} target_book_update={} market_probe=[{}] order_events={} balances={} transfer_assets={} mask={:#05b} failures={} coin_card_events={} updates={} failures={} last_count={} parse_failed={}{} candles={}",
             self.connected_now,
             self.connected_fresh,
             self.connected_again,
@@ -572,6 +591,8 @@ impl SessionStats {
             self.raw_events,
             self.server_logs,
             self.settings_events,
+            self.runtime_state_events,
+            self.runtime_state,
             self.strategy_events,
             self.strategy_snapshot_events,
             self.strategy_schema_events,
@@ -849,6 +870,10 @@ impl Session {
         if let Some(settings) = snapshot.settings().client_settings.clone() {
             st.last_settings = Some(settings);
         }
+        st.runtime_state = snapshot
+            .settings()
+            .runtime_state
+            .map(RuntimeStateProbe::from);
         st.strategies_running = snapshot.strats().strategies_running();
         if let Some(state) = snapshot.markets().trade_state(&st.market) {
             if state.last_trade_price > 0.0 {
@@ -2520,6 +2545,20 @@ fn record_event(
                     "UI ClientSettingsUpdated; state snapshot is refreshed after pump",
                 );
             }
+        }
+        Event::Settings(SettingsEvent::RuntimeStateUpdated) => {
+            st.runtime_state_events += 1;
+            if let Some(dispatcher) = dispatcher {
+                st.runtime_state = dispatcher
+                    .settings()
+                    .runtime_state
+                    .map(RuntimeStateProbe::from);
+            }
+            log_server_event(
+                &st,
+                event_no,
+                format!("UI RuntimeState {:?}", st.runtime_state),
+            );
         }
         Event::Settings(other) => {
             log_server_event(&st, event_no, format!("UI {other:?}"));
@@ -5312,6 +5351,35 @@ fn strategy_runtime_state(session: &Session) -> Option<bool> {
     session.state_snapshot().strats().strategies_running()
 }
 
+fn ui_runtime_state(session: &Session) -> Option<RuntimeStateProbe> {
+    session
+        .state_snapshot()
+        .settings()
+        .runtime_state
+        .map(RuntimeStateProbe::from)
+}
+
+fn wait_ui_runtime_state(cfg: &FireConfig, a: &mut Session, b: &mut Session) -> RuntimeStateProbe {
+    assert!(
+        pump_pair_until_sessions(a, b, cfg.connect_timeout, "UI runtime state", |a, b| {
+            ui_runtime_state(a).is_some() && ui_runtime_state(b).is_some()
+        }),
+        "server did not send TRuntimeStateCommand to both clients within {:?}",
+        cfg.connect_timeout
+    );
+    let a_state = ui_runtime_state(a).expect("A UI runtime state was just observed");
+    let b_state = ui_runtime_state(b).expect("B UI runtime state was just observed");
+    assert_eq!(
+        a_state, b_state,
+        "clients disagree on UI runtime state: A={a_state:?} B={b_state:?}"
+    );
+    println!(
+        "FIRETEST UI RuntimeState: is_started={} auto_detect_active={}",
+        a_state.is_started, a_state.auto_detect_active
+    );
+    a_state
+}
+
 fn wait_strategy_runtime_state(cfg: &FireConfig, a: &mut Session, b: &mut Session) -> bool {
     assert!(
         pump_pair_until_sessions(
@@ -5330,8 +5398,89 @@ fn wait_strategy_runtime_state(cfg: &FireConfig, a: &mut Session, b: &mut Sessio
         a_state, b_state,
         "clients disagree on strategy runtime state: A={a_state} B={b_state}"
     );
-    println!("FIRETEST MoonShot: original strategies_running={a_state}");
+    println!("FIRETEST Strat RuntimeState: strategies_running={a_state}");
     a_state
+}
+
+fn run_runtime_restart_now_gate(cfg: &FireConfig, a: &mut Session, b: &mut Session) {
+    let original_runtime = wait_ui_runtime_state(cfg, a, b);
+    assert!(
+        original_runtime.is_started && original_runtime.auto_detect_active,
+        "FireTest RestartNow gate requires an already started/non-passive test server because the protocol has no inverse command to restore MarketActive/PassiveMode; initial runtime_state={original_runtime:?}"
+    );
+    let restore_strategies_running = wait_strategy_runtime_state(cfg, a, b);
+
+    a.client
+        .strategies()
+        .stop()
+        .expect("MoonClient strategy stop must queue before RestartNow gate");
+    assert!(
+        pump_pair_until_sessions(
+            a,
+            b,
+            cfg.connect_timeout,
+            "RestartNow pre-stop strategies",
+            |a, b| strategy_runtime_state(a) == Some(false)
+                && strategy_runtime_state(b) == Some(false)
+        ),
+        "FireTest RestartNow gate could not stop strategies before restart within {:?}",
+        cfg.connect_timeout
+    );
+
+    let before_a_runtime_events = a.snapshot().runtime_state_events;
+    let before_b_runtime_events = b.snapshot().runtime_state_events;
+    a.client
+        .settings()
+        .restart_now()
+        .expect("MoonClient settings().restart_now must queue");
+    assert!(
+        pump_pair_until_sessions(
+            a,
+            b,
+            cfg.connect_timeout,
+            "RestartNow starts checked strategies",
+            |a, b| {
+                let a_stats = a.snapshot();
+                let b_stats = b.snapshot();
+                strategy_runtime_state(a) == Some(true)
+                    && strategy_runtime_state(b) == Some(true)
+                    && a_stats.runtime_state_events > before_a_runtime_events
+                    && b_stats.runtime_state_events > before_b_runtime_events
+                    && a_stats
+                        .runtime_state
+                        .map(|state| state.is_started && state.auto_detect_active)
+                        .unwrap_or(false)
+                    && b_stats
+                        .runtime_state
+                        .map(|state| state.is_started && state.auto_detect_active)
+                        .unwrap_or(false)
+            }
+        ),
+        "FireTest RestartNow did not start strategies and broadcast TRuntimeStateCommand within {:?}: A=[{}] B=[{}]",
+        cfg.connect_timeout,
+        a.snapshot().summary(),
+        b.snapshot().summary()
+    );
+    println!("OK: RestartNow command restarted checked strategies and broadcast runtime state");
+
+    if !restore_strategies_running {
+        a.client
+            .strategies()
+            .stop()
+            .expect("MoonClient strategy stop must queue after RestartNow gate");
+        assert!(
+            pump_pair_until_sessions(
+                a,
+                b,
+                cfg.connect_timeout,
+                "RestartNow restore stopped strategies",
+                |a, b| strategy_runtime_state(a) == Some(false)
+                    && strategy_runtime_state(b) == Some(false)
+            ),
+            "FireTest RestartNow gate could not restore original strategies_running=false within {:?}",
+            cfg.connect_timeout
+        );
+    }
 }
 
 fn run_moonshot_strategy_gate_body(cfg: &FireConfig, a: &mut Session, b: &mut Session) {
@@ -6055,6 +6204,7 @@ fn fire_test_active_library_health() {
     );
     let _a_initial_settings = request_settings_until(&mut a, cfg.connect_timeout);
     let _b_initial_settings = request_settings_until(&mut b, cfg.connect_timeout);
+    let _initial_runtime_state = wait_ui_runtime_state(&cfg, &mut a, &mut b);
     assert!(
         pump_pair_until(
             &mut a,
@@ -6110,6 +6260,7 @@ fn fire_test_active_library_health() {
     run_order_lifecycle_gate(&cfg, &mut a, &mut b);
     run_real_order_cancel_gate(&cfg, &mut a, &mut b);
     run_moonshot_strategy_gate(&cfg, &mut a, &mut b);
+    run_runtime_restart_now_gate(&cfg, &mut a, &mut b);
 
     let a_initial = a.snapshot();
     let original_settings = a_initial

@@ -101,6 +101,9 @@ pub(super) fn incoming_allowed_before_domain_ready(cmd: Command, data: &[u8]) ->
             if crate::commands::strat::is_schema_payload(data)
                 || crate::commands::strat::is_snapshot_request_payload(data)
                 || crate::commands::strat::is_runtime_state_payload(data)
+    ) || matches!(
+        cmd,
+        Command::UI if crate::commands::ui::is_runtime_state_payload(data)
     )
 }
 

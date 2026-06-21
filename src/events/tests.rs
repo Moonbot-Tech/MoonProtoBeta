@@ -240,6 +240,27 @@ fn dispatcher_parses_old_client_settings_with_cfg_fallback() {
 }
 
 #[test]
+// parity: MoonProtoUIStruct.pas:TRuntimeStateCommand
+fn dispatcher_applies_runtime_state() {
+    let mut dispatcher = EventDispatcher::new();
+    let mut payload = vec![20u8]; // TRuntimeStateCommand.
+    payload.extend_from_slice(&CURRENT_PROTO_CMD_VER.to_le_bytes());
+    payload.extend_from_slice(&123u64.to_le_bytes());
+    payload.push(1); // IsStarted
+    payload.push(0); // AutoDetectActive
+
+    let events = dispatcher.dispatch(Command::UI, &payload, 0);
+
+    assert!(matches!(
+        events.as_slice(),
+        [Event::Settings(SettingsEvent::RuntimeStateUpdated)]
+    ));
+    let runtime = dispatcher.settings().runtime_state.unwrap();
+    assert!(runtime.is_started);
+    assert!(!runtime.auto_detect_active);
+}
+
+#[test]
 // parity: MoonBot MoonProtoBaseStruct.pas:TCommandRegistry.FromStream
 fn dispatcher_skips_future_version_ui_command() {
     let mut dispatcher = EventDispatcher::new();

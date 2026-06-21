@@ -121,6 +121,8 @@ impl OrderBookSnapshot {
         {
             self.seq = seq;
         }
+        #[cfg(not(any(test, feature = "diagnostics")))]
+        let _ = seq;
         self.revision = self.revision.wrapping_add(1);
     }
 

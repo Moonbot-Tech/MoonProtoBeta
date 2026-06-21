@@ -365,5 +365,8 @@ fn is_pre_init_strategy_handshake(cmd: Command, payload: &[u8]) -> bool {
             if crate::commands::strat::is_schema_payload(payload)
                 || crate::commands::strat::is_snapshot_request_payload(payload)
                 || crate::commands::strat::is_runtime_state_payload(payload)
+    ) || matches!(
+        cmd,
+        Command::UI if crate::commands::ui::is_runtime_state_payload(payload)
     )
 }

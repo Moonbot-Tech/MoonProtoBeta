@@ -270,6 +270,18 @@ impl UICommand {
                 }))
             }
 
+            CMD_RUNTIME_STATE => {
+                let is_started = read_bool_zero_tail(payload, &mut pos);
+                let auto_detect_active = read_bool_zero_tail(payload, &mut pos);
+                Some(UICommand::RuntimeState(RuntimeStateCommand {
+                    uid,
+                    is_started,
+                    auto_detect_active,
+                }))
+            }
+
+            CMD_RESTART_NOW => Some(UICommand::RestartNow { uid }),
+
             _ => Some(UICommand::Unknown { cmd_id, uid }),
         }
     }

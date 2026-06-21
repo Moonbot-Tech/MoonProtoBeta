@@ -33,6 +33,12 @@ for event in client.drain_events() {
                     redraw_leverage_management(lev_manage);
                 }
             }
+            SettingsEvent::RuntimeStateUpdated => {
+                let Some(state) = client.snapshot() else { continue; };
+                if let Some(runtime) = state.settings().runtime_state {
+                    redraw_runtime_controls(runtime.is_started, runtime.auto_detect_active);
+                }
+            }
             _ => {}
         }
     }
@@ -40,10 +46,10 @@ for event in client.drain_events() {
 ```
 
 `SettingsState` stores the latest settings snapshot and small derived fields:
-leverage management and arb validity time. Client-originated UI commands such as
-MM-orders subscription, emulator ticks, trigger management, reset-profit, and
-DEX/spot switching are sent through high-level handles; they are not inbound
-settings state.
+leverage management, runtime state, and arb validity time. Client-originated UI
+commands such as MM-orders subscription, emulator ticks, trigger management,
+reset-profit, restart-now, and DEX/spot switching are sent through high-level
+handles; they are not inbound settings state.
 
 ## Requesting Current Settings
 
@@ -93,6 +99,7 @@ client.settings().request_release_update()?;             // release update butto
 client.settings().request_version_update("MoonBot-7")?;  // test/beta version name
 client.settings().switch_dex("Main")?;
 client.settings().switch_spot(SpotMarketKind::Crypto)?;
+client.settings().restart_now()?;
 client.settings().set_triggers_for_markets(["BTCUSDT", "ETHUSDT"], &[1, 7])?;
 client.settings().clear_triggers_for_all(&[3])?;
 ```
@@ -144,6 +151,32 @@ effect.
 
 Low-level builders remain internal diagnostics/compatibility machinery; normal
 applications should use the typed methods above.
+
+### Runtime State
+
+The server sends runtime state after connect and whenever the market runtime or
+passive-mode state changes. Read it from
+`snapshot().settings().runtime_state` after
+`SettingsEvent::RuntimeStateUpdated`.
+
+```rust
+if let Some(runtime) = client
+    .snapshot()
+    .and_then(|state| state.settings().runtime_state)
+{
+    set_start_button(runtime.is_started);
+    set_auto_detect_indicator(runtime.auto_detect_active);
+}
+```
+
+`runtime.is_started` is the core market runtime state. `runtime.auto_detect_active`
+means automatic detection is active; if it is false, the core is in passive
+mode.
+
+`client.settings().restart_now()?` queues the normal MoonBot restart-now action:
+start the market runtime if needed, leave passive mode if needed, and start
+checked strategies. The call returns after the intent is queued; the observable
+result is a later `RuntimeStateUpdated` event and updated retained state.
 
 ### Leverage Management
 

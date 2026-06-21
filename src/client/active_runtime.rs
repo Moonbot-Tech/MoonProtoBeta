@@ -787,6 +787,11 @@ impl MoonClient {
         self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::LevManage(cmd)))
     }
 
+    /// Ask the MoonBot core to start/restart the market runtime now.
+    pub(crate) fn restart_now(&self) -> Result<(), MoonClientError> {
+        self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::RestartNow))
+    }
+
     /// Queue emulated chart trades.
     pub(crate) fn send_emulated_trades(
         &self,
