@@ -10,9 +10,14 @@ the live stream moving when old gaps cannot be recovered.
 ```rust
 use moonproto::TradesStreamMode;
 
+// Choose the tape shape the UI needs.
 client.streams().subscribe_all_trades(TradesStreamMode::TradesOnly)?;
+// Or, for MoonBot-style heat-map rows with HyperLiquid taker wallets:
+client
+    .streams()
+    .subscribe_all_trades(TradesStreamMode::TradesAndMarketMakers)?;
 client.streams().subscribe_trades_for(
-    TradesStreamMode::TradesOnly,
+    TradesStreamMode::TradesAndMarketMakers,
     ["BTCUSDT", "ETHUSDT"],
 )?;
 client.streams().unsubscribe_all_trades()?;
@@ -22,6 +27,13 @@ client.streams().unsubscribe_all_trades()?;
 is known, the library creates retained storage for all known markets and keeps
 trades, liquidations, market-maker rows, LastPrice rows, 5-minute candles,
 mini-candles, and derived analytics for them.
+
+`TradesOnly` is the exchange tape: time, price, quantity, and side. HyperLiquid
+wallet/taker addresses for the MoonBot heat-map are not fields on
+`TradeHistoryRow`. They arrive in market-maker sections when the stream is
+subscribed with `TradesStreamMode::TradesAndMarketMakers` or when the
+MM-orders subscription is enabled. Read them from the retained `mm_orders` ring
+and its slot-aligned `mm_order_companion` ring.
 
 `subscribe_trades_for(mode, markets)` sends the same server subscription, but
 retains/calculates data only for the listed markets. Passing an empty market
@@ -298,6 +310,27 @@ without retaining every old trade forever.
 `mm_order_companion` is aligned by slot with `mm_orders` and carries the HyperDex
 taker address plus the MoonBot-compatible display color. Use `taker_hex()` for
 taker logs/tooltips and `color_argb()` for chart coloring.
+
+For the heat-map / wallet map UI, drain both rings with the same cursor window:
+
+```rust
+let Some(readers) = snapshot.market_history_readers_for(&market) else { return; };
+let (Some(mm_orders), Some(mm_companion)) =
+    (readers.mm_orders.clone(), readers.mm_order_companion.clone())
+else {
+    return;
+};
+
+let mut orders = Vec::new();
+let mut takers = Vec::new();
+mm_orders.copy_from_cursor(cursor, limit, &mut orders);
+mm_companion.copy_from_cursor(cursor, limit, &mut takers);
+
+for (order, taker) in orders.iter().zip(takers.iter()) {
+    draw_heatmap_point(order.time(), order.volume, taker.color_argb());
+    show_taker_tooltip(taker.taker_hex());
+}
+```
 
 ## Diagnostics Fixture
 
