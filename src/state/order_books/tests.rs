@@ -69,6 +69,11 @@ fn full_then_inorder_diffs() {
             ..
         }
     ));
+    assert_eq!(
+        ob.book_by_kind(1, 0).unwrap().revision(),
+        1,
+        "public revision advances when a Full packet updates the visible book"
+    );
 
     let events = ob.on_packet(make_pkt(1, 0, 11, false), 1010);
     assert!(matches!(
@@ -79,6 +84,11 @@ fn full_then_inorder_diffs() {
             ..
         }
     ));
+    assert_eq!(
+        ob.book_by_kind(1, 0).unwrap().revision(),
+        2,
+        "public revision advances when an in-order Diff updates the visible book"
+    );
 
     let events = ob.on_packet(make_pkt(1, 0, 12, false), 1020);
     assert!(matches!(
@@ -89,6 +99,7 @@ fn full_then_inorder_diffs() {
             ..
         }
     ));
+    assert_eq!(ob.book_by_kind(1, 0).unwrap().revision(), 3);
 }
 
 #[test]
@@ -187,6 +198,11 @@ fn gap_caches_then_drains() {
     let _ = ob.on_packet(make_pkt(3, 0, 10, true), 1000);
     // Received seq 12 — gap. Put it in the cache.
     let events = ob.on_packet(make_pkt(3, 0, 12, false), 1010);
+    assert_eq!(
+        ob.book_by_kind(3, 0).unwrap().revision(),
+        1,
+        "cached gap packets must not look like visible book updates"
+    );
     assert!(events.iter().any(|e| matches!(
         e,
         OrderBookEvent::Ignored {
@@ -205,12 +221,18 @@ fn gap_caches_then_drains() {
         })
         .collect();
     assert_eq!(applied_seqs, vec![11, 12]);
+    assert_eq!(
+        ob.book_by_kind(3, 0).unwrap().revision(),
+        3,
+        "revision advances once per actually applied packet, including cache drain"
+    );
 }
 
 #[test]
 fn stale_diff_rejected() {
     let mut ob = OrderBooks::new();
     let _ = ob.on_packet(make_pkt(4, 0, 20, true), 1000); // Full, expected_seq = 21
+    let revision = ob.book_by_kind(4, 0).unwrap().revision();
     let events = ob.on_packet(make_pkt(4, 0, 19, false), 1010); // seq 19 < 21
     assert!(events.iter().any(|e| matches!(
         e,
@@ -219,6 +241,11 @@ fn stale_diff_rejected() {
             ..
         }
     )));
+    assert_eq!(
+        ob.book_by_kind(4, 0).unwrap().revision(),
+        revision,
+        "stale packets are ignored and must not trip the public update gate"
+    );
 }
 
 #[test]

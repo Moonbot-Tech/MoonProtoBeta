@@ -29,7 +29,7 @@ pub(super) fn apply_full_book(
 ) -> TopOfBook {
     let book = order_book_entry_arc(books, key);
     let mut book = book.write_arc();
-    book.set_seq(seq);
+    book.mark_applied(seq);
     book.buys.clear();
     book.buys
         .extend(buys.iter().copied().map(OrderBookLevel::from));
@@ -66,7 +66,7 @@ pub(super) fn apply_diff_book(
         false,
         eps,
     );
-    book.set_seq(seq);
+    book.mark_applied(seq);
     book.top()
 }
 
@@ -80,6 +80,7 @@ fn order_book_entry_arc(
             kind: OrderBookKind::from_u8(key.1).unwrap_or(OrderBookKind::Futures),
             #[cfg(any(test, feature = "diagnostics"))]
             seq: 0,
+            revision: 0,
             buys: Vec::new(),
             sells: Vec::new(),
         }))
