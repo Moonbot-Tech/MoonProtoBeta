@@ -100,6 +100,8 @@ let client = MoonClient::connect(cfg, ConnectConfig::new(InitConfig {
         Vec::new(), // pass the current local strategy list if the app has one
     )),
     subscribe_trades: Some(TradesStreamMode::TradesOnly),
+    // Use TradesAndMarketMakers when the UI needs heat-map MM-orders with
+    // HyperLiquid taker wallet addresses.
     subscribe_orderbooks: vec!["BTCUSDT".to_string()],
     ..Default::default()
 }))?;

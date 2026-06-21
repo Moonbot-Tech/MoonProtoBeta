@@ -50,6 +50,8 @@ let init = InitConfig {
         Vec::new(), // pass the current local strategy list if the app has one
     )),
     subscribe_trades: Some(TradesStreamMode::TradesOnly),
+    // Use TradesAndMarketMakers for MoonBot-style MM heat-map rows with
+    // HyperLiquid taker wallet addresses.
     subscribe_orderbooks: vec!["BTCUSDT".to_string()],
     ..Default::default()
 };
