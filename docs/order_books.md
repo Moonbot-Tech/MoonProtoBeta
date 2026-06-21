@@ -73,7 +73,10 @@ let Some(state) = client.snapshot() else { return; };
 let Some(market) = state.markets().get("BTCUSDT") else { return; };
 
 if let Some(book) = state.order_book_for(&market, OrderBookKind::Futures) {
-    draw_orderbook(&book.buys, &book.sells);
+    if last_book_revision != Some(book.revision()) {
+        last_book_revision = Some(book.revision());
+        rebuild_orderbook_layer(&book.buys, &book.sells);
+    }
 }
 
 if let Some(top) = state.top_of_book_for(&market, OrderBookKind::Futures) {
@@ -96,6 +99,10 @@ pub struct OrderBookSnapshot {
     pub sells: Vec<OrderBookLevel>,
 }
 
+impl OrderBookSnapshot {
+    pub fn revision(&self) -> u64;
+}
+
 pub struct TopOfBook {
     pub bid: Option<OrderBookLevel>,
     pub ask: Option<OrderBookLevel>,
@@ -104,6 +111,12 @@ pub struct TopOfBook {
 
 Incoming wire rows are compact `f32`, but the retained current-book snapshot
 stores levels as `f64`.
+
+`OrderBookSnapshot::revision()` is the UI-facing freshness gate. It advances
+once per full or diff packet applied to that retained book. Keep the last seen
+revision in your view model and skip expensive orderbook buffer rebuilds while
+it stays unchanged. It is local to one `MoonClient` runtime and is not the raw
+wire sequence number.
 
 ## Recovery
 

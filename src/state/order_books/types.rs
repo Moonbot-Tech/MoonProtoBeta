@@ -110,18 +110,29 @@ pub struct OrderBookSnapshot {
     #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub seq: u16,
+    pub(crate) revision: u64,
     pub buys: Vec<OrderBookLevel>,
     pub sells: Vec<OrderBookLevel>,
 }
 
 impl OrderBookSnapshot {
-    #[cfg(any(test, feature = "diagnostics"))]
-    pub(crate) fn set_seq(&mut self, seq: u16) {
-        self.seq = seq;
+    pub(crate) fn mark_applied(&mut self, seq: u16) {
+        #[cfg(any(test, feature = "diagnostics"))]
+        {
+            self.seq = seq;
+        }
+        self.revision = self.revision.wrapping_add(1);
     }
 
-    #[cfg(not(any(test, feature = "diagnostics")))]
-    pub(crate) fn set_seq(&mut self, _seq: u16) {}
+    /// Monotonic local revision of this applied current book.
+    ///
+    /// The value changes every time MoonProto applies a full or diff packet to
+    /// this retained book. UI code can keep the last seen revision and skip
+    /// expensive orderbook rebuilds while it stays unchanged. It is local to
+    /// the current client runtime and is not a wire sequence number.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
 
     /// Server-local market index retained for protocol diagnostics and custom
     /// low-level runtimes. Regular UI code should resolve books by market name
