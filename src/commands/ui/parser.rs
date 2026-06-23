@@ -282,6 +282,38 @@ impl UICommand {
 
             CMD_RESTART_NOW => Some(UICommand::RestartNow { uid }),
 
+            CMD_KERNEL_LICENSE_STATE => {
+                Some(UICommand::KernelLicenseState(KernelLicenseStateCommand {
+                    uid,
+                    paid_version: read_bool_zero_tail(payload, &mut pos),
+                    reg_id: read_i32_zero_tail(payload, &mut pos),
+                    order_count: read_i32_zero_tail(payload, &mut pos),
+                    use_moon_strike: read_bool_zero_tail(payload, &mut pos),
+                    use_load_charts: read_bool_zero_tail(payload, &mut pos),
+                    use_web_hook: read_bool_zero_tail(payload, &mut pos),
+                    use_moon_streamer: read_bool_zero_tail(payload, &mut pos),
+                    use_algo_mod: read_bool_zero_tail(payload, &mut pos),
+                    use_ref_mod: read_bool_zero_tail(payload, &mut pos),
+                    use_back_mod: read_bool_zero_tail(payload, &mut pos),
+                    news_valid_until: read_delphi_time_zero_tail(payload, &mut pos),
+                    news_trial_used: read_bool_zero_tail(payload, &mut pos),
+                    arb_active: read_bool_zero_tail(payload, &mut pos),
+                    arb_valid_until: read_delphi_time_zero_tail(payload, &mut pos),
+                    moon_credits: read_i32_zero_tail(payload, &mut pos),
+                    moon_credits_hold: read_i32_zero_tail(payload, &mut pos),
+                    moon_credits_auction: read_i32_zero_tail(payload, &mut pos),
+                    can_use_watcher: read_bool_zero_tail(payload, &mut pos),
+                }))
+            }
+
+            CMD_KERNEL_LICENSE_STATE_REQUEST => {
+                let activate_feature = read_i32_zero_tail(payload, &mut pos);
+                Some(UICommand::KernelLicenseStateRequest {
+                    uid,
+                    activate_feature,
+                })
+            }
+
             _ => Some(UICommand::Unknown { cmd_id, uid }),
         }
     }
@@ -619,6 +651,15 @@ fn read_i32_zero_tail(data: &[u8], pos: &mut usize) -> i32 {
     let mut bytes = [0u8; 4];
     read_into_prefix(data, pos, &mut bytes);
     i32::from_le_bytes(bytes)
+}
+
+fn read_delphi_time_zero_tail(data: &[u8], pos: &mut usize) -> Option<MoonTime> {
+    let days = f64::from_bits(read_u64_zero_tail(data, pos));
+    if days == 0.0 {
+        None
+    } else {
+        MoonTime::from_delphi_days(days)
+    }
 }
 
 fn read_i32_preserve_tail(data: &[u8], pos: &mut usize, current: i32) -> i32 {

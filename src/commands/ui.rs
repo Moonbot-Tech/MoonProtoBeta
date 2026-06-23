@@ -22,6 +22,8 @@
 //! - 19 — `TOrdersHistoryRequestCommand` (market name)
 //! - 20 — `TRuntimeStateCommand`    (High, server runtime/passive state)
 //! - 21 — `TRestartNowCommand`      (High, restart/start runtime now)
+//! - 22 — `TKernelLicenseStateCommand` (High, license and MoonCredits state)
+//! - 23 — `TKernelLicenseStateRequest` (High, request license/MoonCredits state)
 //!
 //! ## ASCfg / ASCfg2 blobs
 //! `TAutoStartConfig` (104 bytes) and `TAutoStartConfig2` (168 bytes) are
@@ -48,16 +50,18 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 mod builders;
 mod parser;
 
+use crate::time::MoonTime;
 #[cfg(test)]
 pub use builders::build_chart_text_snapshot_for_test;
 #[cfg(test)]
 pub(crate) use builders::build_new_market_notify;
 pub(crate) use builders::{
     build_alert_object, build_alert_snapshot_request, build_arb_activate_notify,
-    build_chart_text_state, build_client_settings, build_emu_trades, build_lev_manage,
-    build_mm_orders_subscribe, build_orders_history_request, build_reset_profit, build_restart_now,
-    build_settings_request, build_strat_start_stop, build_strat_start_stop_v2, build_switch_dex,
-    build_switch_spot, build_trigger_manage, build_update_version,
+    build_chart_text_state, build_client_settings, build_emu_trades,
+    build_kernel_license_state_request, build_lev_manage, build_mm_orders_subscribe,
+    build_orders_history_request, build_reset_profit, build_restart_now, build_settings_request,
+    build_strat_start_stop, build_strat_start_stop_v2, build_switch_dex, build_switch_spot,
+    build_trigger_manage, build_update_version,
 };
 
 // --- CmdId constants ---
@@ -82,10 +86,17 @@ const CMD_CHART_TEXT_SNAPSHOT: u8 = 18;
 const CMD_ORDERS_HISTORY_REQUEST: u8 = 19;
 const CMD_RUNTIME_STATE: u8 = 20;
 const CMD_RESTART_NOW: u8 = 21;
+const CMD_KERNEL_LICENSE_STATE: u8 = 22;
+const CMD_KERNEL_LICENSE_STATE_REQUEST: u8 = 23;
 
 #[inline]
 pub(crate) fn is_runtime_state_payload(payload: &[u8]) -> bool {
     payload.first().copied() == Some(CMD_RUNTIME_STATE)
+}
+
+#[inline]
+pub(crate) fn is_kernel_license_state_payload(payload: &[u8]) -> bool {
+    payload.first().copied() == Some(CMD_KERNEL_LICENSE_STATE)
 }
 
 const LEV_CMD_VER: u8 = 1;
@@ -1381,6 +1392,38 @@ pub struct RuntimeStateCommand {
     pub auto_detect_active: bool,
 }
 
+/// `TKernelLicenseStateCommand` (UI CmdId=22).
+///
+/// Latest license/module/MoonCredits state sent by the MoonBot core after
+/// connect and on explicit refresh. Wire `TDateTime` values are converted at
+/// the protocol boundary; UI code receives normal [`MoonTime`] values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KernelLicenseStateCommand {
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
+    pub uid: u64,
+    #[cfg(not(any(test, feature = "diagnostics")))]
+    pub(crate) uid: u64,
+    pub paid_version: bool,
+    pub reg_id: i32,
+    pub order_count: i32,
+    pub use_moon_strike: bool,
+    pub use_load_charts: bool,
+    pub use_web_hook: bool,
+    pub use_moon_streamer: bool,
+    pub use_algo_mod: bool,
+    pub use_ref_mod: bool,
+    pub use_back_mod: bool,
+    pub news_valid_until: Option<MoonTime>,
+    pub news_trial_used: bool,
+    pub arb_active: bool,
+    pub arb_valid_until: Option<MoonTime>,
+    pub moon_credits: i32,
+    pub moon_credits_hold: i32,
+    pub moon_credits_auction: i32,
+    pub can_use_watcher: bool,
+}
+
 // =============================================================================
 //  UICommand enum
 // =============================================================================
@@ -1415,6 +1458,11 @@ pub enum UICommand {
     RuntimeState(RuntimeStateCommand),
     RestartNow {
         uid: u64,
+    },
+    KernelLicenseState(KernelLicenseStateCommand),
+    KernelLicenseStateRequest {
+        uid: u64,
+        activate_feature: i32,
     },
     /// Command header is well-formed, but the command version is newer than
     /// this library can parse. The command is skipped without state changes.

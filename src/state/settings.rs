@@ -8,17 +8,20 @@
 //! - `ClientSettings`: full UI settings snapshot.
 //! - `LevManage`: leverage-management settings snapshot.
 //! - `RuntimeState`: started/passive-mode state of the MoonBot core.
+//! - `KernelLicenseState`: license/module/MoonCredits state.
 //! - `ArbActivateNotify`: arbitrage-valid-until timestamp.
 //!
 //! Client->server action commands (`SettingsRequest`, `StratStartStop`,
 //! `MMOrdersSubscribe`, `EmuTrades`, `TriggerManage`, `ResetProfit`,
-//! `SwitchDex`, `SwitchSpot`, `RestartNow`) are sent through high-level handles
-//! and ignored if they ever arrive inbound.
+//! `SwitchDex`, `SwitchSpot`, `RestartNow`, `KernelLicenseStateRequest`) are
+//! sent through high-level handles and ignored if they ever arrive inbound.
 //! `NewMarketNotify` is an internal Active Lib trigger: the dispatcher uses it
 //! to force listing refresh, and user code receives a market event only after
 //! the refreshed list actually inserts new markets.
 
-use crate::commands::ui::{ClientSettingsCommand, LevManage, RuntimeStateCommand, UICommand};
+use crate::commands::ui::{
+    ClientSettingsCommand, KernelLicenseStateCommand, LevManage, RuntimeStateCommand, UICommand,
+};
 use crate::time::MoonTime;
 
 /// Synchronized UI/settings state updated from inbound UI settings packets.
@@ -41,6 +44,8 @@ pub struct SettingsState {
     pub lev_manage: Option<LevManage>,
     /// Current market-runtime/passive-mode state, if received.
     pub runtime_state: Option<RuntimeStateCommand>,
+    /// Current license/module/MoonCredits state, if received.
+    pub kernel_license_state: Option<KernelLicenseStateCommand>,
     /// Raw `TDateTime` days for diagnostics/parity tests.
     ///
     /// Normal terminal code should use [`Self::arb_valid_until_time`] and
@@ -60,6 +65,8 @@ pub enum SettingsEvent {
     LevManageUpdated,
     /// MoonBot core runtime/passive-mode state changed.
     RuntimeStateUpdated,
+    /// License/module/MoonCredits state changed.
+    KernelLicenseStateUpdated,
     /// Remote update command: version name + release/test flag.
     ///
     /// Terminal clients treat this as a request to run their local updater. The
@@ -145,7 +152,8 @@ impl SettingsState {
             | UICommand::ChartTextState(_)
             | UICommand::ChartTextSnapshot(_)
             | UICommand::OrdersHistoryRequest(_)
-            | UICommand::RestartNow { .. } => None,
+            | UICommand::RestartNow { .. }
+            | UICommand::KernelLicenseStateRequest { .. } => None,
 
             UICommand::UpdateVersion(u) => Some(SettingsEvent::VersionUpdate {
                 #[cfg(any(test, feature = "diagnostics"))]
@@ -164,6 +172,11 @@ impl SettingsState {
             UICommand::RuntimeState(s) => {
                 self.runtime_state = Some(s);
                 Some(SettingsEvent::RuntimeStateUpdated)
+            }
+
+            UICommand::KernelLicenseState(s) => {
+                self.kernel_license_state = Some(s);
+                Some(SettingsEvent::KernelLicenseStateUpdated)
             }
 
             UICommand::ArbActivateNotify(a) => {
@@ -330,6 +343,38 @@ mod tests {
     }
 
     #[test]
+    fn kernel_license_state_stores_snapshot() {
+        let mut st = SettingsState::new();
+        let ev = st.apply(UICommand::KernelLicenseState(KernelLicenseStateCommand {
+            uid: 1,
+            paid_version: true,
+            reg_id: 42,
+            order_count: 3,
+            use_moon_strike: true,
+            use_load_charts: false,
+            use_web_hook: true,
+            use_moon_streamer: false,
+            use_algo_mod: true,
+            use_ref_mod: false,
+            use_back_mod: true,
+            news_valid_until: Some(MoonTime::from_unix_millis(1_000)),
+            news_trial_used: true,
+            arb_active: false,
+            arb_valid_until: Some(MoonTime::from_unix_millis(2_000)),
+            moon_credits: 100,
+            moon_credits_hold: 20,
+            moon_credits_auction: 7,
+            can_use_watcher: true,
+        }));
+        assert!(matches!(ev, Some(SettingsEvent::KernelLicenseStateUpdated)));
+        let state = st.kernel_license_state.unwrap();
+        assert!(state.paid_version);
+        assert_eq!(state.reg_id, 42);
+        assert_eq!(state.moon_credits, 100);
+        assert!(state.can_use_watcher);
+    }
+
+    #[test]
     fn action_commands_pass_through_without_state() {
         let mut st = SettingsState::new();
         let ev = st.apply(UICommand::StratStartStop(StratStartStop {
@@ -343,5 +388,12 @@ mod tests {
         let ev = st.apply(UICommand::RestartNow { uid: 2 });
         assert!(ev.is_none());
         assert!(st.runtime_state.is_none());
+
+        let ev = st.apply(UICommand::KernelLicenseStateRequest {
+            uid: 3,
+            activate_feature: 0,
+        });
+        assert!(ev.is_none());
+        assert!(st.kernel_license_state.is_none());
     }
 }

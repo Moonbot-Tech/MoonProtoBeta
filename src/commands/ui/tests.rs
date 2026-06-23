@@ -490,6 +490,92 @@ fn restart_now_is_empty_ui_command() {
 }
 
 #[test]
+// parity: MoonProtoUIStruct.pas:TKernelLicenseStateCommand
+fn kernel_license_state_roundtrip_and_zero_tail() {
+    let mut raw = header_bytes(CMD_KERNEL_LICENSE_STATE, 22);
+    raw.push(1); // PaidVersion
+    raw.extend_from_slice(&42i32.to_le_bytes()); // RegID
+    raw.extend_from_slice(&3i32.to_le_bytes()); // OCount
+    raw.push(1); // UseMoonStrike
+    raw.push(1); // UseLoadCharts
+    raw.push(0); // UseWebHook
+    raw.push(1); // UseMoonStreamer
+    raw.push(0); // UseAlgoMod
+    raw.push(1); // UseRefMod
+    raw.push(0); // UseBackMod
+    raw.extend_from_slice(&45678.25f64.to_le_bytes()); // NewsValid
+    raw.push(1); // NewsTrialUsed
+    raw.push(1); // ArbActive
+    raw.extend_from_slice(&45679.5f64.to_le_bytes()); // ArbValid
+    raw.extend_from_slice(&250i32.to_le_bytes()); // MCredits
+    raw.extend_from_slice(&12i32.to_le_bytes()); // MCreditsHold
+    raw.extend_from_slice(&8i32.to_le_bytes()); // MCreditsAuc
+    raw.push(1); // CanUseWatcher
+
+    match UICommand::parse(&raw).unwrap() {
+        UICommand::KernelLicenseState(cmd) => {
+            assert_eq!(cmd.uid, 22);
+            assert!(cmd.paid_version);
+            assert_eq!(cmd.reg_id, 42);
+            assert_eq!(cmd.order_count, 3);
+            assert!(cmd.use_moon_strike);
+            assert!(cmd.use_load_charts);
+            assert!(!cmd.use_web_hook);
+            assert!(cmd.use_moon_streamer);
+            assert!(!cmd.use_algo_mod);
+            assert!(cmd.use_ref_mod);
+            assert!(!cmd.use_back_mod);
+            assert_eq!(
+                cmd.news_valid_until,
+                crate::time::MoonTime::from_delphi_days(45678.25)
+            );
+            assert!(cmd.news_trial_used);
+            assert!(cmd.arb_active);
+            assert_eq!(
+                cmd.arb_valid_until,
+                crate::time::MoonTime::from_delphi_days(45679.5)
+            );
+            assert_eq!(cmd.moon_credits, 250);
+            assert_eq!(cmd.moon_credits_hold, 12);
+            assert_eq!(cmd.moon_credits_auction, 8);
+            assert!(cmd.can_use_watcher);
+        }
+        _ => panic!("wrong variant"),
+    }
+
+    let mut raw = header_bytes(CMD_KERNEL_LICENSE_STATE, 23);
+    raw.push(1);
+    match UICommand::parse(&raw).unwrap() {
+        UICommand::KernelLicenseState(cmd) => {
+            assert!(cmd.paid_version);
+            assert_eq!(cmd.reg_id, 0);
+            assert_eq!(cmd.news_valid_until, None);
+            assert!(!cmd.can_use_watcher);
+        }
+        _ => panic!("wrong variant"),
+    }
+}
+
+#[test]
+// parity: MoonProtoUIStruct.pas:TKernelLicenseStateRequest
+fn kernel_license_state_request_roundtrip() {
+    let raw = build_kernel_license_state_request(23, 0);
+    let mut expected = header_bytes(CMD_KERNEL_LICENSE_STATE_REQUEST, 23);
+    expected.extend_from_slice(&0i32.to_le_bytes());
+    assert_eq!(raw, expected);
+    match UICommand::parse(&raw).unwrap() {
+        UICommand::KernelLicenseStateRequest {
+            uid,
+            activate_feature,
+        } => {
+            assert_eq!(uid, 23);
+            assert_eq!(activate_feature, 0);
+        }
+        _ => panic!("wrong variant"),
+    }
+}
+
+#[test]
 fn arb_activate_notify_roundtrip() {
     let raw = build_arb_activate_notify(9, 45678.25);
     match UICommand::parse(&raw).unwrap() {
