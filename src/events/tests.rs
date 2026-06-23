@@ -261,6 +261,62 @@ fn dispatcher_applies_runtime_state() {
 }
 
 #[test]
+// Wire shape for UI CmdId=22: TKernelLicenseStateCommand.
+fn dispatcher_applies_kernel_license_state() {
+    let mut dispatcher = EventDispatcher::new();
+    let mut payload = vec![22u8]; // TKernelLicenseStateCommand.
+    payload.extend_from_slice(&CURRENT_PROTO_CMD_VER.to_le_bytes());
+    payload.extend_from_slice(&321u64.to_le_bytes());
+    payload.push(1); // PaidVersion
+    payload.extend_from_slice(&17i32.to_le_bytes()); // RegID
+    payload.extend_from_slice(&5i32.to_le_bytes()); // OCount
+    payload.push(1); // UseMoonStrike
+    payload.push(0); // UseLoadCharts
+    payload.push(1); // UseWebHook
+    payload.push(0); // UseMoonStreamer
+    payload.push(1); // UseAlgoMod
+    payload.push(0); // UseRefMod
+    payload.push(1); // UseBackMod
+    payload.extend_from_slice(&45678.25f64.to_le_bytes()); // NewsValid
+    payload.push(1); // NewsTrialUsed
+    payload.push(1); // ArbActive
+    payload.extend_from_slice(&45679.5f64.to_le_bytes()); // ArbValid
+    payload.extend_from_slice(&100i32.to_le_bytes()); // MCredits
+    payload.extend_from_slice(&20i32.to_le_bytes()); // MCreditsHold
+    payload.extend_from_slice(&7i32.to_le_bytes()); // MCreditsAuc
+    payload.push(1); // CanUseWatcher
+
+    let events = dispatcher.dispatch(Command::UI, &payload, 0);
+
+    assert!(matches!(
+        events.as_slice(),
+        [Event::Settings(SettingsEvent::KernelLicenseStateUpdated)]
+    ));
+    let state = dispatcher.settings().kernel_license_state.unwrap();
+    assert!(state.paid_version);
+    assert_eq!(state.reg_id, 17);
+    assert_eq!(state.order_count, 5);
+    assert!(state.use_moon_strike);
+    assert!(state.use_web_hook);
+    assert!(state.use_algo_mod);
+    assert!(state.use_back_mod);
+    assert_eq!(
+        state.news_valid_until,
+        crate::time::MoonTime::from_delphi_days(45678.25)
+    );
+    assert!(state.news_trial_used);
+    assert!(state.arb_active);
+    assert_eq!(
+        state.arb_valid_until,
+        crate::time::MoonTime::from_delphi_days(45679.5)
+    );
+    assert_eq!(state.moon_credits, 100);
+    assert_eq!(state.moon_credits_hold, 20);
+    assert_eq!(state.moon_credits_auction, 7);
+    assert!(state.can_use_watcher);
+}
+
+#[test]
 // parity: MoonBot MoonProtoBaseStruct.pas:TCommandRegistry.FromStream
 fn dispatcher_skips_future_version_ui_command() {
     let mut dispatcher = EventDispatcher::new();

@@ -792,6 +792,13 @@ impl MoonClient {
         self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::RestartNow))
     }
 
+    /// Request the latest license/module/MoonCredits state.
+    pub(crate) fn request_kernel_license_state(&self) -> Result<(), MoonClientError> {
+        self.send_no_reply(RuntimeCommand::Ui(
+            UiRuntimeCommand::KernelLicenseStateRequest,
+        ))
+    }
+
     /// Queue emulated chart trades.
     pub(crate) fn send_emulated_trades(
         &self,

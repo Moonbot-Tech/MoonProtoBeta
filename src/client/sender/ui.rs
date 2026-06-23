@@ -173,4 +173,14 @@ impl ClientSender {
         let raw = crate::commands::ui::build_restart_now(rand::random());
         self.send_typed_domain_cmd(raw, Command::UI);
     }
+
+    #[doc(hidden)]
+    /// Send `TKernelLicenseStateRequest`.
+    pub(crate) fn ui_kernel_license_state_request(&self, activate_feature: i32) {
+        let raw = crate::commands::ui::build_kernel_license_state_request(
+            rand::random(),
+            activate_feature,
+        );
+        self.send_typed_domain_cmd(raw, Command::UI);
+    }
 }

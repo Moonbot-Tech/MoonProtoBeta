@@ -697,6 +697,22 @@ pub(crate) const UI_COMMANDS: &[CommandDescriptor] = &[
         priority = High,
         direction = Outbound
     ),
+    cmd_desc!(
+        Command::UI,
+        22,
+        "TKernelLicenseStateCommand",
+        base = Base,
+        priority = High,
+        direction = Inbound
+    ),
+    cmd_desc!(
+        Command::UI,
+        23,
+        "TKernelLicenseStateRequest",
+        base = Base,
+        priority = High,
+        direction = Outbound
+    ),
 ];
 
 pub(crate) const STRAT_COMMANDS: &[CommandDescriptor] = &[
@@ -983,7 +999,7 @@ mod tests {
     #[test]
     fn descriptor_map_covers_known_typed_domains() {
         assert_eq!(ORDER_COMMANDS.len(), 32);
-        assert_eq!(UI_COMMANDS.len(), 22);
+        assert_eq!(UI_COMMANDS.len(), 24);
         assert_eq!(STRAT_COMMANDS.len(), 11);
         assert_eq!(BALANCE_COMMANDS.len(), 7);
         assert_eq!(API_COMMANDS.len(), 3);
@@ -1055,6 +1071,19 @@ mod tests {
         assert_eq!(restart.name, "TRestartNowCommand");
         assert_eq!(restart.priority, CommandPriority::High);
         assert_eq!(restart.direction, CommandDirection::Outbound);
+    }
+
+    #[test]
+    fn descriptor_map_includes_kernel_license_state() {
+        let state = find_descriptor(Command::UI, 22).unwrap();
+        assert_eq!(state.name, "TKernelLicenseStateCommand");
+        assert_eq!(state.priority, CommandPriority::High);
+        assert_eq!(state.direction, CommandDirection::Inbound);
+
+        let request = find_descriptor(Command::UI, 23).unwrap();
+        assert_eq!(request.name, "TKernelLicenseStateRequest");
+        assert_eq!(request.priority, CommandPriority::High);
+        assert_eq!(request.direction, CommandDirection::Outbound);
     }
 
     #[test]

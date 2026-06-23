@@ -103,7 +103,9 @@ pub(super) fn incoming_allowed_before_domain_ready(cmd: Command, data: &[u8]) ->
                 || crate::commands::strat::is_runtime_state_payload(data)
     ) || matches!(
         cmd,
-        Command::UI if crate::commands::ui::is_runtime_state_payload(data)
+        Command::UI
+            if crate::commands::ui::is_runtime_state_payload(data)
+                || crate::commands::ui::is_kernel_license_state_payload(data)
     )
 }
 

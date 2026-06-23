@@ -204,7 +204,8 @@ pub use commands::trade::{
 pub use commands::ui::TriggerAction;
 pub use commands::ui::{
     ArbConfigCompact, AutoStartConfig, AutoStartConfig2, ClientSettingsCommand, JoinSellKind,
-    LevManage, ResetProfitKind, RuntimeStateCommand, SpotMarketKind, TempBlacklistEntry,
+    KernelLicenseStateCommand, LevManage, ResetProfitKind, RuntimeStateCommand, SpotMarketKind,
+    TempBlacklistEntry,
 };
 // Parameter types named by public high-level handle methods but defined in
 // command submodules (`MoonTrade::move_all_sells`/`move_all_buys`,

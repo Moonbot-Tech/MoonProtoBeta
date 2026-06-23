@@ -697,6 +697,16 @@ impl MoonSettings<'_> {
         self.client.restart_now()
     }
 
+    /// Request the latest license/module/MoonCredits state from the core.
+    ///
+    /// The server also sends this state after connect. Use this method for a
+    /// manual refresh; completion is observed through
+    /// `SettingsEvent::KernelLicenseStateUpdated` and
+    /// `snapshot().settings().kernel_license_state`.
+    pub fn request_kernel_license_state(&self) -> Result<(), MoonClientError> {
+        self.client.request_kernel_license_state()
+    }
+
     fn manage_triggers_for_markets_inner<I, S>(
         &self,
         action: crate::commands::ui::TriggerAction,

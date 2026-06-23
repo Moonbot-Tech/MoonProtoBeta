@@ -437,6 +437,10 @@ fn handle_ui_command(
             client.ui_restart_now();
             false
         }
+        UiRuntimeCommand::KernelLicenseStateRequest => {
+            client.ui_kernel_license_state_request(0);
+            false
+        }
     }
 }
 

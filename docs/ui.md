@@ -39,6 +39,12 @@ for event in client.drain_events() {
                     redraw_runtime_controls(runtime.is_started, runtime.auto_detect_active);
                 }
             }
+            SettingsEvent::KernelLicenseStateUpdated => {
+                let Some(state) = client.snapshot() else { continue; };
+                if let Some(license) = state.settings().kernel_license_state {
+                    redraw_license_panel(license.paid_version, license.moon_credits);
+                }
+            }
             _ => {}
         }
     }
@@ -46,10 +52,11 @@ for event in client.drain_events() {
 ```
 
 `SettingsState` stores the latest settings snapshot and small derived fields:
-leverage management, runtime state, and arb validity time. Client-originated UI
-commands such as MM-orders subscription, emulator ticks, trigger management,
-reset-profit, restart-now, and DEX/spot switching are sent through high-level
-handles; they are not inbound settings state.
+leverage management, runtime state, kernel license/MoonCredits state, and arb
+validity time. Client-originated UI commands such as MM-orders subscription,
+emulator ticks, trigger management, reset-profit, restart-now, and DEX/spot
+switching are sent through high-level handles; they are not inbound settings
+state.
 
 ## Requesting Current Settings
 
@@ -100,6 +107,7 @@ client.settings().request_version_update("MoonBot-7")?;  // test/beta version na
 client.settings().switch_dex("Main")?;
 client.settings().switch_spot(SpotMarketKind::Crypto)?;
 client.settings().restart_now()?;
+client.settings().request_kernel_license_state()?;
 client.settings().set_triggers_for_markets(["BTCUSDT", "ETHUSDT"], &[1, 7])?;
 client.settings().clear_triggers_for_all(&[3])?;
 ```
@@ -177,6 +185,31 @@ mode.
 start the market runtime if needed, leave passive mode if needed, and start
 checked strategies. The call returns after the intent is queued; the observable
 result is a later `RuntimeStateUpdated` event and updated retained state.
+
+### License And MoonCredits State
+
+The server sends license/module/MoonCredits state after connect and when a
+client asks for it. Read it from
+`snapshot().settings().kernel_license_state` after
+`SettingsEvent::KernelLicenseStateUpdated`.
+
+```rust
+client.settings().request_kernel_license_state()?;
+
+if let Some(license) = client
+    .snapshot()
+    .and_then(|state| state.settings().kernel_license_state)
+{
+    set_paid_badge(license.paid_version);
+    set_moon_credits(license.moon_credits, license.moon_credits_hold);
+    set_watcher_enabled(license.can_use_watcher);
+}
+```
+
+`news_valid_until` and `arb_valid_until` are `Option<MoonTime>` values converted
+from the wire timestamp at parse time. A missing/invalid timestamp reads as
+`None`; application code should compare valid timestamps with `MoonTime::now()`
+when it needs an active/expired indicator.
 
 ### Leverage Management
 

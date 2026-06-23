@@ -402,6 +402,37 @@ impl From<moonproto::RuntimeStateCommand> for RuntimeStateProbe {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct KernelLicenseProbe {
+    paid_version: bool,
+    reg_id: i32,
+    order_count: i32,
+    moon_credits: i32,
+    moon_credits_hold: i32,
+    moon_credits_auction: i32,
+    arb_active: bool,
+    can_use_watcher: bool,
+    news_valid_seen: bool,
+    arb_valid_seen: bool,
+}
+
+impl From<moonproto::KernelLicenseStateCommand> for KernelLicenseProbe {
+    fn from(value: moonproto::KernelLicenseStateCommand) -> Self {
+        Self {
+            paid_version: value.paid_version,
+            reg_id: value.reg_id,
+            order_count: value.order_count,
+            moon_credits: value.moon_credits,
+            moon_credits_hold: value.moon_credits_hold,
+            moon_credits_auction: value.moon_credits_auction,
+            arb_active: value.arb_active,
+            can_use_watcher: value.can_use_watcher,
+            news_valid_seen: value.news_valid_until.is_some(),
+            arb_valid_seen: value.arb_valid_until.is_some(),
+        }
+    }
+}
+
 #[derive(Default)]
 struct SessionStats {
     label: String,
@@ -420,6 +451,8 @@ struct SessionStats {
     settings_events: u64,
     runtime_state_events: u64,
     runtime_state: Option<RuntimeStateProbe>,
+    kernel_license_state_events: u64,
+    kernel_license_state: Option<KernelLicenseProbe>,
     strategy_events: u64,
     strategy_snapshot_events: u64,
     strategy_schema_events: u64,
@@ -489,6 +522,8 @@ impl Clone for SessionStats {
             settings_events: self.settings_events,
             runtime_state_events: self.runtime_state_events,
             runtime_state: self.runtime_state,
+            kernel_license_state_events: self.kernel_license_state_events,
+            kernel_license_state: self.kernel_license_state,
             strategy_events: self.strategy_events,
             strategy_snapshot_events: self.strategy_snapshot_events,
             strategy_schema_events: self.strategy_schema_events,
@@ -580,7 +615,7 @@ impl SessionStats {
                 )
             });
         format!(
-            "connected_now={} fresh={} again={} reconnecting={} disconnected={} server_events={} engine={} raw={} logs={} settings={} runtime_state_events={} runtime_state={:?} strats={} strat_snapshots={} schema_events={} schema_kinds={} schema_fields={} strat_runtime_events={} strategies_running={:?} strategy_rows={} markets={} trades={} target_trade_packets={} books={} target_book_full={} target_book_update={} market_probe=[{}] order_events={} balances={} transfer_assets={} mask={:#05b} failures={} coin_card_events={} updates={} failures={} last_count={} parse_failed={}{} candles={}",
+            "connected_now={} fresh={} again={} reconnecting={} disconnected={} server_events={} engine={} raw={} logs={} settings={} runtime_state_events={} runtime_state={:?} kernel_license_events={} kernel_license={:?} strats={} strat_snapshots={} schema_events={} schema_kinds={} schema_fields={} strat_runtime_events={} strategies_running={:?} strategy_rows={} markets={} trades={} target_trade_packets={} books={} target_book_full={} target_book_update={} market_probe=[{}] order_events={} balances={} transfer_assets={} mask={:#05b} failures={} coin_card_events={} updates={} failures={} last_count={} parse_failed={}{} candles={}",
             self.connected_now,
             self.connected_fresh,
             self.connected_again,
@@ -593,6 +628,8 @@ impl SessionStats {
             self.settings_events,
             self.runtime_state_events,
             self.runtime_state,
+            self.kernel_license_state_events,
+            self.kernel_license_state,
             self.strategy_events,
             self.strategy_snapshot_events,
             self.strategy_schema_events,
@@ -874,6 +911,10 @@ impl Session {
             .settings()
             .runtime_state
             .map(RuntimeStateProbe::from);
+        st.kernel_license_state = snapshot
+            .settings()
+            .kernel_license_state
+            .map(KernelLicenseProbe::from);
         st.strategies_running = snapshot.strats().strategies_running();
         if let Some(state) = snapshot.markets().trade_state(&st.market) {
             if state.last_trade_price > 0.0 {
@@ -2558,6 +2599,20 @@ fn record_event(
                 &st,
                 event_no,
                 format!("UI RuntimeState {:?}", st.runtime_state),
+            );
+        }
+        Event::Settings(SettingsEvent::KernelLicenseStateUpdated) => {
+            st.kernel_license_state_events += 1;
+            if let Some(dispatcher) = dispatcher {
+                st.kernel_license_state = dispatcher
+                    .settings()
+                    .kernel_license_state
+                    .map(KernelLicenseProbe::from);
+            }
+            log_server_event(
+                &st,
+                event_no,
+                format!("UI KernelLicenseState {:?}", st.kernel_license_state),
             );
         }
         Event::Settings(other) => {
@@ -5359,6 +5414,14 @@ fn ui_runtime_state(session: &Session) -> Option<RuntimeStateProbe> {
         .map(RuntimeStateProbe::from)
 }
 
+fn kernel_license_state(session: &Session) -> Option<KernelLicenseProbe> {
+    session
+        .state_snapshot()
+        .settings()
+        .kernel_license_state
+        .map(KernelLicenseProbe::from)
+}
+
 fn wait_ui_runtime_state(cfg: &FireConfig, a: &mut Session, b: &mut Session) -> RuntimeStateProbe {
     assert!(
         pump_pair_until_sessions(a, b, cfg.connect_timeout, "UI runtime state", |a, b| {
@@ -5378,6 +5441,62 @@ fn wait_ui_runtime_state(cfg: &FireConfig, a: &mut Session, b: &mut Session) -> 
         a_state.is_started, a_state.auto_detect_active
     );
     a_state
+}
+
+fn wait_kernel_license_state(
+    cfg: &FireConfig,
+    a: &mut Session,
+    b: &mut Session,
+) -> KernelLicenseProbe {
+    assert!(
+        pump_pair_until_sessions(a, b, cfg.connect_timeout, "kernel license state", |a, b| {
+            kernel_license_state(a).is_some() && kernel_license_state(b).is_some()
+        }),
+        "server did not send TKernelLicenseStateCommand to both clients within {:?}",
+        cfg.connect_timeout
+    );
+    let a_state = kernel_license_state(a).expect("A kernel license state was just observed");
+    let b_state = kernel_license_state(b).expect("B kernel license state was just observed");
+    assert_eq!(
+        a_state, b_state,
+        "clients disagree on kernel license state: A={a_state:?} B={b_state:?}"
+    );
+    println!("FIRETEST KernelLicenseState: {a_state:?}");
+    a_state
+}
+
+fn run_kernel_license_state_gate(cfg: &FireConfig, a: &mut Session, b: &mut Session) {
+    let _initial = wait_kernel_license_state(cfg, a, b);
+    let before_a = a.snapshot().kernel_license_state_events;
+    let before_b = b.snapshot().kernel_license_state_events;
+
+    a.client
+        .settings()
+        .request_kernel_license_state()
+        .expect("MoonClient A settings().request_kernel_license_state must queue");
+    b.client
+        .settings()
+        .request_kernel_license_state()
+        .expect("MoonClient B settings().request_kernel_license_state must queue");
+    assert!(
+        pump_pair_until_sessions(
+            a,
+            b,
+            cfg.connect_timeout,
+            "kernel license state refresh",
+            |a, b| {
+                a.snapshot().kernel_license_state_events > before_a
+                    && b.snapshot().kernel_license_state_events > before_b
+                    && kernel_license_state(a).is_some()
+                    && kernel_license_state(b).is_some()
+            }
+        ),
+        "FireTest KernelLicenseStateRequest did not refresh both clients within {:?}: A=[{}] B=[{}]",
+        cfg.connect_timeout,
+        a.snapshot().summary(),
+        b.snapshot().summary()
+    );
+    println!("OK: KernelLicenseStateRequest refreshed kernel license state");
 }
 
 fn wait_strategy_runtime_state(cfg: &FireConfig, a: &mut Session, b: &mut Session) -> bool {
@@ -6205,6 +6324,7 @@ fn fire_test_active_library_health() {
     let _a_initial_settings = request_settings_until(&mut a, cfg.connect_timeout);
     let _b_initial_settings = request_settings_until(&mut b, cfg.connect_timeout);
     let _initial_runtime_state = wait_ui_runtime_state(&cfg, &mut a, &mut b);
+    run_kernel_license_state_gate(&cfg, &mut a, &mut b);
     assert!(
         pump_pair_until(
             &mut a,

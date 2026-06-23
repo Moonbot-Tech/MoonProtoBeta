@@ -347,3 +347,12 @@ pub(crate) fn build_restart_now(uid: u64) -> Vec<u8> {
     write_header(&mut out, CMD_RESTART_NOW, uid);
     out
 }
+
+/// CmdId=23 `TKernelLicenseStateRequest`.
+#[doc(hidden)]
+pub(crate) fn build_kernel_license_state_request(uid: u64, activate_feature: i32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(15);
+    write_header(&mut out, CMD_KERNEL_LICENSE_STATE_REQUEST, uid);
+    out.extend_from_slice(&activate_feature.to_le_bytes());
+    out
+}
