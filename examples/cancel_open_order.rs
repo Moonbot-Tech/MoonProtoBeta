@@ -104,8 +104,12 @@ fn main() {
     while Instant::now() < deadline {
         for event in client.drain_events() {
             match event {
-                Event::Order(OrderEvent::Updated(uid)) => println!("[order] updated uid={uid}"),
-                Event::Order(OrderEvent::Removed(uid)) => println!("[order] removed uid={uid}"),
+                Event::Order(OrderEvent::Updated(order)) => {
+                    println!("[order] updated uid={}", order.uid)
+                }
+                Event::Order(OrderEvent::Removed(order)) => {
+                    println!("[order] removed uid={}", order.uid)
+                }
                 _ => {}
             }
         }

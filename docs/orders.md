@@ -23,26 +23,31 @@ use moonproto::state::OrderEvent;
 
 for event in client.drain_events() {
     if let Event::Order(order_event) = event {
-        if let Some(uid) = order_event.changed_uid() {
-            if let Some(state) = client.snapshot() {
-                if let Some(order) = state.orders().get(uid) {
-                    redraw_order(order);
+        match &order_event {
+            OrderEvent::Removed(order) => {
+                show_final_order_state(order);
+                remove_order_from_ui(order.uid);
+            }
+            OrderEvent::Snapshot => {
+                if let Some(state) = client.snapshot() {
+                    redraw_all_orders(state.orders().iter());
                 }
             }
-        } else if let Some(uid) = order_event.removed_uid() {
-            remove_order_from_ui(uid);
-        } else if matches!(order_event, OrderEvent::Snapshot) {
-            if let Some(state) = client.snapshot() {
-                redraw_all_orders(state.orders().iter());
+            _ => {
+                if let Some(order) = order_event.order() {
+                    redraw_order(order);
+                }
             }
         }
     }
 }
 ```
 
-`OrderEvent` carries UIDs instead of cloning full orders into every event. This
-keeps the hot event path cheap. UI code that already redraws at its own frame
-rate can also ignore individual events and read the latest snapshot each frame.
+`OrderEvent::order()` carries an Arc-backed order row for `Created`, `Updated`,
+and `Removed`, so an event-driven UI does not lose the final terminal status if
+the latest snapshot has already removed the order from the live list. UI code
+that already redraws at its own frame rate can still ignore individual events
+and read the latest snapshot each frame.
 
 ## Orders History
 
@@ -217,9 +222,9 @@ flags, and click immunity are all stateful.
 
 ```rust
 pub enum OrderEvent {
-    Created(u64),
-    Updated(u64),
-    Removed(u64),
+    Created(Arc<Order>),
+    Updated(Arc<Order>),
+    Removed(Arc<Order>),
     BulkReplaced { order_type: OrderType, uids: Vec<u64> },
     TracePoint { uid: u64 },
     CorridorChanged(u64),
@@ -229,9 +234,12 @@ pub enum OrderEvent {
 }
 ```
 
-`changed_uid()` returns UIDs for events that should normally redraw one order.
-`removed_uid()` returns UIDs for removed rows. `Snapshot` means a full order
-snapshot was applied and the UI should reconcile the whole list.
+`order()` returns the order row captured at the moment of `Created`, `Updated`,
+or `Removed`. Use it in event-driven UI code: terminal statuses can move an
+order out of the live snapshot before the application drains the async event
+queue. `changed_uid()` and `removed_uid()` are still available for code that
+only needs identities. `Snapshot` means a full order snapshot was applied and
+the UI should reconcile the whole list.
 
 Low-level ignored/not-applicable telemetry is available only in
 `test`/`diagnostics` builds. Normal terminal code should redraw from retained

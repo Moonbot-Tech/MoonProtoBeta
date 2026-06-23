@@ -23,21 +23,21 @@ impl Orders {
         let pending = std::mem::take(&mut self.pending_removals);
         let mut removed = Vec::with_capacity(pending.len());
         for pending in pending {
-            if self.remove_order(pending.uid).is_some() {
+            if self.remove_order_arc(pending.uid).is_some() {
                 removed.push(pending.uid);
             }
         }
         removed
     }
 
-    pub(crate) fn drain_pending_removals_due(&mut self, now_ms: i64) -> Vec<u64> {
+    pub(crate) fn drain_pending_removals_due(&mut self, now_ms: i64) -> Vec<Arc<Order>> {
         let pending = std::mem::take(&mut self.pending_removals);
         let mut keep = Vec::new();
         let mut removed = Vec::new();
         for pending in pending {
             if now_ms >= pending.due_ms {
-                if self.remove_order(pending.uid).is_some() {
-                    removed.push(pending.uid);
+                if let Some(order) = self.remove_order_arc(pending.uid) {
+                    removed.push(order);
                 }
             } else {
                 keep.push(pending);
@@ -50,7 +50,7 @@ impl Orders {
     /// Delphi `BOrderWorker.DoTheJobVirtual.CheckReplaceFlag` clears a pending
     /// replace flag when no replace response arrived for 5000 ms.
     pub(crate) fn tick_bulk_replace_timeouts(&mut self, now_ms: i64) -> Vec<OrderEvent> {
-        let mut events = Vec::new();
+        let mut updated = Vec::new();
         for entry in self.map.values_mut() {
             // O1 (sverka #14): evaluate the change through the shared Arc first;
             // only `make_mut` the order that actually mutates. The old order
@@ -82,10 +82,13 @@ impl Orders {
                     _ => {}
                 }
                 entry.replace_sent_time_ms = 0;
-                events.push(OrderEvent::Updated(entry.uid));
+                updated.push(entry.uid);
             }
         }
-        events
+        updated
+            .into_iter()
+            .filter_map(|uid| self.order_arc(uid).map(OrderEvent::Updated))
+            .collect()
     }
 
     /// Delphi `TCryptoPumpTool.ShrinkOrderLines` periodically calls
