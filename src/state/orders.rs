@@ -178,10 +178,25 @@ impl Orders {
         self.map.get_mut(&uid).map(Arc::make_mut)
     }
 
+    fn remove_order_arc(&mut self, uid: u64) -> Option<Arc<Order>> {
+        self.map.remove(&uid)
+    }
+
     fn remove_order(&mut self, uid: u64) -> Option<Order> {
-        self.map
-            .remove(&uid)
+        self.remove_order_arc(uid)
             .map(|order| Arc::try_unwrap(order).unwrap_or_else(|order| (*order).clone()))
+    }
+
+    fn order_arc(&self, uid: u64) -> Option<Arc<Order>> {
+        self.map.get(&uid).cloned()
+    }
+
+    fn created_event(&self, uid: u64) -> Option<OrderEvent> {
+        self.order_arc(uid).map(OrderEvent::Created)
+    }
+
+    fn updated_event(&self, uid: u64) -> Option<OrderEvent> {
+        self.order_arc(uid).map(OrderEvent::Updated)
     }
 
     /// Advance snapshot flag before a `TAllStatuses` item loop.
@@ -273,9 +288,9 @@ impl Orders {
                 }
 
                 if new_order {
-                    (ApplyResult::Applied, Some(OrderEvent::Created(uid)))
+                    (ApplyResult::Applied, self.created_event(uid))
                 } else {
-                    (ApplyResult::Applied, Some(OrderEvent::Updated(uid)))
+                    (ApplyResult::Applied, self.updated_event(uid))
                 }
             }
 
@@ -348,10 +363,10 @@ impl Orders {
 
                 if is_terminal {
                     self.mark_pending_removal(uid, now_ms, terminal_removal_delay_ms(status));
-                    return (ApplyResult::Applied, Some(OrderEvent::Updated(uid)));
+                    return (ApplyResult::Applied, self.updated_event(uid));
                 }
 
-                (ApplyResult::Applied, Some(OrderEvent::Updated(uid)))
+                (ApplyResult::Applied, self.updated_event(uid))
             }
 
             // --- Replace response ---
@@ -397,7 +412,7 @@ impl Orders {
                     entry.bulk_replace_sell = false;
                 }
 
-                (ApplyResult::Applied, Some(OrderEvent::Updated(uid)))
+                (ApplyResult::Applied, self.updated_event(uid))
             }
 
             // --- Stops update ---
@@ -486,7 +501,7 @@ impl Orders {
                 };
                 if found {
                     self.mark_pending_removal(uid, now_ms, 0);
-                    (ApplyResult::Applied, Some(OrderEvent::Updated(uid)))
+                    (ApplyResult::Applied, self.updated_event(uid))
                 } else {
                     ignored_order_event(uid, ApplyResult::OrderNotFound)
                 }

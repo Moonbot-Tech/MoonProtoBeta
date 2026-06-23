@@ -1,9 +1,11 @@
 //! Order read-model and action/event types.
 
+use super::model::Order;
 use crate::commands::trade::{OrderType, OrderWorkerStatus, PositionFilter, TradeCtx};
 #[cfg(any(test, feature = "diagnostics"))]
 use crate::time::DelphiTime;
 use crate::MoonTime;
+use std::sync::Arc;
 
 /// Order close reason byte used by the MoonBot order stream.
 ///
@@ -299,11 +301,11 @@ pub enum ApplyResult {
 #[derive(Debug, Clone)]
 pub enum OrderEvent {
     /// A new order appeared.
-    Created(u64),
+    Created(Arc<Order>),
     /// An existing order changed.
-    Updated(u64),
+    Updated(Arc<Order>),
     /// Order was removed after deferred terminal cleanup / `TOrderNotFound`.
-    Removed(u64),
+    Removed(Arc<Order>),
     /// Bulk replace notification.
     BulkReplaced {
         order_type: OrderType,
@@ -328,10 +330,8 @@ pub enum OrderEvent {
 impl OrderEvent {
     pub fn uid(&self) -> Option<u64> {
         match self {
-            Self::Created(uid)
-            | Self::Updated(uid)
-            | Self::Removed(uid)
-            | Self::TracePoint { uid }
+            Self::Created(order) | Self::Updated(order) | Self::Removed(order) => Some(order.uid),
+            Self::TracePoint { uid }
             | Self::CorridorChanged(uid)
             | Self::VStopChanged(uid)
             | Self::StopsChanged(uid) => Some(*uid),
@@ -343,9 +343,8 @@ impl OrderEvent {
 
     pub fn changed_uid(&self) -> Option<u64> {
         match self {
-            Self::Created(uid)
-            | Self::Updated(uid)
-            | Self::TracePoint { uid }
+            Self::Created(order) | Self::Updated(order) => Some(order.uid),
+            Self::TracePoint { uid }
             | Self::CorridorChanged(uid)
             | Self::VStopChanged(uid)
             | Self::StopsChanged(uid) => Some(*uid),
@@ -355,7 +354,19 @@ impl OrderEvent {
 
     pub fn removed_uid(&self) -> Option<u64> {
         match self {
-            Self::Removed(uid) => Some(*uid),
+            Self::Removed(order) => Some(order.uid),
+            _ => None,
+        }
+    }
+
+    /// Order row captured at the moment this event was produced.
+    ///
+    /// For terminal updates/removals this is the final row the UI needs even
+    /// when the latest snapshot has already removed the order from the live
+    /// list before the application drains events.
+    pub fn order(&self) -> Option<&Order> {
+        match self {
+            Self::Created(order) | Self::Updated(order) | Self::Removed(order) => Some(order),
             _ => None,
         }
     }

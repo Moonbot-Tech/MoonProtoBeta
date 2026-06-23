@@ -868,8 +868,8 @@ fn dispatcher_all_statuses_uses_process_command_order_item_loop() {
 
     assert_eq!(events.len(), 2);
     assert!(matches!(
-        events[0],
-        Event::Order(OrderEvent::Created(found_uid)) if found_uid == uid
+        &events[0],
+        Event::Order(OrderEvent::Created(order)) if order.uid == uid
     ));
     assert!(matches!(events[1], Event::Order(OrderEvent::Snapshot)));
     assert_eq!(d.orders.current_snapshot_flag(), 1);
@@ -1065,10 +1065,12 @@ fn dispatcher_keeps_sell_done_order_for_delphi_final_trace_grace() {
 
     out.clear();
     d.drain_deferred_order_removals_due(1401, &mut out);
-    assert!(matches!(
-        out.as_slice(),
-        [Event::Order(OrderEvent::Removed(found))] if *found == uid
-    ));
+    let removed_order = match out.as_slice() {
+        [Event::Order(OrderEvent::Removed(order))] if order.uid == uid => order,
+        other => panic!("expected removed order event with final row, got {other:?}"),
+    };
+    assert_eq!(removed_order.status, OrderWorkerStatus::SellDone);
+    assert!(removed_order.job_is_done);
     assert!(d.orders().get(uid).is_none());
 }
 
@@ -1219,7 +1221,7 @@ fn dispatcher_drops_skipped_order_updates_without_event() {
     );
     assert!(matches!(
         out.as_slice(),
-        [Event::Order(OrderEvent::Updated(found))] if *found == uid_stale
+        [Event::Order(OrderEvent::Updated(order))] if order.uid == uid_stale
     ));
     out.clear();
     d.process_command_order(
@@ -1315,7 +1317,7 @@ fn dispatcher_tick_orders_clears_bulk_replace_timeout() {
 
     assert!(matches!(
         events.as_slice(),
-        [Event::Order(OrderEvent::Updated(found))] if *found == uid
+        [Event::Order(OrderEvent::Updated(order))] if order.uid == uid
     ));
     assert!(!d.orders.get(uid).unwrap().bulk_replace_buy);
 }

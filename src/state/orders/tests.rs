@@ -106,12 +106,16 @@ fn terminal_status_marks_done_then_deferred_removal() {
     let s1 = make_status(42, "BTCUSDT", OrderWorkerStatus::BuySet, 1);
     let (res, ev) = orders.apply(order_status_cmd(s1));
     assert_eq!(res, ApplyResult::Applied);
-    assert!(matches!(ev, OrderEvent::Created(42)));
+    assert!(matches!(ev, OrderEvent::Created(order) if order.uid == 42));
     assert!(orders.get(42).is_some());
 
     let s2 = make_status(42, "BTCUSDT", OrderWorkerStatus::SellDone, 1);
     let (_, ev) = orders.apply(order_status_cmd(s2));
-    assert!(matches!(ev, OrderEvent::Updated(42)));
+    let final_status_from_event = match &ev {
+        OrderEvent::Updated(order) if order.uid == 42 => order.status,
+        other => panic!("expected terminal update event, got {other:?}"),
+    };
+    assert_eq!(final_status_from_event, OrderWorkerStatus::SellDone);
     assert!(orders.get(42).unwrap().job_is_done);
 
     let removed = orders.drain_pending_removals();
@@ -221,7 +225,7 @@ fn existing_full_status_keeps_worker_identity_fields() {
     let (res, ev) = orders.apply(order_status_cmd(second));
 
     assert_eq!(res, ApplyResult::Applied);
-    assert!(matches!(ev, OrderEvent::Updated(42)));
+    assert!(matches!(ev, OrderEvent::Updated(order) if order.uid == 42));
     let order = orders.get(42).unwrap();
     assert_eq!(order.market_name, "BTCUSDT");
     assert_eq!(order.currency, BaseCurrency::USDT);
@@ -896,7 +900,11 @@ fn sell_almost_done_is_terminal() {
     let s2 = make_status(42, "BTCUSDT", OrderWorkerStatus::SellAlmostDone, 2);
     let (res, ev) = orders.apply(order_status_cmd(s2));
     assert_eq!(res, ApplyResult::Applied);
-    assert!(matches!(ev, OrderEvent::Updated(42)));
+    assert!(matches!(
+        ev,
+        OrderEvent::Updated(order)
+            if order.uid == 42 && order.status == OrderWorkerStatus::SellAlmostDone
+    ));
     assert!(orders.get(42).unwrap().job_is_done);
     assert_eq!(orders.drain_pending_removals(), vec![42]);
     assert!(orders.get(42).is_none());
@@ -1153,7 +1161,7 @@ fn order_not_found_marks_server_forced_then_deferred_removal() {
     let (res, ev) = orders.apply(TradeCommand::OrderNotFound(not_found));
 
     assert_eq!(res, ApplyResult::Applied);
-    assert!(matches!(ev, OrderEvent::Updated(42)));
+    assert!(matches!(ev, OrderEvent::Updated(order) if order.uid == 42));
     let order = orders.get(42).unwrap();
     assert!(order.server_forced_remove);
     assert!(order.cancel_request);
@@ -1306,7 +1314,7 @@ fn first_same_epoch_after_new_order_is_accepted() {
         ApplyResult::Applied,
         "Delphi first TOrderStatus bypasses AcceptServerCommand, so latest epoch is still zero"
     );
-    assert!(matches!(ev, OrderEvent::Updated(1)));
+    assert!(matches!(ev, OrderEvent::Updated(order) if order.uid == 1));
     let actual = orders.get(1).unwrap().buy_order.actual_price;
     assert_eq!(actual, 11.0);
 }
@@ -1430,7 +1438,7 @@ fn terminal_status_update_does_not_apply_update_data() {
     let (res, ev) = orders.apply(TradeCommand::OrderStatusUpdate(terminal_update));
 
     assert_eq!(res, ApplyResult::Applied);
-    assert!(matches!(ev, OrderEvent::Updated(1)));
+    assert!(matches!(ev, OrderEvent::Updated(order) if order.uid == 1));
     let order = orders.get(1).unwrap();
     let sell_actual = order.sell_order.actual_price;
     let sell_mean = order.sell_order.mean_price;
@@ -1591,7 +1599,7 @@ fn pending_status_update_tracks_vorder_buy_cond_price() {
     let (res, ev) = orders.apply(TradeCommand::OrderStatusUpdate(pending_update));
 
     assert_eq!(res, ApplyResult::Applied);
-    assert!(matches!(ev, OrderEvent::Updated(1)));
+    assert!(matches!(ev, OrderEvent::Updated(order) if order.uid == 1));
     let order = orders.get(1).unwrap();
     let buy_mean = order.buy_order.mean_price;
     let buy_actual = order.buy_order.actual_price;
@@ -1635,7 +1643,7 @@ fn os_none_update_without_pending_vorder_does_not_create_pending_price() {
     let (res, ev) = orders.apply(TradeCommand::OrderStatusUpdate(non_pending_none));
 
     assert_eq!(res, ApplyResult::Applied);
-    assert!(matches!(ev, OrderEvent::Updated(1)));
+    assert!(matches!(ev, OrderEvent::Updated(order) if order.uid == 1));
     let order = orders.get(1).unwrap();
     assert_eq!(order.status, OrderWorkerStatus::None);
     assert_eq!(
@@ -1663,7 +1671,7 @@ fn full_os_none_status_for_existing_pending_keeps_vorder_price() {
     let (res, ev) = orders.apply(order_status_cmd(full_status));
 
     assert_eq!(res, ApplyResult::Applied);
-    assert!(matches!(ev, OrderEvent::Updated(1)));
+    assert!(matches!(ev, OrderEvent::Updated(order) if order.uid == 1));
     let order = orders.get(1).unwrap();
     assert_eq!(
         order.pending_buy_cond_price,
@@ -1690,7 +1698,7 @@ fn full_os_none_status_for_existing_non_pending_does_not_create_vorder() {
     let (res, ev) = orders.apply(order_status_cmd(full_none));
 
     assert_eq!(res, ApplyResult::Applied);
-    assert!(matches!(ev, OrderEvent::Updated(1)));
+    assert!(matches!(ev, OrderEvent::Updated(order) if order.uid == 1));
     let order = orders.get(1).unwrap();
     assert_eq!(order.status, OrderWorkerStatus::None);
     assert_eq!(
@@ -1748,7 +1756,7 @@ fn replace_response_quantity_base_zero_preserves_existing_value() {
     let (res, ev) = orders.apply(order_replace_response_cmd(rr));
 
     assert_eq!(res, ApplyResult::Applied);
-    assert!(matches!(ev, OrderEvent::Updated(1)));
+    assert!(matches!(ev, OrderEvent::Updated(order) if order.uid == 1));
     let quantity_base = orders.get(1).unwrap().buy_order.quantity_base;
     assert_eq!(quantity_base, 12.5);
     assert_eq!(orders.get(1).unwrap().buy_price, 123.0);
@@ -1776,7 +1784,7 @@ fn replace_response_buy_stop_uses_sell_side() {
     let (res, ev) = orders.apply(order_replace_response_cmd(rr));
 
     assert_eq!(res, ApplyResult::Applied);
-    assert!(matches!(ev, OrderEvent::Updated(1)));
+    assert!(matches!(ev, OrderEvent::Updated(order) if order.uid == 1));
     let order = orders.get(1).unwrap();
     let buy_actual_price = order.buy_order.actual_price;
     let sell_actual_price = order.sell_order.actual_price;
@@ -1813,7 +1821,7 @@ fn bulk_replace_timeout_clears_flag_after_5000ms() {
     assert!(orders.get(1).unwrap().bulk_replace_buy);
 
     let events = orders.tick_bulk_replace_timeouts(6001);
-    assert!(matches!(events.as_slice(), [OrderEvent::Updated(1)]));
+    assert!(matches!(events.as_slice(), [OrderEvent::Updated(order)] if order.uid == 1));
     assert!(!orders.get(1).unwrap().bulk_replace_buy);
 }
 
@@ -2187,7 +2195,14 @@ fn missing_after_snapshot_keeps_terminal_entry_until_deferred_removal() {
         vec![1],
         "Delphi virtual worker is still in WCache and not JobIsDone until DoTheJobVirtual returns"
     );
-    assert_eq!(orders.drain_pending_removals_due(1401), vec![1]);
+    assert_eq!(
+        orders
+            .drain_pending_removals_due(1401)
+            .into_iter()
+            .map(|order| order.uid)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
     assert!(orders.missing_after_snapshot().is_empty());
 }
 
@@ -2225,7 +2240,7 @@ fn accepts_more_than_former_rust_order_cap() {
             1,
         )));
         assert_eq!(res, ApplyResult::Applied);
-        assert!(matches!(ev, OrderEvent::Created(id) if id == uid));
+        assert!(matches!(ev, OrderEvent::Created(order) if order.uid == uid));
     }
 
     assert_eq!(orders.len(), (FORMER_MAX_ORDERS + 1) as usize);

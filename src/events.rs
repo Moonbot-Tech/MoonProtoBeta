@@ -361,8 +361,8 @@ impl EventDispatcher {
     }
 
     pub(crate) fn drain_deferred_order_removals_due(&mut self, now_ms: i64, out: &mut Vec<Event>) {
-        for uid in self.orders.drain_pending_removals_due(now_ms) {
-            out.push(Event::Order(OrderEvent::Removed(uid)));
+        for order in self.orders.drain_pending_removals_due(now_ms) {
+            out.push(Event::Order(OrderEvent::Removed(order)));
         }
     }
 
