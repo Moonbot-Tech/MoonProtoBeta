@@ -31,7 +31,6 @@ impl Orders {
         st: &OrderStatus,
         server_time_delta: f64,
         new_order: bool,
-        pending_local_visual_order: bool,
         price_eps: f64,
     ) {
         let mut buy = st.buy_order;
@@ -57,12 +56,8 @@ impl Orders {
         entry.stops = st.stops;
         entry.immune_for_clicks = st.immune_for_clicks;
         entry.job_is_done = st.epoch_header.status.is_terminal();
-        if pending_local_visual_order {
-            entry.has_local_visual_order = true;
-        }
         if st.epoch_header.status == OrderWorkerStatus::None {
             if new_order {
-                entry.has_local_visual_order = true;
                 entry.pending_buy_cond_price = Some(entry.buy_order.mean_price);
             } else if !had_pending_vorder {
                 entry.pending_buy_cond_price = None;

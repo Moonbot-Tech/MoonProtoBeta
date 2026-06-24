@@ -22,7 +22,7 @@
 
 use crate::commands::trade::*;
 use crate::state::eps::EpsProfile;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 mod accessors;
@@ -141,9 +141,6 @@ struct PendingRemoval {
 #[derive(Debug, Clone, Default)]
 pub struct Orders {
     map: HashMap<u64, Arc<Order>>,
-    /// Local/UI visual-order markers registered before the first server
-    /// `TOrderStatus` creates the read-model entry.
-    pending_local_visual_orders: HashSet<u64>,
     /// UID's already marked as finishing, but not removed from retained order
     /// state yet.
     pending_removals: Vec<PendingRemoval>,
@@ -161,7 +158,6 @@ impl Orders {
     pub fn new() -> Self {
         Self {
             map: HashMap::new(),
-            pending_local_visual_orders: HashSet::new(),
             pending_removals: Vec::new(),
             current_snapshot_flag: 0,
             server_time_delta: 0.0,
@@ -254,7 +250,6 @@ impl Orders {
                 if new_order && st.from_cache {
                     return ignored_order_event(uid, ApplyResult::OrderNotFound);
                 }
-                let pending_local_visual_order = self.pending_local_visual_orders.remove(&uid);
                 let eps_m = self.eps_profile.eps_m;
                 let is_done = {
                     if new_order {
@@ -272,14 +267,7 @@ impl Orders {
                         }
                     }
 
-                    Self::apply_status_inner(
-                        entry,
-                        &st,
-                        server_time_delta,
-                        new_order,
-                        pending_local_visual_order,
-                        eps_m,
-                    );
+                    Self::apply_status_inner(entry, &st, server_time_delta, new_order, eps_m);
                     entry.snapshot_flag = current_snapshot_flag;
                     entry.job_is_done
                 };
