@@ -54,11 +54,6 @@ pub struct Order {
     pub emulator_mode: bool,
     /// True when UI clicks must be ignored.
     pub immune_for_clicks: bool,
-    /// Read-model marker for a local visual order attached to the worker.
-    ///
-    /// Stop/VStop outgoing worker actions require this marker: when no visual
-    /// order is attached, there is no local stop/VStop state to compare and send.
-    pub has_local_visual_order: bool,
     /// Pending buy condition price for `OS_None` orders.
     pub pending_buy_cond_price: Option<f64>,
     /// Pending-cancel flag for `OS_None` orders.
@@ -134,7 +129,6 @@ impl Order {
             from_cache: status_cmd.from_cache,
             emulator_mode: status_cmd.emulator_mode,
             immune_for_clicks: status_cmd.immune_for_clicks,
-            has_local_visual_order: false,
             pending_buy_cond_price: None,
             pending_cancel: false,
             bulk_replace_buy: false,

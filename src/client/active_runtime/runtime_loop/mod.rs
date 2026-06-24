@@ -375,7 +375,10 @@ mod tests {
     use crate::commands::engine_api::ServerInfo;
     use crate::commands::market::{BaseCurrency, ExchangeCode};
     use crate::commands::strategy_serializer::{FieldValue, StrategyFields, StrategySnapshot};
-    use crate::commands::trade::TradeCommand;
+    use crate::commands::trade::{
+        BaseCommandHeader, DelphiBool, MarketCommandHeader, OrderCompact, OrderStatus,
+        OrderWorkerStatus, StopSettings, TradeCommand, TradeEpochHeader,
+    };
 
     fn dummy_cfg() -> ClientConfig {
         ClientConfig {
@@ -403,6 +406,47 @@ mod tests {
             ..Default::default()
         });
         client
+    }
+
+    fn make_order_status(uid: u64, status: OrderWorkerStatus) -> OrderStatus {
+        OrderStatus {
+            epoch_header: TradeEpochHeader {
+                market: MarketCommandHeader {
+                    base: BaseCommandHeader {
+                        cmd_id: 4,
+                        ver: 3,
+                        uid,
+                    },
+                    currency: 17,
+                    platform: 9,
+                    market_name: "DOGEUSDT".to_string(),
+                },
+                epoch: 1,
+                status,
+            },
+            buy_order: OrderCompact::default(),
+            sell_order: OrderCompact::default(),
+            stops: StopSettings::default(),
+            strat_id: 0,
+            is_short: false,
+            db_id: 0,
+            from_cache: false,
+            emulator_mode: false,
+            immune_for_clicks: false,
+        }
+    }
+
+    fn seed_runtime_order(
+        dispatcher: &mut crate::events::EventDispatcher,
+        uid: u64,
+        status: OrderWorkerStatus,
+    ) {
+        dispatcher
+            .orders_mut()
+            .apply(TradeCommand::OrderStatus(Box::new(make_order_status(
+                uid, status,
+            ))));
+        assert!(dispatcher.orders().get(uid).is_some());
     }
 
     fn write_str8(out: &mut Vec<u8>, value: &str) {
@@ -480,6 +524,82 @@ mod tests {
                 assert_eq!(cmd.price, 12.5);
                 assert_eq!(cmd.strat_id, 42);
                 assert_eq!(cmd.order_size, 0.25);
+            }
+            other => panic!("unexpected trade command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runtime_update_stops_sends_for_tracked_server_order() {
+        let uid = 0x5151;
+        let mut client = ready_client();
+        let mut dispatcher = crate::events::EventDispatcher::new();
+        seed_runtime_order(&mut dispatcher, uid, OrderWorkerStatus::BuySet);
+
+        let stops = StopSettings {
+            stop_loss_on: DelphiBool::TRUE,
+            sl_level: 12.5,
+            use_take_profit: DelphiBool::TRUE,
+            take_profit: 15.0,
+            ..StopSettings::default()
+        };
+        let mut pending = RuntimePending::default();
+        assert!(handle_command(
+            &mut client,
+            &mut dispatcher,
+            RuntimeCommand::OrderAction(RuntimeCommandKind::UpdateStops { uid, stops }),
+            &mut pending
+        ));
+
+        let (_, high, _) = client.take_send_queues_for_test();
+        assert_eq!(high.len(), 1);
+        match TradeCommand::parse(&high[0].data).expect("valid stops update") {
+            TradeCommand::OrderStopsUpdate(cmd) => {
+                assert_eq!(cmd.epoch_header.market.base.uid, uid);
+                assert_eq!(cmd.epoch_header.market.market_name, "DOGEUSDT");
+                assert_eq!(cmd.epoch_header.status, OrderWorkerStatus::BuySet);
+                assert!(bool::from(cmd.stops.stop_loss_on));
+                assert_eq!(cmd.stops.sl_level, 12.5);
+                assert!(bool::from(cmd.stops.use_take_profit));
+                assert_eq!(cmd.stops.take_profit, 15.0);
+                assert!(
+                    bool::from(cmd.stops.take_profit_changed),
+                    "runtime derives the TP latch before sending"
+                );
+            }
+            other => panic!("unexpected trade command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runtime_update_vstop_sends_for_tracked_server_order() {
+        let uid = 0x5252;
+        let mut client = ready_client();
+        let mut dispatcher = crate::events::EventDispatcher::new();
+        seed_runtime_order(&mut dispatcher, uid, OrderWorkerStatus::SellSet);
+
+        let mut pending = RuntimePending::default();
+        assert!(handle_command(
+            &mut client,
+            &mut dispatcher,
+            RuntimeCommand::OrderAction(RuntimeCommandKind::UpdateVStop {
+                uid,
+                params: VStopParams::percent(12.5, 100.0),
+            }),
+            &mut pending
+        ));
+
+        let (_, high, _) = client.take_send_queues_for_test();
+        assert_eq!(high.len(), 1);
+        match TradeCommand::parse(&high[0].data).expect("valid VStop update") {
+            TradeCommand::VStopUpdate(cmd) => {
+                assert_eq!(cmd.epoch_header.market.base.uid, uid);
+                assert_eq!(cmd.epoch_header.market.market_name, "DOGEUSDT");
+                assert_eq!(cmd.epoch_header.status, OrderWorkerStatus::SellSet);
+                assert!(cmd.vstop_on);
+                assert!(!cmd.vstop_fixed);
+                assert_eq!(cmd.vstop_level, 12.5);
+                assert_eq!(cmd.vstop_vol, 100.0);
             }
             other => panic!("unexpected trade command: {other:?}"),
         }

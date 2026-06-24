@@ -7,21 +7,6 @@
 use super::*;
 
 impl Orders {
-    /// Mark an order UID as having a local visual order attached by the UI.
-    ///
-    /// Stop/VStop actions are only meaningful after the UI has attached a
-    /// visual order object. If the server order has not arrived yet, the marker
-    /// is stored and applied to the first status row with the same UID.
-    pub fn mark_local_visual_order(&mut self, uid: u64) -> bool {
-        if let Some(order) = self.order_mut(uid) {
-            order.has_local_visual_order = true;
-            true
-        } else {
-            self.pending_local_visual_orders.insert(uid);
-            false
-        }
-    }
-
     fn is_proper(order: &Order, market_name: &str, side: FixedPosition) -> bool {
         if order.market_name != market_name {
             return false;
@@ -115,7 +100,7 @@ impl Orders {
 
     /// Deduplicate and prepare an outgoing stop-settings update.
     ///
-    /// Returns the wire context only when a local worker exists and the stop
+    /// Returns the wire context only when a tracked order exists and the stop
     /// record differs from the last applied/sent value. The comparison uses
     /// `StopSettings::eq`, which is bit-exact over every packed field.
     pub(crate) fn send_stops_if_changed(
@@ -124,9 +109,6 @@ impl Orders {
         stops: &StopSettings,
     ) -> Option<(TradeCtx, String, OrderWorkerStatus, StopSettings)> {
         let order = self.order_mut(uid)?;
-        if !order.has_local_visual_order {
-            return None;
-        }
         // U2 (sverka #14): derive the `take_profit_changed` wire flag here instead
         // of trusting the caller. It is the "trader explicitly set TP" signal that
         // stops the server auto-defaulting take-profit on the SELL transition
@@ -166,9 +148,6 @@ impl Orders {
         vstop_vol: f64,
     ) -> Option<(TradeCtx, String, VStopUpdateParams)> {
         let order = self.order_mut(uid)?;
-        if !order.has_local_visual_order {
-            return None;
-        }
         if order.vstop_on == vstop_on
             && order.vstop_fixed == vstop_fixed
             && order.vstop_level == vstop_level

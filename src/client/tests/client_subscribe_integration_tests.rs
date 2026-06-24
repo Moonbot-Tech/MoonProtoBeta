@@ -707,14 +707,6 @@ fn client_update_order_stops_uses_delphi_send_if_changed_gate() {
         take_profit: 15.0,
         ..StopSettings::default()
     };
-    assert!(
-        !client.update_order_stops(&mut orders, uid, &stops),
-        "Delphi SendStopsIfChanged exits when worker.vOrder is nil"
-    );
-    let (_, high, _) = client.take_send_queues_for_test();
-    assert!(high.is_empty());
-
-    assert!(orders.mark_local_visual_order(uid));
     assert!(client.update_order_stops(&mut orders, uid, &stops));
     // U2 (sverka #14): the runtime derives take_profit_changed = TRUE here because
     // the take-profit was enabled/changed from the default. The caller-supplied
@@ -772,14 +764,6 @@ fn client_update_vstop_uses_delphi_send_if_changed_gate() {
     let (_, high, _) = client.take_send_queues_for_test();
     assert!(high.is_empty());
 
-    assert!(
-        !client.update_vstop(&mut orders, uid, true, false, 12.5, 100.0),
-        "Delphi SendVStopIfChanged exits when worker.vOrder is nil"
-    );
-    let (_, high, _) = client.take_send_queues_for_test();
-    assert!(high.is_empty());
-
-    assert!(orders.mark_local_visual_order(uid));
     assert!(client.update_vstop(&mut orders, uid, true, false, 12.5, 100.0));
     let order = orders.get(uid).unwrap();
     assert!(order.vstop_on);

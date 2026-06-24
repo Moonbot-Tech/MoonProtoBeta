@@ -193,14 +193,12 @@ impl Orders {
 
     /// Remove one order by UID.
     pub fn remove(&mut self, uid: u64) -> Option<Order> {
-        self.pending_local_visual_orders.remove(&uid);
         self.remove_order(uid)
     }
 
     /// Clear all order state on reconnect / `WantNewHello`.
     pub fn clear(&mut self) {
         self.map.clear();
-        self.pending_local_visual_orders.clear();
         self.pending_removals.clear();
         self.current_snapshot_flag = 0;
         self.last_order_line_shrink_ms = 0;

@@ -340,11 +340,6 @@ fn outgoing_send_stops_if_changed_matches_delphi_change_gate() {
         trailing_level: -0.0,
         ..StopSettings::default()
     };
-    assert!(
-        orders.send_stops_if_changed(42, &stops).is_none(),
-        "Delphi exits when worker.vOrder is nil even if stops changed"
-    );
-    assert!(orders.mark_local_visual_order(42));
     let (ctx, market, status, sent_stops) = orders
         .send_stops_if_changed(42, &stops)
         .expect("changed stops should be sent");
@@ -387,7 +382,6 @@ fn send_stops_derives_take_profit_changed() {
         OrderWorkerStatus::BuySet,
         1,
     )));
-    assert!(orders.mark_local_visual_order(7));
 
     // Caller forgets the flag (FALSE) but enables a take-profit: runtime sends TRUE.
     let stops = StopSettings {
@@ -430,30 +424,6 @@ fn send_stops_derives_take_profit_changed() {
 }
 
 #[test]
-fn local_visual_order_marker_can_be_registered_before_first_status() {
-    let mut orders = Orders::new();
-    assert!(
-        !orders.mark_local_visual_order(42),
-        "no read-model entry exists yet, marker is stored for the first status"
-    );
-
-    let mut cached = make_status(42, "BTCUSDT", OrderWorkerStatus::BuySet, 1);
-    cached.from_cache = true;
-    let (res, _) = orders.apply(order_status_cmd(cached));
-    assert_eq!(res, ApplyResult::OrderNotFound);
-    assert!(orders.get(42).is_none());
-
-    orders.apply(order_status_cmd(make_status(
-        42,
-        "BTCUSDT",
-        OrderWorkerStatus::BuySet,
-        2,
-    )));
-
-    assert!(orders.get(42).unwrap().has_local_visual_order);
-}
-
-#[test]
 fn outgoing_send_vstop_if_changed_matches_delphi_change_gate() {
     let mut orders = Orders::new();
     orders.apply(order_status_cmd(make_status(
@@ -476,13 +446,6 @@ fn outgoing_send_vstop_if_changed_matches_delphi_change_gate() {
         "Delphi exits when VStop fields equal FPrevVStop*"
     );
 
-    assert!(
-        orders
-            .send_vstop_if_changed(42, true, false, 12.5, 100.0)
-            .is_none(),
-        "Delphi exits when worker.vOrder is nil even if VStop changed"
-    );
-    assert!(orders.mark_local_visual_order(42));
     let (ctx, market, params) = orders
         .send_vstop_if_changed(42, true, false, 12.5, 100.0)
         .expect("changed VStop should be sent");
@@ -2273,7 +2236,12 @@ fn snapshot_cow_mutating_one_order_does_not_deep_clone_other_orders() {
         snapshot.map.get(&2).unwrap()
     ));
 
-    assert!(orders.mark_local_visual_order(1));
+    let stops = StopSettings {
+        stop_loss_on: DelphiBool::TRUE,
+        sl_level: 12.5,
+        ..StopSettings::default()
+    };
+    assert!(orders.send_stops_if_changed(1, &stops).is_some());
 
     assert!(!std::sync::Arc::ptr_eq(
         orders.map.get(&1).unwrap(),
