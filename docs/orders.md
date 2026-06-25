@@ -253,6 +253,8 @@ expose a raw inbound packet history. Long trace lines are shrunk with the same
 800-line chart policy used by the MoonBot core.
 
 For chart timestamps, use `OrderTraceChartPoint::time()` or `unix_millis()`.
+When a sell trace carries a stop line, `OrderTraceLine::stop_price` and
+`stop_time` give the price and time endpoint for that dotted stop segment.
 
 ## Lifecycle Notes
 

@@ -201,6 +201,7 @@ pub struct OrderTraceLine {
     pub tmp_point: Option<OrderTraceChartPoint>,
     pub can_finish: bool,
     pub stop_price: Option<f32>,
+    pub stop_time: Option<MoonTime>,
 }
 
 impl OrderTraceLine {
@@ -213,6 +214,7 @@ impl OrderTraceLine {
             tmp_point: None,
             can_finish: false,
             stop_price: None,
+            stop_time: None,
         }
     }
 

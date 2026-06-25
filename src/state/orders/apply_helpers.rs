@@ -148,6 +148,7 @@ impl Orders {
         if tp.stop_price > 0.0 {
             if let Some(line) = entry.sell_trace_line.as_mut() {
                 line.stop_price = Some(tp.stop_price);
+                line.stop_time = Some(tp.trace_time());
             }
         }
     }

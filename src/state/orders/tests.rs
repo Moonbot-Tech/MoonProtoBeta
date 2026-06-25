@@ -1009,6 +1009,10 @@ fn trace_line_initial_temp_and_finish_match_delphi_order_line() {
         assert!(line.prevent_delete);
         assert_eq!(line.stop_price, Some(99.0));
         assert_eq!(
+            line.stop_time,
+            Some(crate::MoonTime::from_delphi_days(45_000.0).unwrap())
+        );
+        assert_eq!(
             line.points,
             vec![
                 OrderTraceChartPoint {
