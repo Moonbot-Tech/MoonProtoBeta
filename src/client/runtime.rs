@@ -113,6 +113,7 @@ impl Client {
         self.auth_status = AuthStatus::Base;
         self.next_primary_hello_new_session = false;
         self.clear_hello_wait_state();
+        self.pre_auth_crypted.clear();
         self.set_domain_ready(false);
     }
 }

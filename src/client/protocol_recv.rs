@@ -392,6 +392,7 @@ impl ProtocolCore<'_> {
             }
             Command::Fine => {
                 self.on_fine(payload, recv_bytes, timestamp_ms);
+                self.drain_deferred_pre_auth_crypted(mode);
             }
             Command::SizeTest => {
                 self.on_new_size_test(payload);
@@ -496,7 +497,7 @@ impl ProtocolCore<'_> {
         if apply_recv_effects {
             self.apply_recv_side_effects(recv_bytes, timestamp_ms);
         }
-        if self.should_drop_crypted_before_auth(raw_cmd, payload.len()) {
+        if self.defer_crypted_before_auth(raw_cmd, payload, timestamp_ms) {
             if let Some(stats) = sliced_stats {
                 self.apply_reader_sliced_stats(stats);
             }
@@ -545,14 +546,14 @@ impl ProtocolCore<'_> {
         if apply_recv_effects {
             self.apply_recv_side_effects(recv_bytes, timestamp_ms);
         }
-        if self.should_drop_crypted_before_auth(raw_cmd, payload.len()) {
+        #[cfg(any(test, feature = "diagnostics"))]
+        let payload_len = payload.len();
+        if self.defer_crypted_before_auth(raw_cmd, &payload, timestamp_ms) {
             if let Some(stats) = sliced_stats {
                 self.apply_reader_sliced_stats(stats);
             }
             return;
         }
-        #[cfg(any(test, feature = "diagnostics"))]
-        let payload_len = payload.len();
         #[cfg(any(test, feature = "diagnostics"))]
         let decode_start = Instant::now();
         let Some((cmd, payload)) = Client::decode_command_payload_owned(
@@ -576,19 +577,83 @@ impl ProtocolCore<'_> {
         self.finish_decoded_command(cmd, payload, timestamp_ms, sliced_stats, mode);
     }
 
-    fn should_drop_crypted_before_auth(&self, raw_cmd: u8, payload_len: usize) -> bool {
+    fn defer_crypted_before_auth(
+        &mut self,
+        raw_cmd: u8,
+        payload: &[u8],
+        timestamp_ms: i64,
+    ) -> bool {
         if self.client.authorized || Command::from_byte(raw_cmd) != Command::Crypted {
             return false;
+        }
+        if self.client.hello_wait_state.allows_fine() {
+            let maybe_deferred = self
+                .client
+                .recv
+                .data_read_state
+                .decode_cipher
+                .as_ref()
+                .and_then(|cipher| crypted::decrypt_command_no_replay(cipher, &payload));
+            if let Some((hdr, mut plaintext)) = maybe_deferred {
+                if hdr.msg_num <= PRE_AUTH_CRYPTED_MAX_MSG_NUM {
+                    plaintext.drain(..crypted::CRYPTO_HEADER_SIZE);
+                    self.client.pre_auth_crypted.push(PreAuthCryptedCommand {
+                        msg_num: hdr.msg_num,
+                        cmd: hdr.cmd,
+                        payload: plaintext,
+                        timestamp_ms,
+                    });
+                    if trace_io_enabled() {
+                        eprintln!(
+                            "[mp-dispatch-defer] t={} cmd=Crypted raw={} msg_num={} inner_cmd={:?} payload_len={} reason=waiting_fine",
+                            trace_elapsed_ms(),
+                            raw_cmd,
+                            hdr.msg_num,
+                            Command::from_byte(hdr.cmd),
+                            self.client.pre_auth_crypted.last().map_or(0, |item| item.payload.len())
+                        );
+                    }
+                    return true;
+                }
+            }
         }
         if trace_io_enabled() {
             eprintln!(
                 "[mp-dispatch-drop] t={} cmd=Crypted raw={} payload_len={} reason=not_authorized_crypted",
                 trace_elapsed_ms(),
                 raw_cmd,
-                payload_len
+                payload.len()
             );
         }
         true
+    }
+
+    pub(crate) fn drain_deferred_pre_auth_crypted(&mut self, mode: &mut RunMode<'_>) {
+        if !self.client.authorized || self.client.pre_auth_crypted.is_empty() {
+            return;
+        }
+        let mut deferred = std::mem::take(&mut self.client.pre_auth_crypted);
+        deferred.sort_by_key(|item| item.msg_num);
+        for mut item in deferred {
+            if !self
+                .client
+                .recv
+                .data_read_state
+                .slider
+                .check_revd(item.msg_num)
+            {
+                continue;
+            }
+            let mut cmd = item.cmd;
+            if cmd & COMPRESSED_FLAG != 0 {
+                cmd &= 0x7F;
+                let Some(decompressed) = compression::mp_decompress(&item.payload) else {
+                    continue;
+                };
+                item.payload = decompressed;
+            }
+            self.finish_decoded_command(cmd, item.payload, item.timestamp_ms, None, mode);
+        }
     }
 
     fn finish_decoded_command(

@@ -34,6 +34,7 @@ impl ProtocolCore<'_> {
 
     fn send_rebind_hello_again(&mut self, cur_tm: i64, new_window: bool) {
         if new_window {
+            self.client.pre_auth_crypted.clear();
             self.new_handshake_rnd();
             self.client
                 .start_hello_wait(HelloWaitState::RebindHelloAgain, cur_tm);

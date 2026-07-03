@@ -72,22 +72,7 @@ pub(crate) fn decrypt_command(
     encrypted_data: &[u8],
     slider: &mut Slider,
 ) -> Option<(u8, Vec<u8>, bool)> {
-    let mut plaintext = match crypto::decrypt_with_cipher(decode_cipher, encrypted_data, &[]) {
-        Some(pt) => pt,
-        None => {
-            // GCM tag mismatch — corrupt packet or wrong key.
-            // Throttling is on the caller; here it's a plain warn target for filtering.
-            warn!(target: "moonproto::crypted", "AES-GCM decrypt failed (tag mismatch)");
-            return None;
-        }
-    };
-
-    if plaintext.len() < CRYPTO_HEADER_SIZE {
-        warn!(target: "moonproto::crypted", "decrypted plaintext too short: {} < {}", plaintext.len(), CRYPTO_HEADER_SIZE);
-        return None;
-    }
-
-    let hdr = CryptoHeader::from_bytes(&plaintext)?;
+    let (hdr, mut plaintext) = decrypt_command_no_replay(decode_cipher, encrypted_data)?;
 
     // Replay protection via slider. Duplicates are expected with UDP retries and
     // are a normal drop path, so keep them out of the default warning log.
@@ -106,6 +91,35 @@ pub(crate) fn decrypt_command(
     // reuse the owned Vec, one fewer allocation per Crypted packet.
     plaintext.drain(..CRYPTO_HEADER_SIZE);
     Some((hdr.cmd, plaintext, hdr.want_ack))
+}
+
+/// Decrypt an `MPC_Crypted` payload without touching the receive slider.
+///
+/// This is only for the Fine-wait reorder buffer: the server can send session
+/// packets after it accepts `ImFriend` while the client's `MPC_Fine` is still in
+/// flight. We may inspect and keep those bytes, but the replay window must move
+/// only after `AuthDone`.
+pub(crate) fn decrypt_command_no_replay(
+    decode_cipher: &Aes128Gcm,
+    encrypted_data: &[u8],
+) -> Option<(CryptoHeader, Vec<u8>)> {
+    let plaintext = match crypto::decrypt_with_cipher(decode_cipher, encrypted_data, &[]) {
+        Some(pt) => pt,
+        None => {
+            // GCM tag mismatch — corrupt packet or wrong key.
+            // Throttling is on the caller; here it's a plain warn target for filtering.
+            warn!(target: "moonproto::crypted", "AES-GCM decrypt failed (tag mismatch)");
+            return None;
+        }
+    };
+
+    if plaintext.len() < CRYPTO_HEADER_SIZE {
+        warn!(target: "moonproto::crypted", "decrypted plaintext too short: {} < {}", plaintext.len(), CRYPTO_HEADER_SIZE);
+        return None;
+    }
+
+    let hdr = CryptoHeader::from_bytes(&plaintext)?;
+    Some((hdr, plaintext))
 }
 
 #[cfg(test)]
