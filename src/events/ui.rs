@@ -34,11 +34,18 @@ impl EventDispatcher {
                     }
                     _ => None,
                 };
+                let lev_manage = match &cmd_v {
+                    UICommand::LevManage(lev) => Some(lev.clone()),
+                    _ => None,
+                };
                 if let Some(ev) = self.settings.apply(cmd_v) {
                     out.push(Event::Settings(ev));
                 }
                 if let Some(text) = coin_blacklist_text {
                     self.markets.set_coin_blacklist_text(&text);
+                }
+                if let Some(lev) = lev_manage {
+                    self.markets.apply_lev_manage_to_markets(&lev);
                 }
             }
             None => Self::push_parse_failed(out, Command::UI, payload),

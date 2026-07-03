@@ -18,6 +18,7 @@ use crate::commands::trade::{
     OrderCompact, OrderStatus, OrderStatusUpdate, OrderTracePoint, OrderType, OrderUpdateData,
     OrderWorkerStatus, SetImmuneCommand, StopSettings, TradeCommand, TradeCtx, TradeEpochHeader,
 };
+use crate::commands::ui::{build_lev_manage, LevManage};
 use crate::state::history::DELPHI_MSECS_PER_DAY;
 use crate::state::orders::OrderCancelSend;
 use crate::state::OrderBookKind;
@@ -237,6 +238,79 @@ fn dispatcher_parses_old_client_settings_with_cfg_fallback() {
     assert_eq!(settings.s_price, [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]);
     assert_eq!(settings.sb_num, 6);
     assert_eq!(settings.join_sell_kind, 2);
+}
+
+#[test]
+fn dispatcher_lev_manage_updates_market_max_pos() {
+    let mut dispatcher = EventDispatcher::new();
+    let mut btc = event_market("BTCUSDT");
+    btc.market_currency = "BTC".to_string();
+    btc.is_btc_market = true;
+    dispatcher.markets.apply_markets_list(MarketsListResponse {
+        markets: vec![btc],
+        corr_markets: vec![],
+    });
+
+    let cmd = LevManage {
+        uid: 7,
+        cmd_ver: 1,
+        auto_max_order: true,
+        auto_lev_up: true,
+        auto_isolated: false,
+        auto_cross: false,
+        auto_fix_lev: false,
+        fix_lev: 20,
+        tlg_report: false,
+        lev_control: "250 BTC".to_string(),
+    };
+    let events = dispatcher.dispatch(Command::UI, &build_lev_manage(7, &cmd), 0);
+
+    assert!(matches!(
+        events.as_slice(),
+        [Event::Settings(SettingsEvent::LevManageUpdated)]
+    ));
+    assert_eq!(
+        dispatcher.markets().get("BTCUSDT").unwrap().max_pos_limit(),
+        250
+    );
+}
+
+#[test]
+fn dispatcher_reapplies_lev_manage_after_markets_list_refresh() {
+    let mut dispatcher = EventDispatcher::new();
+    let cmd = LevManage {
+        uid: 7,
+        cmd_ver: 1,
+        auto_max_order: true,
+        auto_lev_up: true,
+        auto_isolated: false,
+        auto_cross: false,
+        auto_fix_lev: false,
+        fix_lev: 20,
+        tlg_report: false,
+        lev_control: "250 BTC".to_string(),
+    };
+    let _ = dispatcher.dispatch(Command::UI, &build_lev_manage(7, &cmd), 0);
+
+    let mut btc = event_market("BTCUSDT");
+    btc.market_currency = "BTC".to_string();
+    btc.is_btc_market = true;
+    let mut data = Vec::new();
+    data.extend_from_slice(&1i32.to_le_bytes());
+    write_market(&mut data, &btc, 2);
+    data.extend_from_slice(&0i32.to_le_bytes());
+    let payload = api_response_payload_ver(2, EngineMethod::GetMarketsList, &data);
+
+    let events = dispatcher.dispatch(Command::API, &payload, 0);
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::Markets(MarketsEvent::MarketsListReplaced { .. })
+    )));
+    assert_eq!(
+        dispatcher.markets().get("BTCUSDT").unwrap().max_pos_limit(),
+        250
+    );
 }
 
 #[test]
@@ -606,6 +680,7 @@ fn event_market(name: &str) -> Market {
         price: Default::default(),
         delta_state: Default::default(),
         market_blacklisted_cfg: false,
+        max_control_lev: 0,
         arb_slots: std::collections::HashMap::new(),
     }
 }
@@ -2462,6 +2537,70 @@ fn candles_snapshot_ready_after_worker_barrier_exposes_reader_rows() {
             }
         )]
     ));
+}
+
+#[test]
+fn candles_snapshot_stale_gate_reports_zero_retained_candles() {
+    let worker = crate::state::MarketHistoryWorker::spawn(crate::state::MarketHistoryConfig {
+        futures_trades_capacity: 0,
+        spot_trades_capacity: 0,
+        liquidation_capacity: 0,
+        mm_orders_capacity: 0,
+        last_price_capacity: 0,
+        mini_candles_capacity: 0,
+        candles_5m_capacity: 8,
+    });
+
+    let mut d = EventDispatcher::new();
+    d.set_market_history_handle(worker.handle());
+    seed_event_markets(&mut d, &["BTCUSDT"]);
+    d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
+    d.set_trade_storage_scope(Some(&crate::state::TradeStorageScope::All), 0.0);
+
+    let now = crate::MoonTime::now();
+    let markets = vec![crate::commands::candles::RequestCandlesMarket {
+        market_name: "BTCUSDT".to_string(),
+        candles_5m: vec![crate::commands::candles::DeepPrice {
+            open: 10.0,
+            close: 11.0,
+            high: 12.0,
+            low: 9.0,
+            volume: 123.0,
+            time: now.to_delphi_days() + 3.0 / 24.0,
+        }],
+        buy_wall: [crate::commands::candles::WallItem::default(); 4],
+        sell_wall: [crate::commands::candles::WallItem::default(); 4],
+    }];
+
+    let summary = d
+        .apply_candles_snapshot(
+            &markets,
+            0,
+            #[cfg(any(test, feature = "diagnostics"))]
+            None,
+        )
+        .expect("stale snapshot is queued as an empty retained update");
+    assert_eq!(summary.retained_markets, 1);
+    assert_eq!(
+        summary.retained_candles, 0,
+        "CandlesSnapshotEvent must not report rows that the retained-history store will stale-drop"
+    );
+
+    let barrier = d
+        .market_history_barrier_async()
+        .expect("history worker barrier available");
+    barrier
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("worker processed stale candles snapshot before event");
+
+    let readers = worker.readers("BTCUSDT").expect("market reader exists");
+    let candles = readers.candles_5m.expect("candles ring enabled");
+    let mut rows = Vec::new();
+    candles.copy_last(8, &mut rows);
+    assert!(
+        rows.is_empty(),
+        "unshifted server-local snapshot rows are stale and must clear retained candles"
+    );
 }
 
 #[test]

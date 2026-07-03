@@ -322,6 +322,34 @@ fn request_candles_data_parser_applies_delphi_timezone_shift() {
 }
 
 #[test]
+fn request_candles_data_public_parser_converts_server_local_candles_to_utc() {
+    let now = crate::MoonTime::now();
+    let server_shift_minutes = 180.0;
+    let server_local_days = now.to_delphi_days() + server_shift_minutes / MINS_IN_DAY;
+
+    let mut plain = Vec::new();
+    plain.extend_from_slice(&0i32.to_le_bytes());
+    plain.push(2);
+    plain.extend_from_slice(&1i32.to_le_bytes());
+    plain.extend_from_slice(&server_shift_minutes.to_le_bytes());
+    write_delphi_utf16_string(&mut plain, "BTCUSDT");
+    plain.extend_from_slice(&1i32.to_le_bytes());
+    write_deep_price_pack(&mut plain, 101.0, 99.0, 12.5, server_local_days);
+    for _ in 0..8 {
+        plain.extend_from_slice(&0f32.to_le_bytes());
+        plain.extend_from_slice(&0i32.to_le_bytes());
+    }
+
+    let markets = parse_request_candles_data_response(&zip_plain(&plain)).unwrap();
+    let candle_time = markets[0].candles_5m[0].time();
+    let age_ms = crate::MoonTime::now().unix_millis() - candle_time.unix_millis();
+    assert!(
+        age_ms.abs() < 60_000,
+        "public parser must expose UTC MoonTime, not server/client-local Delphi time; age_ms={age_ms}"
+    );
+}
+
+#[test]
 fn request_candles_data_rejects_impossible_market_count_before_alloc() {
     let mut plain = Vec::new();
     plain.extend_from_slice(&0i32.to_le_bytes());

@@ -315,6 +315,14 @@ fn build_candle_rows_and_baseline(
         rows.push(row);
     }
 
+    if crate::state::history_store::candles_snapshot_is_stale(
+        rows.last().map(|row| row.time()).unwrap_or_default(),
+        now_time,
+    ) {
+        rows.clear();
+        return (rows, None);
+    }
+
     let baseline = can_build_baseline.then(|| CandleDeltaBaseline {
         coin_1h_avg: avg_or_zero(coin_1h_sum, coin_1h_count),
         coin_24h_avg: avg_or_zero(coin_24h_sum, coin_24h_count),

@@ -713,6 +713,14 @@ pub(crate) const UI_COMMANDS: &[CommandDescriptor] = &[
         priority = High,
         direction = Outbound
     ),
+    cmd_desc!(
+        Command::UI,
+        24,
+        "TProfitStateCommand",
+        base = Base,
+        priority = High,
+        direction = Inbound
+    ),
 ];
 
 pub(crate) const STRAT_COMMANDS: &[CommandDescriptor] = &[
@@ -999,7 +1007,7 @@ mod tests {
     #[test]
     fn descriptor_map_covers_known_typed_domains() {
         assert_eq!(ORDER_COMMANDS.len(), 32);
-        assert_eq!(UI_COMMANDS.len(), 24);
+        assert_eq!(UI_COMMANDS.len(), 25);
         assert_eq!(STRAT_COMMANDS.len(), 11);
         assert_eq!(BALANCE_COMMANDS.len(), 7);
         assert_eq!(API_COMMANDS.len(), 3);

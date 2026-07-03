@@ -95,6 +95,9 @@ impl EventDispatcher {
         else {
             return false;
         };
+        if let Some(lev) = self.settings.lev_manage.as_ref() {
+            self.markets.apply_lev_manage_to_markets(lev);
+        }
         out.push(Event::Markets(ev));
         let new_markets = self.markets.take_new_markets_added();
         if !new_markets.is_empty() {

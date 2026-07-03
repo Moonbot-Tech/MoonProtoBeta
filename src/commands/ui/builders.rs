@@ -85,6 +85,7 @@ pub(crate) fn build_client_settings(cmd: &ClientSettingsCommand) -> Vec<u8> {
     }
     out.push(flags);
     out.push(0); // colorCount = 0 (legacy slot, unused)
+    out.push(cmd.trailing_stop as u8);
 
     out
 }

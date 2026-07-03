@@ -6,6 +6,7 @@ use crate::commands::market::{
     MAX_MARKETS_LIST_ROWS,
 };
 use crate::commands::trade::OrderType;
+use crate::commands::ui::LevManage;
 use crate::MoonTime;
 
 fn mk_market(name: &str, idx: u16) -> Market {
@@ -80,6 +81,7 @@ fn mk_market(name: &str, idx: u16) -> Market {
         price: Default::default(),
         delta_state: Default::default(),
         market_blacklisted_cfg: false,
+        max_control_lev: 0,
         arb_slots: std::collections::HashMap::new(),
     }
 }
@@ -90,6 +92,21 @@ fn mk_pair_market(name: &str, bn_currency: &str, base_currency: &str, idx: u16) 
     market.bn_market_currency = bn_currency.to_string();
     market.base_currency = base_currency.to_string();
     market
+}
+
+fn lev_manage_config(text: &str) -> LevManage {
+    LevManage {
+        uid: 0,
+        cmd_ver: 1,
+        auto_max_order: true,
+        auto_lev_up: true,
+        auto_isolated: false,
+        auto_cross: false,
+        auto_fix_lev: false,
+        fix_lev: 20,
+        tlg_report: false,
+        lev_control: text.to_string(),
+    }
 }
 
 fn push_str(out: &mut Vec<u8>, s: &str) {
@@ -151,6 +168,53 @@ fn apply_markets_list_initial_populates_state() {
     assert!(st.get("DOGE").is_none());
     assert_eq!(st.market_name_by_index(1), Some("ETH"));
     assert_eq!(st.market_index_by_name("ETH"), Some(1));
+}
+
+#[test]
+fn apply_lev_manage_sets_market_max_pos_like_markets_table() {
+    let mut st = MarketsState::new();
+    let mut btc = mk_market("BTCUSDT", 0);
+    btc.market_currency = "BTC".to_string();
+    btc.is_btc_market = true;
+    let mut eth = mk_market("ETHUSDT", 1);
+    eth.market_currency = "ETH".to_string();
+    eth.is_btc_market = true;
+    let mut sol = mk_market("SOLUSDT", 2);
+    sol.market_currency = "SOL".to_string();
+    sol.is_btc_market = true;
+    st.apply_markets_list(MarketsListResponse {
+        markets: vec![btc, eth, sol],
+        corr_markets: vec![],
+    });
+
+    let lev = lev_manage_config("100 def 250 BT* 3k ETH");
+    st.apply_lev_manage_to_markets(&lev);
+
+    assert_eq!(st.get("BTCUSDT").unwrap().max_pos_limit(), 250);
+    assert_eq!(st.get("ETHUSDT").unwrap().max_pos_limit(), 3_000);
+    assert_eq!(
+        st.get("SOLUSDT").unwrap().max_pos_limit(),
+        0,
+        "Delphi keeps per-market MaxPos zero when only cfg.AutoLevControlOther/def applies"
+    );
+    assert_eq!(lev.default_max_pos_limit(), 100);
+}
+
+#[test]
+fn apply_lev_manage_clears_absent_markets_on_new_config() {
+    let mut st = MarketsState::new();
+    let mut btc = mk_market("BTCUSDT", 0);
+    btc.market_currency = "BTC".to_string();
+    btc.is_btc_market = true;
+    st.apply_markets_list(MarketsListResponse {
+        markets: vec![btc],
+        corr_markets: vec![],
+    });
+
+    st.apply_lev_manage_to_markets(&lev_manage_config("250 BTC"));
+    assert_eq!(st.get("BTCUSDT").unwrap().max_pos_limit(), 250);
+    st.apply_lev_manage_to_markets(&lev_manage_config("100 def"));
+    assert_eq!(st.get("BTCUSDT").unwrap().max_pos_limit(), 0);
 }
 
 #[test]

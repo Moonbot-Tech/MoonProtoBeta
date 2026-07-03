@@ -65,6 +65,11 @@ impl MarketHandle {
         self.with(|market| market.price)
     }
 
+    /// Copy the `MaxPos` value shown by the MoonBot markets table.
+    pub fn max_pos_limit(&self) -> i32 {
+        self.with(|market| market.max_pos_limit())
+    }
+
     /// Copy the live trade-tail state.
     pub fn trade_state(&self) -> MarketTradeState {
         self.with(|market| market.trade_tail)

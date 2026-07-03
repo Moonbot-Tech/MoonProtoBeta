@@ -9,6 +9,7 @@
 //! - `LevManage`: leverage-management settings snapshot.
 //! - `RuntimeState`: started/passive-mode state of the MoonBot core.
 //! - `KernelLicenseState`: license/module/MoonCredits state.
+//! - `ProfitState`: report/profit counters shown by MoonBot settings UI.
 //! - `ArbActivateNotify`: arbitrage-valid-until timestamp.
 //!
 //! Client->server action commands (`SettingsRequest`, `StratStartStop`,
@@ -20,7 +21,8 @@
 //! the refreshed list actually inserts new markets.
 
 use crate::commands::ui::{
-    ClientSettingsCommand, KernelLicenseStateCommand, LevManage, RuntimeStateCommand, UICommand,
+    ClientSettingsCommand, KernelLicenseStateCommand, LevManage, ProfitStateCommand,
+    RuntimeStateCommand, UICommand,
 };
 use crate::time::MoonTime;
 
@@ -46,6 +48,8 @@ pub struct SettingsState {
     pub runtime_state: Option<RuntimeStateCommand>,
     /// Current license/module/MoonCredits state, if received.
     pub kernel_license_state: Option<KernelLicenseStateCommand>,
+    /// Current report/profit counters, if received.
+    pub profit_state: Option<ProfitStateCommand>,
     /// Raw `TDateTime` days for diagnostics/parity tests.
     ///
     /// Normal terminal code should use [`Self::arb_valid_until_time`] and
@@ -67,6 +71,8 @@ pub enum SettingsEvent {
     RuntimeStateUpdated,
     /// License/module/MoonCredits state changed.
     KernelLicenseStateUpdated,
+    /// Report/profit counters changed.
+    ProfitStateUpdated,
     /// Remote update command: version name + release/test flag.
     ///
     /// Terminal clients treat this as a request to run their local updater. The
@@ -179,6 +185,11 @@ impl SettingsState {
                 Some(SettingsEvent::KernelLicenseStateUpdated)
             }
 
+            UICommand::ProfitState(s) => {
+                self.profit_state = Some(s);
+                Some(SettingsEvent::ProfitStateUpdated)
+            }
+
             UICommand::ArbActivateNotify(a) => {
                 self.arb_valid_until = Some(a.arb_valid);
                 Some(SettingsEvent::ArbActivated {
@@ -232,6 +243,7 @@ mod tests {
             fixed_sell_price: 0.0,
             price_drop_level: 0.0,
             trailing_drop: 0.0,
+            trailing_stop: false,
             g_take_profit: 0.0,
             use_g_take_profit: false,
             unused_spread: 0,

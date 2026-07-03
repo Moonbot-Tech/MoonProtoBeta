@@ -574,7 +574,7 @@ impl MarketHistoryStore {
     }
 }
 
-fn candles_snapshot_is_stale(last_time: MoonTime, now_time: MoonTime) -> bool {
+pub(crate) fn candles_snapshot_is_stale(last_time: MoonTime, now_time: MoonTime) -> bool {
     if last_time == MoonTime::ZERO || now_time == MoonTime::ZERO {
         return false;
     }

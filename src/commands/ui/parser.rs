@@ -314,6 +314,15 @@ impl UICommand {
                 })
             }
 
+            CMD_PROFIT_STATE => Some(UICommand::ProfitState(ProfitStateCommand {
+                #[cfg(any(test, feature = "diagnostics"))]
+                uid,
+                rep_total_profit: f64::from_bits(read_u64_zero_tail(payload, &mut pos)),
+                rep_total_trades: read_i32_zero_tail(payload, &mut pos),
+                rep_trades_total: f64::from_bits(read_u64_zero_tail(payload, &mut pos)),
+                rep_count_trades: read_i32_zero_tail(payload, &mut pos),
+            })),
+
             _ => Some(UICommand::Unknown { cmd_id, uid }),
         }
     }
@@ -482,6 +491,7 @@ fn parse_client_settings(
 
     // ArbConfig compact (defaults out of InitArbConfigDefaults if absent or arbVer < 1).
     let mut arb_config = ArbConfigCompact::default();
+    let mut can_read_trailing_stop = true;
     if *pos < data.len() {
         let arb_ver = data[*pos];
         *pos += 1;
@@ -517,8 +527,16 @@ fn parse_client_settings(
                 let skip = color_count * 5;
                 *pos = (*pos + skip).min(data.len());
             }
+        } else if arb_ver >= 1 {
+            can_read_trailing_stop = false;
         }
     }
+
+    let trailing_stop = if can_read_trailing_stop && *pos < data.len() {
+        read_bool_zero_tail(data, pos)
+    } else {
+        fallback.map(|f| f.trailing_stop).unwrap_or(false)
+    };
 
     Some(ClientSettingsCommand {
         uid,
@@ -529,6 +547,7 @@ fn parse_client_settings(
         fixed_sell_price,
         price_drop_level,
         trailing_drop,
+        trailing_stop,
         g_take_profit,
         use_g_take_profit,
         unused_spread,

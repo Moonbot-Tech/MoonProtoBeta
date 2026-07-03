@@ -49,6 +49,9 @@
 //! Strategy snapshots are also dumped as raw `TStratSnapshot.Data` files under
 //! `target/firetest_strategy_raw/` by default, so Delphi/Rust serializer and CPU
 //! checks can run against the exact same live payload bytes.
+//! Live FireTest cases are serialized inside this binary: they share one live
+//! server and process-wide err_emu diagnostics, so parallel test-harness
+//! execution would mix scenarios instead of measuring one pipeline.
 //!
 //! This is a diagnostic/protocol health test, not application example code. The
 //! full profile uses the same public `MoonClient` path as regular applications,
@@ -62,7 +65,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use moonproto::client::{set_err_emu, ErrEmuDiagnostics, ErrEmuSlicedDatagramDiagnostics};
@@ -80,9 +83,9 @@ use moonproto::{
     parse_key_info, ClientConfig, ClientSettingsCommand, ConnectConfig, DeepHistoryKind,
     EngineMethod, EngineResponse, ExchangeKind, ExchangeOrder, FieldValue, ImportedKeys,
     InitConfig, InitialStrategies, LifecycleEvent, MoonClient, MoonShotStrategy, MoonStateSnapshot,
-    MoonTime, OrderWorkerStatus, ProtocolMetricsSnapshot, StrategyDynamicPicklist,
-    StrategyFieldLayout, StrategyFieldUiKind, StrategyFields, StrategyKind, StrategySchema,
-    StrategySnapshot, TradesStreamMode, TransportMode,
+    MoonTime, OrderWorkerStatus, ProfitStateCommand, ProtocolMetricsSnapshot,
+    StrategyDynamicPicklist, StrategyFieldLayout, StrategyFieldUiKind, StrategyFields,
+    StrategyKind, StrategySchema, StrategySnapshot, TradesStreamMode, TransportMode,
 };
 
 const DEFAULT_FIRETEST_ERR_EMU_PERCENT: u8 = 10;
@@ -119,6 +122,15 @@ const FIRETEST_CPU_HARD_RED_FLAG_NS: u64 = 5_000_000;
 const ACTIVE_LIB_REPORT_MARKETS: [&str; 2] = ["BTCUSDT", "ETHUSDT"];
 const FIRETEST_COIN_CARD_KIND: DeepHistoryKind = DeepHistoryKind::Hour4;
 const FIRETEST_MIN_COIN_CARD_CANDLES: usize = 24;
+const FIRETEST_RETAINED_CANDLE_MAX_AGE_SECS: f64 = 11.0 * 60.0;
+
+static FIRETEST_LIVE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn firetest_live_test_lock() -> MutexGuard<'static, ()> {
+    FIRETEST_LIVE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FireProfile {
@@ -449,10 +461,13 @@ struct SessionStats {
     raw_events: u64,
     server_logs: u64,
     settings_events: u64,
+    lev_manage_events: u64,
     runtime_state_events: u64,
     runtime_state: Option<RuntimeStateProbe>,
     kernel_license_state_events: u64,
     kernel_license_state: Option<KernelLicenseProbe>,
+    profit_state_events: u64,
+    profit_state: Option<ProfitStateCommand>,
     strategy_events: u64,
     strategy_snapshot_events: u64,
     strategy_schema_events: u64,
@@ -498,6 +513,8 @@ struct SessionStats {
     candles_seen_chunks: Vec<bool>,
     candles_last_progress: (usize, usize),
     candles_complete: Option<CandlesSnapshotSummary>,
+    retained_candles_5m: usize,
+    retained_candles_5m_newest_age_s: Option<f64>,
     candles_aggregator: CandlesAggregator,
     last_settings: Option<ClientSettingsCommand>,
     strategies_by_id: HashMap<u64, StrategySnapshot>,
@@ -520,10 +537,13 @@ impl Clone for SessionStats {
             raw_events: self.raw_events,
             server_logs: self.server_logs,
             settings_events: self.settings_events,
+            lev_manage_events: self.lev_manage_events,
             runtime_state_events: self.runtime_state_events,
             runtime_state: self.runtime_state,
             kernel_license_state_events: self.kernel_license_state_events,
             kernel_license_state: self.kernel_license_state,
+            profit_state_events: self.profit_state_events,
+            profit_state: self.profit_state,
             strategy_events: self.strategy_events,
             strategy_snapshot_events: self.strategy_snapshot_events,
             strategy_schema_events: self.strategy_schema_events,
@@ -569,6 +589,8 @@ impl Clone for SessionStats {
             candles_seen_chunks: self.candles_seen_chunks.clone(),
             candles_last_progress: self.candles_last_progress,
             candles_complete: self.candles_complete.clone(),
+            retained_candles_5m: self.retained_candles_5m,
+            retained_candles_5m_newest_age_s: self.retained_candles_5m_newest_age_s,
             candles_aggregator: CandlesAggregator::new(),
             last_settings: self.last_settings.clone(),
             strategies_by_id: self.strategies_by_id.clone(),
@@ -615,7 +637,7 @@ impl SessionStats {
                 )
             });
         format!(
-            "connected_now={} fresh={} again={} reconnecting={} disconnected={} server_events={} engine={} raw={} logs={} settings={} runtime_state_events={} runtime_state={:?} kernel_license_events={} kernel_license={:?} strats={} strat_snapshots={} schema_events={} schema_kinds={} schema_fields={} strat_runtime_events={} strategies_running={:?} strategy_rows={} markets={} trades={} target_trade_packets={} books={} target_book_full={} target_book_update={} market_probe=[{}] order_events={} balances={} transfer_assets={} mask={:#05b} failures={} coin_card_events={} updates={} failures={} last_count={} parse_failed={}{} candles={}",
+            "connected_now={} fresh={} again={} reconnecting={} disconnected={} server_events={} engine={} raw={} logs={} settings={} lev_manage_events={} runtime_state_events={} runtime_state={:?} kernel_license_events={} kernel_license={:?} profit_state_events={} profit_state={:?} strats={} strat_snapshots={} schema_events={} schema_kinds={} schema_fields={} strat_runtime_events={} strategies_running={:?} strategy_rows={} markets={} trades={} target_trade_packets={} books={} target_book_full={} target_book_update={} market_probe=[{}] order_events={} balances={} transfer_assets={} mask={:#05b} failures={} coin_card_events={} updates={} failures={} last_count={} parse_failed={}{} candles={} retained_candles_5m={} newest_age_s={:?}",
             self.connected_now,
             self.connected_fresh,
             self.connected_again,
@@ -626,10 +648,13 @@ impl SessionStats {
             self.raw_events,
             self.server_logs,
             self.settings_events,
+            self.lev_manage_events,
             self.runtime_state_events,
             self.runtime_state,
             self.kernel_license_state_events,
             self.kernel_license_state,
+            self.profit_state_events,
+            self.profit_state,
             self.strategy_events,
             self.strategy_snapshot_events,
             self.strategy_schema_events,
@@ -656,8 +681,17 @@ impl SessionStats {
             self.coin_card_last_count,
             self.parse_failed,
             parse_failed_detail,
-            candles
+            candles,
+            self.retained_candles_5m,
+            self.retained_candles_5m_newest_age_s,
         )
+    }
+
+    fn retained_candles_healthy(&self) -> bool {
+        self.retained_candles_5m > 0
+            && self
+                .retained_candles_5m_newest_age_s
+                .is_some_and(|age| age <= FIRETEST_RETAINED_CANDLE_MAX_AGE_SECS)
     }
 
     fn market_probe_summary(&self) -> String {
@@ -903,6 +937,7 @@ impl Session {
         let event_no = st.server_events;
         sync_market_probe_from_dispatcher(&mut st, event_no, snapshot.as_ref(), log_changes);
         record_order_state_snapshot(&mut st, snapshot.as_ref());
+        let target_market = st.market.clone();
 
         if let Some(settings) = snapshot.settings().client_settings.clone() {
             st.last_settings = Some(settings);
@@ -915,6 +950,7 @@ impl Session {
             .settings()
             .kernel_license_state
             .map(KernelLicenseProbe::from);
+        st.profit_state = snapshot.settings().profit_state;
         st.strategies_running = snapshot.strats().strategies_running();
         if let Some(state) = snapshot.markets().trade_state(&st.market) {
             if state.last_trade_price > 0.0 {
@@ -931,6 +967,18 @@ impl Session {
                         st.last_book_bid = Some(bid.rate);
                         st.last_book_ask = Some(ask.rate);
                     }
+                }
+            }
+        }
+        if let Some(market) = snapshot.markets().get(&target_market) {
+            if let Some(readers) = snapshot.market_history_readers_for(&market) {
+                if let Some(reader) = readers.candles_5m.as_ref() {
+                    st.retained_candles_5m = reader.bounds().len;
+                    let mut newest = Vec::new();
+                    reader.copy_last(1, &mut newest);
+                    st.retained_candles_5m_newest_age_s = newest
+                        .last()
+                        .map(|row| moon_time_abs_age_s(moon_now_for_test(), row.time()));
                 }
             }
         }
@@ -1153,6 +1201,19 @@ impl Session {
         let derived = snapshot.market_history_derived_snapshot_for(&handle, now_time);
         let price = Some(handle.price());
         let balance = Some(handle.balance_position());
+        let (max_order_value, max_pos_limit, max_qty, last_ask) = handle.with(|m| {
+            (
+                m.max_order_value(),
+                m.max_pos_limit(),
+                m.max_qty(),
+                m.price.last_ask,
+            )
+        });
+        let lev_default_max_pos = snapshot
+            .settings()
+            .lev_manage
+            .as_ref()
+            .map(|lev| lev.default_max_pos_limit());
 
         println!(
             "FIRETEST ActiveLib market={market} LastPrice count={} expected_by_updates~{} span={:.2}s expected_by_2s_span~{} min={:.8} max={:.8} delta_all={:.4}% delta_1m={:.4}% delta_1h={:.4}% values=[{}]",
@@ -1305,6 +1366,16 @@ impl Session {
             assert!(
                 funding_time == MoonTime::ZERO || funding_hours.abs() <= 12.0,
                 "ActiveLib {market}: funding time is outside 12h window: {funding_hours:.3}h"
+            );
+        }
+        println!(
+            "FIRETEST ActiveLib market={market} market_table max_order_value={:.4} max_qty={:.8} last_ask={:.8} max_pos_limit={} lev_default_max_pos={:?}",
+            max_order_value, max_qty, last_ask, max_pos_limit, lev_default_max_pos
+        );
+        if max_qty > EPS && last_ask > EPS {
+            assert!(
+                max_order_value > EPS,
+                "ActiveLib {market}: Max.Order derived value is zero despite max_qty={max_qty} last_ask={last_ask}"
             );
         }
         if let Some(balance) = balance {
@@ -2369,6 +2440,17 @@ fn moon_time_saturating_add_ms(time: MoonTime, delta_ms: i64) -> MoonTime {
     MoonTime::from_unix_millis(time.unix_millis().saturating_add(delta_ms))
 }
 
+fn moon_time_abs_age_s(now: MoonTime, time: MoonTime) -> f64 {
+    let now_ms = now.unix_millis();
+    let time_ms = time.unix_millis();
+    let delta_ms = if now_ms >= time_ms {
+        now_ms.saturating_sub(time_ms)
+    } else {
+        time_ms.saturating_sub(now_ms)
+    };
+    delta_ms as f64 * 0.001
+}
+
 fn record_event(
     stats: &Arc<Mutex<SessionStats>>,
     event: &Event,
@@ -2570,13 +2652,14 @@ fn record_event(
                     &st,
                     event_no,
                     format!(
-                        "UI ClientSettings uid={} x_sell={} emu_mode={} fixed_sell_mode={} fixed_sell_price={:.8} trailing_drop={:.8}",
+                        "UI ClientSettings uid={} x_sell={} emu_mode={} fixed_sell_mode={} fixed_sell_price={:.8} trailing_drop={:.8} trailing_stop={}",
                         settings.uid,
                         settings.x_sell,
                         settings.emu_mode,
                         settings.fixed_sell_mode,
                         settings.fixed_sell_price,
-                        settings.trailing_drop
+                        settings.trailing_drop,
+                        settings.trailing_stop
                     ),
                 );
             } else {
@@ -2585,6 +2668,27 @@ fn record_event(
                     event_no,
                     "UI ClientSettingsUpdated; state snapshot is refreshed after pump",
                 );
+            }
+        }
+        Event::Settings(SettingsEvent::LevManageUpdated) => {
+            st.settings_events += 1;
+            st.lev_manage_events += 1;
+            let lev = dispatcher.and_then(|d| d.settings().lev_manage.as_ref().cloned());
+            if let Some(lev) = lev {
+                log_server_event(
+                    &st,
+                    event_no,
+                    format!(
+                        "UI LevManage auto_max_order={} auto_fix_lev={} fix_lev={} def_max_pos={} lev_control_len={}",
+                        lev.auto_max_order,
+                        lev.auto_fix_lev,
+                        lev.fix_lev,
+                        lev.default_max_pos_limit(),
+                        lev.lev_control.len()
+                    ),
+                );
+            } else {
+                log_server_event(&st, event_no, "UI LevManageUpdated".to_string());
             }
         }
         Event::Settings(SettingsEvent::RuntimeStateUpdated) => {
@@ -2613,6 +2717,17 @@ fn record_event(
                 &st,
                 event_no,
                 format!("UI KernelLicenseState {:?}", st.kernel_license_state),
+            );
+        }
+        Event::Settings(SettingsEvent::ProfitStateUpdated) => {
+            st.profit_state_events += 1;
+            if let Some(dispatcher) = dispatcher {
+                st.profit_state = dispatcher.settings().profit_state;
+            }
+            log_server_event(
+                &st,
+                event_no,
+                format!("UI ProfitState {:?}", st.profit_state),
             );
         }
         Event::Settings(other) => {
@@ -4178,6 +4293,8 @@ struct MoonClientPathStats {
     candles_ready: bool,
     candles_markets: usize,
     candles_rows: usize,
+    retained_candles_5m: usize,
+    retained_candles_5m_newest_age_s: Option<f64>,
     last_book_bid: Option<f64>,
     last_book_ask: Option<f64>,
     last_trade_price: Option<f64>,
@@ -4374,6 +4491,14 @@ impl MoonClientPathStats {
             if let Some(reader) = readers.spot_trades.as_ref() {
                 self.retained_spot_trades = reader.bounds().len;
             }
+            if let Some(reader) = readers.candles_5m.as_ref() {
+                self.retained_candles_5m = reader.bounds().len;
+                let mut newest = Vec::new();
+                reader.copy_last(1, &mut newest);
+                self.retained_candles_5m_newest_age_s = newest
+                    .last()
+                    .map(|row| moon_time_abs_age_s(moon_now_for_test(), row.time()));
+            }
             if self.retained_last_prices + self.retained_futures_trades + self.retained_spot_trades
                 > 0
             {
@@ -4436,7 +4561,13 @@ impl MoonClientPathStats {
             && self.coin_card_last_count >= FIRETEST_MIN_COIN_CARD_CANDLES
             && self.retained_last_prices > 0
             && self.retained_futures_trades + self.retained_spot_trades > 0
-            && (!require_auto_candles || (self.candles_ready && self.candles_rows > 0))
+            && (!require_auto_candles
+                || (self.candles_ready
+                    && self.candles_rows > 0
+                    && self.retained_candles_5m > 0
+                    && self
+                        .retained_candles_5m_newest_age_s
+                        .is_some_and(|age| age <= FIRETEST_RETAINED_CANDLE_MAX_AGE_SECS)))
             && bid > 0.0
             && ask > bid
             && market_price.bid > 0.0
@@ -4454,7 +4585,7 @@ impl MoonClientPathStats {
         };
         let init_at = |step: &'static str| self.init_step_at_s.get(step).copied();
         format!(
-            "phase connected_at={:?}s ready_at={:?}s init_step BaseCheck={:?}s AuthCheck={:?}s GetMarketsList={:?}s GetMarketsIndexes={:?}s UpdateMarketsList={:?}s StrategySchema={:?}s PostInitFlush={:?}s StartupSnapshot={:?}s StartupEvents={:?}s engine_event_at BaseCheck={:?}s AuthCheck={:?}s GetMarketsList={:?}s GetMarketsIndexes={:?}s UpdateMarketsList={:?}s SubscribeAllTrades={:?}s SubscribeOrderBook={:?}s schema_event_at={:?}s price_at={:?}s trade_at={:?}s book_at={:?}s retained_at={:?}s transfer_done_at={:?}s coin_card_at={:?}s candles_ready_at={:?}s lifecycle connected={} ready={} methods BaseCheck={} AuthCheck={} GetMarketsList={} GetMarketsIndexes={} UpdateMarketsList={} SubscribeAllTrades={} SubscribeOrderBook={} strats={} schemas={} schema_kinds={} schema_fields={} trades={} books={} full={} update={} bid={:?} ask={:?} trade={:?} market_price={:?} transfer_mask={:#05b} transfer_done={} transfer_fail={} coin_card_updates={} coin_card_count={} candles_ready={} candles_markets={} candles_rows={} retained_last={} retained_trades={}/{} derived_vol_1m={:.4} derived_vol_5m={:.4} candle_vol_1h={:.4} parse_failed={} err={}",
+            "phase connected_at={:?}s ready_at={:?}s init_step BaseCheck={:?}s AuthCheck={:?}s GetMarketsList={:?}s GetMarketsIndexes={:?}s UpdateMarketsList={:?}s StrategySchema={:?}s PostInitFlush={:?}s StartupSnapshot={:?}s StartupEvents={:?}s engine_event_at BaseCheck={:?}s AuthCheck={:?}s GetMarketsList={:?}s GetMarketsIndexes={:?}s UpdateMarketsList={:?}s SubscribeAllTrades={:?}s SubscribeOrderBook={:?}s schema_event_at={:?}s price_at={:?}s trade_at={:?}s book_at={:?}s retained_at={:?}s transfer_done_at={:?}s coin_card_at={:?}s candles_ready_at={:?}s lifecycle connected={} ready={} methods BaseCheck={} AuthCheck={} GetMarketsList={} GetMarketsIndexes={} UpdateMarketsList={} SubscribeAllTrades={} SubscribeOrderBook={} strats={} schemas={} schema_kinds={} schema_fields={} trades={} books={} full={} update={} bid={:?} ask={:?} trade={:?} market_price={:?} transfer_mask={:#05b} transfer_done={} transfer_fail={} coin_card_updates={} coin_card_count={} candles_ready={} candles_markets={} candles_rows={} retained_candles_5m={} newest_age_s={:?} retained_last={} retained_trades={}/{} derived_vol_1m={:.4} derived_vol_5m={:.4} candle_vol_1h={:.4} parse_failed={} err={}",
             self.lifecycle_connected_at_s,
             self.lifecycle_ready_at_s,
             init_at("BaseCheck"),
@@ -4510,6 +4641,8 @@ impl MoonClientPathStats {
             self.candles_ready,
             self.candles_markets,
             self.candles_rows,
+            self.retained_candles_5m,
+            self.retained_candles_5m_newest_age_s,
             self.retained_last_prices,
             self.retained_futures_trades,
             self.retained_spot_trades,
@@ -6144,6 +6277,7 @@ fn firetest_percent(part: u64, total: u64) -> f64 {
 #[test]
 #[ignore = "live MoonBot server required; measures TStratRuntimeState delivery"]
 fn fire_test_strategy_runtime_state_delivery_stats() {
+    let _live_test_lock = firetest_live_test_lock();
     let cfg = FireConfig::load_required();
     let key_info = parse_key_info(&cfg.key_b64).expect("invalid MoonProto key in FireTest config");
     let keys = key_info.keys;
@@ -6247,6 +6381,7 @@ fn fire_test_strategy_runtime_state_delivery_stats() {
 #[test]
 #[ignore = "live MoonBot server required; create ../moonproto.firetest.conf"]
 fn fire_test_active_library_health() {
+    let _live_test_lock = firetest_live_test_lock();
     let start = Instant::now();
     let cfg = FireConfig::load_required();
     let profile = FireProfile::from_env();
@@ -6314,6 +6449,20 @@ fn fire_test_active_library_health() {
         "FireTest initial health failed: both clients must receive trades and configured orderbook within {:?}",
         cfg.wait
     );
+    let a_initial = a.snapshot();
+    let b_initial = b.snapshot();
+    if a_initial.lev_manage_events == 0 || b_initial.lev_manage_events == 0 {
+        println!(
+            "FIRETEST NOTE initial health: LevManage was not observed on both clients (A={} B={}); live market/trades/orderbook health does not depend on this optional SrvConnect UI extension",
+            a_initial.lev_manage_events, b_initial.lev_manage_events
+        );
+    }
+    if a_initial.profit_state_events == 0 || b_initial.profit_state_events == 0 {
+        println!(
+            "FIRETEST NOTE initial health: ProfitState was not observed on both clients (A={} B={}); live market/trades/orderbook health does not depend on this optional SrvConnect UI extension",
+            a_initial.profit_state_events, b_initial.profit_state_events
+        );
+    }
     assert!(
         pump_pair_until_nonblocking_api_refresh(&mut a, &mut b, &cfg, cfg.connect_timeout),
         "FireTest non-blocking API refresh failed within {:?}: A=[{}] B=[{}]",
@@ -6358,13 +6507,20 @@ fn fire_test_active_library_health() {
                 .as_ref()
                 .map(CandlesSnapshotSummary::is_healthy)
                 .unwrap_or(false)
+                && a.retained_candles_healthy()
                 && a.parse_failed == 0
         ),
         "client A did not receive a complete candles snapshot within {:?}",
         cfg.candles_timeout
     );
-    if let Some(candles) = a.snapshot().candles_complete {
-        println!("OK: full candles snapshot {}", candles.summary());
+    let candles_stats = a.snapshot();
+    if let Some(candles) = candles_stats.candles_complete.as_ref() {
+        println!(
+            "OK: full candles snapshot {} retained_candles_5m={} newest_age_s={:?}",
+            candles.summary(),
+            candles_stats.retained_candles_5m,
+            candles_stats.retained_candles_5m_newest_age_s
+        );
     }
     log_protocol_cpu_pair("after candles 10% gate", &a, &b);
     run_high_loss_simple_ops_gate(&mut a, &mut b, &mut err_emu, cfg.high_loss_timeout);

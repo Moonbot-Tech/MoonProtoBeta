@@ -24,6 +24,7 @@
 //! - 21 — `TRestartNowCommand`      (High, restart/start runtime now)
 //! - 22 — `TKernelLicenseStateCommand` (High, license and MoonCredits state)
 //! - 23 — `TKernelLicenseStateRequest` (High, request license/MoonCredits state)
+//! - 24 — `TProfitStateCommand`     (High, current report/profit counters)
 //!
 //! ## ASCfg / ASCfg2 blobs
 //! `TAutoStartConfig` (104 bytes) and `TAutoStartConfig2` (168 bytes) are
@@ -88,6 +89,7 @@ const CMD_RUNTIME_STATE: u8 = 20;
 const CMD_RESTART_NOW: u8 = 21;
 const CMD_KERNEL_LICENSE_STATE: u8 = 22;
 const CMD_KERNEL_LICENSE_STATE_REQUEST: u8 = 23;
+const CMD_PROFIT_STATE: u8 = 24;
 
 #[inline]
 pub(crate) fn is_runtime_state_payload(payload: &[u8]) -> bool {
@@ -656,6 +658,8 @@ pub struct ClientSettingsCommand {
     pub fixed_sell_price: f64,
     pub price_drop_level: f32,
     pub trailing_drop: f32,
+    /// Global trailing-stop toggle (`cfg.TrailingStop`).
+    pub trailing_stop: bool,
     pub g_take_profit: f64,
     pub use_g_take_profit: bool,
     #[cfg(any(test, feature = "diagnostics"))]
@@ -1040,6 +1044,113 @@ pub struct LevManage {
     pub lev_control: String,
 }
 
+impl LevManage {
+    /// Global `def` fallback from the leverage-control text.
+    ///
+    /// MoonBot keeps this as `cfg.AutoLevControlOther`. Per-market values are
+    /// applied to retained markets by Active Lib; this helper exposes the
+    /// fallback separately because the markets-table `MaxPos` column itself
+    /// keeps `0` for markets that only use `def`.
+    pub fn default_max_pos_limit(&self) -> i32 {
+        parse_lev_control(&self.lev_control).default_max_pos_limit
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LevControlRule {
+    pub(crate) limit: i32,
+    pub(crate) token: String,
+    pub(crate) wildcard: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct LevControlParsed {
+    pub(crate) default_max_pos_limit: i32,
+    pub(crate) rules: Vec<LevControlRule>,
+}
+
+pub(crate) fn parse_lev_control(text: &str) -> LevControlParsed {
+    let normalized = text.replace([',', '.'], " ");
+    let mut parsed = LevControlParsed::default();
+    let mut scan_tokens = false;
+    let mut current_limit = 0;
+
+    for token in normalized.split_whitespace() {
+        if let Some(limit) = parse_int_km(token) {
+            current_limit = limit;
+            scan_tokens = true;
+            continue;
+        }
+        if !scan_tokens {
+            continue;
+        }
+        if token.eq_ignore_ascii_case("def") {
+            parsed.default_max_pos_limit = current_limit;
+            continue;
+        }
+        parsed.rules.push(LevControlRule {
+            limit: current_limit,
+            token: token.trim().to_string(),
+            wildcard: token.contains('*') || token.contains('?'),
+        });
+    }
+
+    parsed
+}
+
+fn parse_int_km(token: &str) -> Option<i32> {
+    let token = token.trim();
+    if token.is_empty() || !token.as_bytes()[0].is_ascii_digit() {
+        return None;
+    }
+    let (number, mult) =
+        if let Some(number) = token.strip_suffix('k').or_else(|| token.strip_suffix('K')) {
+            (number, 1_000_i32)
+        } else if let Some(number) = token.strip_suffix('m').or_else(|| token.strip_suffix('M')) {
+            (number, 1_000_000_i32)
+        } else {
+            (token, 1_i32)
+        };
+    let value = number.parse::<i32>().ok()?;
+    value.checked_mul(mult)
+}
+
+pub(crate) fn lev_control_wildcard_match(subject: &str, pattern: &str) -> bool {
+    wildcard_match_ascii_ci(subject.as_bytes(), pattern.as_bytes())
+}
+
+fn wildcard_match_ascii_ci(subject: &[u8], pattern: &[u8]) -> bool {
+    let mut si = 0usize;
+    let mut pi = 0usize;
+    let mut star_pi: Option<usize> = None;
+    let mut star_si = 0usize;
+
+    while si < subject.len() {
+        if pi < pattern.len()
+            && (pattern[pi] == b'?'
+                || pattern[pi].to_ascii_uppercase() == subject[si].to_ascii_uppercase())
+        {
+            si += 1;
+            pi += 1;
+        } else if pi < pattern.len() && pattern[pi] == b'*' {
+            star_pi = Some(pi);
+            pi += 1;
+            star_si = si;
+        } else if let Some(star) = star_pi {
+            pi = star + 1;
+            star_si += 1;
+            si = star_si;
+        } else {
+            return false;
+        }
+    }
+
+    while pi < pattern.len() && pattern[pi] == b'*' {
+        pi += 1;
+    }
+    pi == pattern.len()
+}
+
 /// CmdId=10 `TTriggerManageCommand`.
 #[derive(Debug, Clone)]
 pub struct TriggerManage {
@@ -1070,6 +1181,22 @@ pub struct ResetProfit {
     #[doc(hidden)]
     pub uid: u64,
     pub kind: ResetProfitKind,
+}
+
+/// CmdId=24 `TProfitStateCommand`.
+///
+/// This mirrors the current report/profit counters shown by MoonBot settings
+/// UI. It is state from the report DB layer, not account balance and not an
+/// order/PnL stream.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ProfitStateCommand {
+    #[cfg(any(test, feature = "diagnostics"))]
+    #[doc(hidden)]
+    pub uid: u64,
+    pub rep_total_profit: f64,
+    pub rep_total_trades: i32,
+    pub rep_trades_total: f64,
+    pub rep_count_trades: i32,
 }
 
 /// Trigger-management action for
@@ -1464,6 +1591,7 @@ pub enum UICommand {
         uid: u64,
         activate_feature: i32,
     },
+    ProfitState(ProfitStateCommand),
     /// Command header is well-formed, but the command version is newer than
     /// this library can parse. The command is skipped without state changes.
     Skipped {
