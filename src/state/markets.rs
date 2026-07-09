@@ -18,6 +18,7 @@ mod arb;
 mod balances;
 mod currency;
 mod indexes;
+mod lev_control;
 mod list;
 mod prices;
 mod tags;

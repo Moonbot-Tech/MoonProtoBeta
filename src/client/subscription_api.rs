@@ -156,6 +156,27 @@ impl Client {
         self.sender_internal().unsubscribe_all_trades();
     }
 
+    /// Subscribe to live TF candle updates for several markets.
+    pub(crate) fn subscribe_candles<I, S>(
+        &self,
+        market_names: I,
+        kind: crate::commands::candles::DeepHistoryKind,
+    ) where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.sender_internal().subscribe_candles(market_names, kind);
+    }
+
+    /// Unsubscribe from live TF candle updates for several markets.
+    pub(crate) fn unsubscribe_candles<I, S>(&self, market_names: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.sender_internal().unsubscribe_candles(market_names);
+    }
+
     #[cfg(test)]
     pub(crate) fn outgoing_mm_orders_subscribe_intent(item: &SendItem) -> Option<bool> {
         if item.cmd != Command::UI.to_byte() || item.u_key.kind != UK_TURN_MM_DETECTION {
@@ -235,12 +256,14 @@ impl Client {
         delay_orderbooks: bool,
         delay_trades: bool,
     ) {
-        let (trades_sub, mm_orders_sub, orderbook_subs) = {
+        let (trades_sub, mm_orders_sub, orderbook_subs, candle_subs, candle_tf) = {
             let registry = self.subscriptions.subscription_registry.lock();
             (
                 registry.trades_sub,
                 registry.mm_orders_sub,
                 registry.orderbook_subs.iter().cloned().collect::<Vec<_>>(),
+                registry.candle_subs.iter().cloned().collect::<Vec<_>>(),
+                registry.candle_tf,
             )
         };
 
@@ -263,10 +286,26 @@ impl Client {
         } else if let Some(subscribe) = mm_orders_sub {
             self.send_mm_orders_subscribe_cmd(subscribe);
         }
+        self.restore_candle_subscriptions(candle_subs, candle_tf);
         if delay_orderbooks {
             return;
         }
         self.restore_orderbook_subscriptions_as_reconnect_batch(orderbook_subs, self.now_ms());
+    }
+
+    fn restore_candle_subscriptions(
+        &self,
+        candle_subs: Vec<String>,
+        candle_tf: Option<crate::commands::candles::DeepHistoryKind>,
+    ) {
+        let Some(kind) = candle_tf else {
+            return;
+        };
+        let refs: Vec<&str> = candle_subs.iter().map(String::as_str).collect();
+        if refs.is_empty() {
+            return;
+        }
+        self.send_api_request(&crate::commands::candles::subscribe_candles(&refs, kind));
     }
 
     fn registry_trades_want_mm(&self) -> Option<bool> {
@@ -465,11 +504,13 @@ impl Client {
             return;
         }
 
-        let (trades_sub, orderbook_subs) = {
+        let (trades_sub, orderbook_subs, candle_subs, candle_tf) = {
             let registry = self.subscriptions.subscription_registry.lock();
             (
                 registry.trades_sub,
                 registry.orderbook_subs.iter().cloned().collect::<Vec<_>>(),
+                registry.candle_subs.iter().cloned().collect::<Vec<_>>(),
+                registry.candle_tf,
             )
         };
 
@@ -488,5 +529,6 @@ impl Client {
                 &refs,
             ));
         }
+        self.restore_candle_subscriptions(candle_subs, candle_tf);
     }
 }

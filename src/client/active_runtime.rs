@@ -522,6 +522,38 @@ impl MoonClient {
         self.send_no_reply(RuntimeCommand::UnsubscribeAllTrades)
     }
 
+    /// Set local retained-history delta policy.
+    pub(crate) fn set_deltas_by_trades(&self, enabled: bool) -> Result<(), MoonClientError> {
+        self.send_no_reply(RuntimeCommand::SetDeltasByTrades(enabled))
+    }
+
+    /// Subscribe to live TF candle updates and remember the intent for reconnect.
+    pub(crate) fn subscribe_candles<I, S>(
+        &self,
+        market_names: I,
+        kind: crate::commands::candles::DeepHistoryKind,
+    ) -> Result<(), MoonClientError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.send_no_reply(RuntimeCommand::SubscribeCandles {
+            markets: market_names.into_iter().map(Into::into).collect(),
+            kind,
+        })
+    }
+
+    /// Unsubscribe from live TF candle updates and update the reconnect intent.
+    pub(crate) fn unsubscribe_candles<I, S>(&self, market_names: I) -> Result<(), MoonClientError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.send_no_reply(RuntimeCommand::UnsubscribeCandles(
+            market_names.into_iter().map(Into::into).collect(),
+        ))
+    }
+
     /// Request a fresh balance snapshot through the active runtime.
     pub(crate) fn refresh_balances(&self) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::BalanceRefresh)
@@ -734,6 +766,11 @@ impl MoonClient {
         subscribe: bool,
     ) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::MmSubscribe(subscribe)))
+    }
+
+    /// Request the core AutoDetect/passive-mode state.
+    pub(crate) fn set_auto_detect_active(&self, active: bool) -> Result<(), MoonClientError> {
+        self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::AutoDetect(active)))
     }
 
     /// Send a full client-settings snapshot.

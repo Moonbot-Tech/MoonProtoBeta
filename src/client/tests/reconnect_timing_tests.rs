@@ -95,6 +95,7 @@ fn test_market(name: &str) -> Market {
         price: Default::default(),
         delta_state: Default::default(),
         market_blacklisted_cfg: false,
+        max_control_lev: 0,
         arb_slots: std::collections::HashMap::new(),
     }
 }

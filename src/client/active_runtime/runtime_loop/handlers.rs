@@ -133,6 +133,18 @@ pub(super) fn handle_command(
             sync_runtime_trade_storage_scope(client, dispatcher);
             false
         }
+        RuntimeCommand::SubscribeCandles { markets, kind } => {
+            client.subscribe_candles(markets, kind);
+            false
+        }
+        RuntimeCommand::UnsubscribeCandles(markets) => {
+            client.unsubscribe_candles(markets);
+            false
+        }
+        RuntimeCommand::SetDeltasByTrades(enabled) => {
+            dispatcher.set_deltas_by_trades(enabled);
+            false
+        }
         RuntimeCommand::BalanceRefresh => {
             client.balance_request_refresh();
             false
@@ -439,6 +451,10 @@ fn handle_ui_command(
         }
         UiRuntimeCommand::KernelLicenseStateRequest => {
             client.ui_kernel_license_state_request(0);
+            false
+        }
+        UiRuntimeCommand::AutoDetect(active) => {
+            client.ui_auto_detect(active);
             false
         }
     }

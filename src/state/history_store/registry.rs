@@ -9,6 +9,7 @@ use super::*;
 pub(crate) struct MarketHistoryRegistry {
     default_config: MarketHistoryConfig,
     eps_profile: crate::state::eps::EpsProfile,
+    deltas_by_trades: bool,
     stores: HashMap<SharedMarketName, MarketHistoryStore>,
     stores_by_index: Vec<Option<SharedMarketName>>,
 }
@@ -18,6 +19,7 @@ impl MarketHistoryRegistry {
         Self {
             default_config,
             eps_profile: crate::state::eps::EpsProfile::default(),
+            deltas_by_trades: false,
             stores: HashMap::new(),
             stores_by_index: Vec::new(),
         }
@@ -30,6 +32,16 @@ impl MarketHistoryRegistry {
         self.eps_profile = eps_profile;
         for store in self.stores.values_mut() {
             store.set_eps_profile(eps_profile);
+        }
+    }
+
+    pub(crate) fn set_deltas_by_trades(&mut self, enabled: bool) {
+        if self.deltas_by_trades == enabled {
+            return;
+        }
+        self.deltas_by_trades = enabled;
+        for store in self.stores.values_mut() {
+            store.set_deltas_by_trades(enabled);
         }
     }
 
@@ -72,8 +84,12 @@ impl MarketHistoryRegistry {
         &mut self,
         market_name: SharedMarketName,
     ) -> &mut MarketHistoryStore {
+        let deltas_by_trades = self.deltas_by_trades;
         self.stores.entry(market_name).or_insert_with(|| {
-            MarketHistoryStore::new_with_eps_profile(self.default_config, self.eps_profile)
+            let mut store =
+                MarketHistoryStore::new_with_eps_profile(self.default_config, self.eps_profile);
+            store.set_deltas_by_trades(deltas_by_trades);
+            store
         })
     }
 

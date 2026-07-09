@@ -476,6 +476,63 @@ impl MoonStreams<'_> {
         self.client.unsubscribe_all_trades()
     }
 
+    /// Use raw trade extrema for short derived deltas.
+    ///
+    /// Default is `false`, matching the core's normal mode: retained 1m/5m
+    /// deltas come from the robust candle/last-price derived paths. Set this to
+    /// `true` only for the legacy "DeltasByTrades" terminal mode where short
+    /// deltas intentionally follow raw trade ticks.
+    pub fn set_deltas_by_trades(&self, enabled: bool) -> Result<(), MoonClientError> {
+        self.client.set_deltas_by_trades(enabled)
+    }
+
+    /// Subscribe to live TF candle updates for several markets.
+    ///
+    /// This is the chart live-update stream. Load the initial chart history
+    /// with `client.candles().request_coin_card...` first when the UI needs a
+    /// full ring; live pushes then replace/append the current bar in that
+    /// retained history using the core's candle-window rules.
+    pub fn subscribe_candles<I, S>(
+        &self,
+        market_names: I,
+        kind: crate::commands::candles::DeepHistoryKind,
+    ) -> Result<(), MoonClientError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.client.subscribe_candles(market_names, kind)
+    }
+
+    /// Subscribe to live TF candle updates for retained market handles.
+    pub fn subscribe_candles_for<'a, I>(
+        &self,
+        markets: I,
+        kind: crate::commands::candles::DeepHistoryKind,
+    ) -> Result<(), MoonClientError>
+    where
+        I: IntoIterator<Item = &'a crate::state::MarketHandle>,
+    {
+        self.subscribe_candles(markets.into_iter().map(|m| m.name().to_string()), kind)
+    }
+
+    /// Unsubscribe from live TF candle updates for several markets.
+    pub fn unsubscribe_candles<I, S>(&self, market_names: I) -> Result<(), MoonClientError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.client.unsubscribe_candles(market_names)
+    }
+
+    /// Unsubscribe from live TF candle updates for retained market handles.
+    pub fn unsubscribe_candles_for<'a, I>(&self, markets: I) -> Result<(), MoonClientError>
+    where
+        I: IntoIterator<Item = &'a crate::state::MarketHandle>,
+    {
+        self.unsubscribe_candles(markets.into_iter().map(|m| m.name().to_string()))
+    }
+
     /// Reload orderbook data through Engine API.
     pub fn reload_order_book(&self) -> Result<EngineActionTicket, MoonClientError> {
         self.client.reload_order_book()
@@ -624,6 +681,14 @@ impl MoonSettings<'_> {
     /// Set the market-maker orders subscription flag.
     pub fn set_mm_orders_subscription(&self, subscribe: bool) -> Result<(), MoonClientError> {
         self.client.set_mm_orders_subscription(subscribe)
+    }
+
+    /// Set AutoDetect active/passive-mode state in the core.
+    ///
+    /// Completion is observed through `SettingsEvent::RuntimeStateUpdated` and
+    /// `snapshot().settings().runtime_state.auto_detect_active`.
+    pub fn set_auto_detect_active(&self, active: bool) -> Result<(), MoonClientError> {
+        self.client.set_auto_detect_active(active)
     }
 
     /// Send a full client-settings snapshot.

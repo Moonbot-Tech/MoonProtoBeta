@@ -1,4 +1,5 @@
 use super::*;
+use crate::commands::candles::DeepHistoryKind;
 use crate::commands::engine_api::EngineMethod;
 
 fn make_sender() -> (
@@ -114,6 +115,24 @@ fn market_names_count(payload: &[u8]) -> Option<i32> {
     Some(i32::from_le_bytes(bytes))
 }
 
+fn engine_request_tf_param(payload: &[u8]) -> Option<u8> {
+    let mut pos = 12usize;
+    let market_len = u16::from_le_bytes(payload.get(pos..pos + 2)?.try_into().ok()?) as usize;
+    pos += 2 + market_len;
+    let count = i32::from_le_bytes(payload.get(pos..pos + 4)?.try_into().ok()?);
+    pos += 4;
+    for _ in 0..count {
+        let len = u16::from_le_bytes(payload.get(pos..pos + 2)?.try_into().ok()?) as usize;
+        pos += 2 + len;
+    }
+    let params_size = i32::from_le_bytes(payload.get(pos..pos + 4)?.try_into().ok()?);
+    pos += 4;
+    if params_size != 1 {
+        return None;
+    }
+    payload.get(pos).copied()
+}
+
 #[test]
 fn subscribe_orderbook_updates_registry_and_sends_wire_request() {
     let (sender, registry, send_q, _, _, _) = make_sender();
@@ -126,6 +145,48 @@ fn subscribe_orderbook_updates_registry_and_sends_wire_request() {
         method_id(&sent[0].data),
         Some(EngineMethod::SubscribeOrderBook.to_byte())
     );
+}
+
+#[test]
+fn subscribe_candles_tf_change_preserves_existing_markets_and_sends_request() {
+    let (sender, registry, send_q, _, _, _) = make_sender();
+    sender.subscribe_candles(["BTCUSDT"], DeepHistoryKind::Hour4);
+    let first = take_send_items(&send_q);
+    assert_eq!(first.len(), 1);
+    assert_eq!(
+        method_id(&first[0].data),
+        Some(EngineMethod::SubscribeCandles.to_byte())
+    );
+    assert_eq!(
+        engine_request_tf_param(&first[0].data),
+        Some(DeepHistoryKind::Hour4.to_byte())
+    );
+
+    sender.subscribe_candles(["BTCUSDT"], DeepHistoryKind::Hour1);
+    let second = take_send_items(&send_q);
+    assert_eq!(
+        second.len(),
+        2,
+        "changing TF mirrors the core client: unsubscribe old batch, subscribe current batch"
+    );
+    assert_eq!(
+        method_id(&second[0].data),
+        Some(EngineMethod::UnsubscribeCandles.to_byte())
+    );
+    assert_eq!(market_names_count(&second[0].data), Some(1));
+    assert_eq!(
+        method_id(&second[1].data),
+        Some(EngineMethod::SubscribeCandles.to_byte())
+    );
+    assert_eq!(market_names_count(&second[1].data), Some(1));
+    assert_eq!(
+        engine_request_tf_param(&second[1].data),
+        Some(DeepHistoryKind::Hour1.to_byte())
+    );
+
+    let registry = registry.lock();
+    assert!(registry.candle_subs.contains("BTCUSDT"));
+    assert_eq!(registry.candle_tf, Some(DeepHistoryKind::Hour1));
 }
 
 #[test]

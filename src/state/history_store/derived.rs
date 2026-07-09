@@ -12,7 +12,11 @@ impl MarketHistoryStore {
     pub(crate) fn refresh_derived_analytics(&mut self, now_time: MoonTime) {
         self.seal_current_candle_if_due(now_time);
         let volumes = self.rolling_volumes.snapshot(now_time);
-        let trade_deltas = trade_deltas_from_rolling_volumes(volumes);
+        let trade_deltas = if self.deltas_by_trades {
+            trade_deltas_from_rolling_volumes(volumes)
+        } else {
+            DerivedDeltaSnapshot::default()
+        };
         let last_price_deltas = self.last_price_deltas_one_pass(now_time);
         let candle_bucket = candle_delta_bucket(now_time);
         if self.candle_deltas_dirty || self.candle_deltas_bucket != Some(candle_bucket) {

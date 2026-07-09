@@ -119,6 +119,7 @@ pub(crate) struct MarketHistoryWorker {
 
 enum MarketHistoryCommand {
     SetEpsProfile(EpsProfile),
+    SetDeltasByTrades(bool),
     ConfigureMarkets {
         market_slots: Vec<Option<Arc<str>>>,
         scope: Option<TradeStorageScope>,
@@ -247,6 +248,12 @@ impl MarketHistoryHandle {
     pub(crate) fn set_eps_profile(&self, eps_profile: EpsProfile) -> bool {
         self.tx
             .send(MarketHistoryCommand::SetEpsProfile(eps_profile))
+            .is_ok()
+    }
+
+    pub(crate) fn set_deltas_by_trades(&self, enabled: bool) -> bool {
+        self.tx
+            .send(MarketHistoryCommand::SetDeltasByTrades(enabled))
             .is_ok()
     }
 
@@ -488,6 +495,9 @@ fn handle_worker_command(
     match command {
         Ok(MarketHistoryCommand::SetEpsProfile(eps_profile)) => {
             registry.set_eps_profile(eps_profile);
+        }
+        Ok(MarketHistoryCommand::SetDeltasByTrades(enabled)) => {
+            registry.set_deltas_by_trades(enabled);
         }
         Ok(MarketHistoryCommand::ConfigureMarkets {
             market_slots,

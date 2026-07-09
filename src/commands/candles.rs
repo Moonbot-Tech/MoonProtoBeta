@@ -14,7 +14,8 @@ use zerocopy::byteorder::little_endian::{F32 as LeF32, F64 as LeF64};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 use super::engine_api::EngineMethod;
-use super::engine_request::build_engine_request_full;
+use super::engine_request::{build_engine_request_full, params};
+use super::registry::CURRENT_PROTO_CMD_VER;
 #[cfg(any(test, feature = "diagnostics"))]
 use crate::time::DelphiTime;
 use crate::time::MoonTime;
@@ -157,6 +158,24 @@ impl DeepPrice {
         }
     }
 
+    pub(crate) fn from_delphi_parts(
+        open: f32,
+        close: f32,
+        high: f32,
+        low: f32,
+        volume: f32,
+        time: f64,
+    ) -> Self {
+        Self {
+            open,
+            close,
+            high,
+            low,
+            volume,
+            time,
+        }
+    }
+
     fn to_wire(self) -> WireDeepPrice {
         WireDeepPrice {
             open: LeF32::new(self.open),
@@ -281,6 +300,49 @@ pub enum DeepHistoryKind {
     Day1 = 5,  // hk_1d
 }
 
+impl DeepHistoryKind {
+    pub const fn from_byte(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Min1),
+            1 => Some(Self::Min5),
+            2 => Some(Self::Min30),
+            3 => Some(Self::Hour1),
+            4 => Some(Self::Hour4),
+            5 => Some(Self::Day1),
+            _ => None,
+        }
+    }
+
+    pub const fn to_byte(self) -> u8 {
+        self as u8
+    }
+
+    pub const fn minutes(self) -> i64 {
+        match self {
+            Self::Min1 => 1,
+            Self::Min5 => 5,
+            Self::Min30 => 30,
+            Self::Hour1 => 60,
+            Self::Hour4 => 240,
+            Self::Day1 => 1440,
+        }
+    }
+}
+
+/// Live `TCandleUpdateCommand` pushed by the core for subscribed TF candles.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct CandleUpdateCommand {
+    pub(crate) uid: u64,
+    pub(crate) market_index: u16,
+    pub(crate) kind: DeepHistoryKind,
+    pub(crate) candle: DeepPrice,
+}
+
+#[inline]
+pub(crate) fn is_candle_update_payload(payload: &[u8]) -> bool {
+    payload.first().copied() == Some(3)
+}
+
 // =============================================================================
 //  Builders
 // =============================================================================
@@ -289,8 +351,22 @@ pub enum DeepHistoryKind {
 ///
 /// Wire: market_name + `WriteByte(Ord(ticks))`.
 pub(crate) fn get_coin_card_candles(market_name: &str, ticks: DeepHistoryKind) -> Vec<u8> {
-    let params = vec![ticks as u8];
+    let params = vec![ticks.to_byte()];
     build_engine_request_full(EngineMethod::GetCoinCardCandles, market_name, &[], &params)
+}
+
+/// `emk_SubscribeCandles(MarketNames[], TFKind)`.
+///
+/// Wire: empty `MarketName`, batch `MarketNames[]`, params = one byte TFKind.
+pub(crate) fn subscribe_candles(markets: &[&str], kind: DeepHistoryKind) -> Vec<u8> {
+    let mut p = Vec::with_capacity(1);
+    params::write_byte(&mut p, kind.to_byte());
+    build_engine_request_full(EngineMethod::SubscribeCandles, "", markets, &p)
+}
+
+/// `emk_UnsubscribeCandles(MarketNames[])`.
+pub(crate) fn unsubscribe_candles(markets: &[&str]) -> Vec<u8> {
+    build_engine_request_full(EngineMethod::UnsubscribeCandles, "", markets, &[])
 }
 
 // =============================================================================
@@ -322,6 +398,36 @@ pub(crate) fn parse_coin_card_candles_response(data: &[u8]) -> Option<Vec<DeepPr
         out.push(DeepPrice::read_from_delphi_stream(data, &mut pos)?);
     }
     Some(out)
+}
+
+/// Parse live `TCandleUpdateCommand`.
+///
+/// Wire after base command header:
+/// `MarketIndex:u16, TFKind:u8, OpenP:f32, CloseP:f32, MaxP:f32, MinP:f32, Vol:f32, Time:f64`.
+pub(crate) fn parse_candle_update_command(data: &[u8]) -> Option<CandleUpdateCommand> {
+    if data.len() < 11 || !is_candle_update_payload(data) {
+        return None;
+    }
+    let ver = u16::from_le_bytes([data[1], data[2]]);
+    if ver > CURRENT_PROTO_CMD_VER {
+        return None;
+    }
+    let uid = u64::from_le_bytes(data[3..11].try_into().ok()?);
+    let mut pos = 11usize;
+    let market_index = u16::from_le_bytes(read_zero_tail::<2>(data, &mut pos));
+    let kind = DeepHistoryKind::from_byte(read_zero_tail::<1>(data, &mut pos)[0])?;
+    let open = f32::from_le_bytes(read_zero_tail::<4>(data, &mut pos));
+    let close = f32::from_le_bytes(read_zero_tail::<4>(data, &mut pos));
+    let high = f32::from_le_bytes(read_zero_tail::<4>(data, &mut pos));
+    let low = f32::from_le_bytes(read_zero_tail::<4>(data, &mut pos));
+    let volume = f32::from_le_bytes(read_zero_tail::<4>(data, &mut pos));
+    let time = f64::from_le_bytes(read_zero_tail::<8>(data, &mut pos));
+    Some(CandleUpdateCommand {
+        uid,
+        market_index,
+        kind,
+        candle: DeepPrice::from_delphi_parts(open, close, high, low, volume, time),
+    })
 }
 
 #[cfg(unix)]

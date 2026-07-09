@@ -162,6 +162,15 @@ fn build_server_crypted_payload(
     crypto::encrypt_with_cipher(&cipher, &plaintext, &[])
 }
 
+fn build_strat_runtime_state_payload(running: bool) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.push(10); // TStratRuntimeState
+    payload.extend_from_slice(&crate::commands::registry::CURRENT_PROTO_CMD_VER.to_le_bytes());
+    payload.extend_from_slice(&0xAABB_CCDD_EEFF_0011u64.to_le_bytes());
+    payload.push(running as u8);
+    payload
+}
+
 fn drain_base_check_sends(client: &mut Client) -> usize {
     let mut count = 0;
     let (sliced, high, low) = client.take_send_queues_for_test();
@@ -448,6 +457,127 @@ fn crypted_app_packets_before_auth_do_not_advance_slider_or_pending_api() {
         .expect("same encrypted response must remain valid after AuthDone");
     assert_eq!(resp.request_uid, request_uid);
     assert_eq!(resp.method, EngineMethod::BaseCheck);
+}
+
+#[test]
+fn early_crypted_runtime_state_waits_for_fine_without_moving_slider() {
+    let mut client = Client::new(dummy_cfg());
+    let decode_key = install_server_decode_session(&mut client, 0x0123_4567_89AB_CDEF);
+    client.authorized = false;
+    client.auth_status = AuthStatus::Connected;
+    client.set_hello_wait_state(HelloWaitState::PrimaryImFriendSent);
+
+    let runtime_state = build_strat_runtime_state_payload(true);
+    let encrypted_runtime_state = build_server_crypted_payload(
+        &decode_key,
+        INITIAL_CRYPTED_MSG_COUNTER + 1,
+        Command::Strat,
+        &runtime_state,
+    );
+    let mut dispatcher = EventDispatcher::new();
+    {
+        let mut mode = RunMode::new(&mut dispatcher);
+        ProtocolCore {
+            client: &mut client,
+        }
+        .dispatch_command(
+            Command::Crypted.to_byte(),
+            &encrypted_runtime_state,
+            96,
+            100,
+            true,
+            None,
+            &mut mode,
+        );
+    }
+
+    assert_eq!(
+        dispatcher.snapshot().strats().strategies_running(),
+        None,
+        "pre-Fine crypted app-data must not be applied immediately",
+    );
+    assert_eq!(client.pre_auth_crypted.len(), 1);
+    assert!(
+        client
+            .recv
+            .data_read_state
+            .slider
+            .check_revd(INITIAL_CRYPTED_MSG_COUNTER + 1),
+        "buffering must not move the real receive slider before AuthDone",
+    );
+    client.recv.data_read_state.slider = crate::protocol::slider::Slider::new();
+
+    client.authorized = true;
+    client.auth_status = AuthStatus::AuthDone;
+    let mut mode = RunMode::new(&mut dispatcher);
+    ProtocolCore {
+        client: &mut client,
+    }
+    .drain_deferred_pre_auth_crypted(&mut mode);
+
+    assert_eq!(
+        dispatcher.snapshot().strats().strategies_running(),
+        Some(true),
+        "deferred initial runtime state must be delivered after AuthDone",
+    );
+    assert!(client.pre_auth_crypted.is_empty());
+}
+
+#[test]
+fn pre_auth_far_ahead_crypted_msg_num_is_not_buffered() {
+    let mut client = Client::new(dummy_cfg());
+    let decode_key = install_server_decode_session(&mut client, 0x0123_4567_89AB_CDEF);
+    client.authorized = false;
+    client.auth_status = AuthStatus::Connected;
+    client.set_hello_wait_state(HelloWaitState::PrimaryImFriendSent);
+
+    let stale_runtime_state = build_strat_runtime_state_payload(false);
+    let stale =
+        build_server_crypted_payload(&decode_key, 5000, Command::Strat, &stale_runtime_state);
+    let fresh_runtime_state = build_strat_runtime_state_payload(true);
+    let fresh = build_server_crypted_payload(&decode_key, 1, Command::Strat, &fresh_runtime_state);
+    let mut dispatcher = EventDispatcher::new();
+    {
+        let mut mode = RunMode::new(&mut dispatcher);
+        ProtocolCore {
+            client: &mut client,
+        }
+        .dispatch_command(
+            Command::Crypted.to_byte(),
+            &stale,
+            96,
+            100,
+            true,
+            None,
+            &mut mode,
+        );
+    }
+    assert!(
+        client.pre_auth_crypted.is_empty(),
+        "far-ahead pre-auth packets must not be replayed after AuthDone",
+    );
+
+    client.authorized = true;
+    client.auth_status = AuthStatus::AuthDone;
+    let mut mode = RunMode::new(&mut dispatcher);
+    ProtocolCore {
+        client: &mut client,
+    }
+    .dispatch_command(
+        Command::Crypted.to_byte(),
+        &fresh,
+        96,
+        101,
+        true,
+        None,
+        &mut mode,
+    );
+
+    assert_eq!(
+        dispatcher.snapshot().strats().strategies_running(),
+        Some(true),
+        "dropping far-ahead pre-auth packet must leave the fresh low MsgNum usable",
+    );
 }
 
 #[test]

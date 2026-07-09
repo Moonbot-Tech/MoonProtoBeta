@@ -85,6 +85,7 @@ pub(crate) fn build_client_settings(cmd: &ClientSettingsCommand) -> Vec<u8> {
     }
     out.push(flags);
     out.push(0); // colorCount = 0 (legacy slot, unused)
+    out.push(cmd.trailing_stop as u8);
 
     out
 }
@@ -354,5 +355,14 @@ pub(crate) fn build_kernel_license_state_request(uid: u64, activate_feature: i32
     let mut out = Vec::with_capacity(15);
     write_header(&mut out, CMD_KERNEL_LICENSE_STATE_REQUEST, uid);
     out.extend_from_slice(&activate_feature.to_le_bytes());
+    out
+}
+
+/// CmdId=25 `TAutoDetectCommand`.
+#[doc(hidden)]
+pub(crate) fn build_auto_detect(uid: u64, active: bool) -> Vec<u8> {
+    let mut out = Vec::with_capacity(12);
+    write_header(&mut out, CMD_AUTO_DETECT, uid);
+    out.push(active as u8);
     out
 }

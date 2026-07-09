@@ -1,3 +1,4 @@
+use crate::commands::candles::DeepHistoryKind;
 use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
@@ -41,6 +42,12 @@ pub struct ActiveSubscriptions {
     pub all_trades: Option<TradesSubscription>,
     /// Whether market-maker order sections are subscribed in the trades stream.
     pub mm_orders: bool,
+    /// Market names with an active live TF-candles subscription, sorted for
+    /// stable display.
+    pub live_candles: Vec<String>,
+    /// The current live TF-candles interval. The MoonBot core keeps this as a
+    /// single chart-TF setting, so one session has one active TF for the batch.
+    pub live_candles_kind: Option<DeepHistoryKind>,
 }
 
 /// Subscription registry — what the app asked for, what the library must maintain across the session.
@@ -59,6 +66,8 @@ pub(crate) struct SubscriptionRegistry {
     /// the new server-side client-state starts at false, so the active library must
     /// reproduce the last known intent in the init/API layer.
     pub mm_orders_sub: Option<bool>,
+    pub candle_subs: HashSet<String>,
+    pub candle_tf: Option<DeepHistoryKind>,
 }
 
 impl SubscriptionRegistry {
@@ -66,10 +75,14 @@ impl SubscriptionRegistry {
     pub(crate) fn active_subscriptions(&self) -> ActiveSubscriptions {
         let mut orderbooks: Vec<String> = self.orderbook_subs.iter().cloned().collect();
         orderbooks.sort_unstable();
+        let mut live_candles: Vec<String> = self.candle_subs.iter().cloned().collect();
+        live_candles.sort_unstable();
         ActiveSubscriptions {
             orderbooks,
             all_trades: self.trades_sub,
             mm_orders: self.mm_orders_sub.unwrap_or(false),
+            live_candles,
+            live_candles_kind: self.candle_tf,
         }
     }
 }
@@ -314,12 +327,17 @@ mod tests {
         assert!(empty.orderbooks.is_empty());
         assert_eq!(empty.all_trades, None);
         assert!(!empty.mm_orders);
+        assert!(empty.live_candles.is_empty());
+        assert_eq!(empty.live_candles_kind, None);
 
         // HashSet insertion order is non-deterministic; the snapshot must sort.
         reg.orderbook_subs.insert("ETHUSDT".to_string());
         reg.orderbook_subs.insert("BTCUSDT".to_string());
         reg.trades_sub = Some(TradesSubscription { want_mm: true });
         reg.mm_orders_sub = Some(true);
+        reg.candle_subs.insert("ETHUSDT".to_string());
+        reg.candle_subs.insert("BTCUSDT".to_string());
+        reg.candle_tf = Some(DeepHistoryKind::Hour1);
 
         let active = reg.active_subscriptions();
         assert_eq!(
@@ -331,6 +349,11 @@ mod tests {
             Some(TradesSubscription { want_mm: true })
         );
         assert!(active.mm_orders);
+        assert_eq!(
+            active.live_candles,
+            vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]
+        );
+        assert_eq!(active.live_candles_kind, Some(DeepHistoryKind::Hour1));
     }
 }
 

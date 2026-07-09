@@ -61,6 +61,9 @@ state.
   snapshot once for the active storage scope, emits `Event::CandlesSnapshot`
   only after the history worker has applied it, and then maintains the current
   candle from trades.
+- Demand-driven TF chart candles are requested through `client.candles()` and
+  can be kept current with `streams().subscribe_candles*`; live pushes update
+  already-loaded TF history and emit `Event::LiveCandle`.
 
 ## UI Shape
 

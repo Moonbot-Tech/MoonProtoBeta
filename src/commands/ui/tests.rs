@@ -65,6 +65,18 @@ fn mm_orders_subscribe_roundtrip() {
 }
 
 #[test]
+fn auto_detect_roundtrip() {
+    let raw = build_auto_detect(25, true);
+    match UICommand::parse(&raw).unwrap() {
+        UICommand::AutoDetect(cmd) => {
+            assert_eq!(cmd.uid, 25);
+            assert!(cmd.active);
+        }
+        _ => panic!("wrong variant"),
+    }
+}
+
+#[test]
 fn update_version_roundtrip() {
     let raw = build_update_version(2, "MoonBot-7.99", true);
     match UICommand::parse(&raw).unwrap() {
@@ -237,6 +249,44 @@ fn lev_manage_roundtrip() {
         }
         _ => panic!("wrong variant"),
     }
+}
+
+#[test]
+fn lev_control_parser_matches_markets_table_config_text() {
+    let parsed = parse_lev_control("100 def, 250 BTC* 3k ETH 2m SOL");
+    assert_eq!(parsed.default_max_pos_limit, 100);
+    assert_eq!(parsed.rules.len(), 3);
+    assert_eq!(parsed.rules[0].limit, 250);
+    assert_eq!(parsed.rules[0].token, "BTC*");
+    assert!(parsed.rules[0].wildcard);
+    assert_eq!(parsed.rules[1].limit, 3_000);
+    assert_eq!(parsed.rules[1].token, "ETH");
+    assert!(!parsed.rules[1].wildcard);
+    assert_eq!(parsed.rules[2].limit, 2_000_000);
+    assert_eq!(parsed.rules[2].token, "SOL");
+    assert_eq!(
+        LevManage {
+            uid: 0,
+            cmd_ver: 1,
+            auto_max_order: true,
+            auto_lev_up: true,
+            auto_isolated: false,
+            auto_cross: false,
+            auto_fix_lev: false,
+            fix_lev: 20,
+            tlg_report: false,
+            lev_control: "100 def".to_string(),
+        }
+        .default_max_pos_limit(),
+        100
+    );
+}
+
+#[test]
+fn lev_control_wildcard_is_ascii_case_insensitive() {
+    assert!(lev_control_wildcard_match("BTC", "bt?"));
+    assert!(lev_control_wildcard_match("1000PEPE", "*pepe"));
+    assert!(!lev_control_wildcard_match("ETH", "BT*"));
 }
 
 #[test]
@@ -585,6 +635,26 @@ fn arb_activate_notify_roundtrip() {
 }
 
 #[test]
+fn profit_state_parses_report_counters() {
+    let mut raw = header_bytes(CMD_PROFIT_STATE, 24);
+    raw.extend_from_slice(&1.25f64.to_le_bytes());
+    raw.extend_from_slice(&3i32.to_le_bytes());
+    raw.extend_from_slice(&(-0.5f64).to_le_bytes());
+    raw.extend_from_slice(&7i32.to_le_bytes());
+
+    match UICommand::parse(&raw).unwrap() {
+        UICommand::ProfitState(p) => {
+            assert_eq!(p.uid, 24);
+            assert_eq!(p.rep_total_profit, 1.25);
+            assert_eq!(p.rep_total_trades, 3);
+            assert_eq!(p.rep_trades_total, -0.5);
+            assert_eq!(p.rep_count_trades, 7);
+        }
+        _ => panic!("wrong variant"),
+    }
+}
+
+#[test]
 fn manage_command_kinds_map_to_delphi_ordinals() {
     // Delphi TTriggerManageCommand.Action: 0 = Clear, 1 = Set.
     assert_eq!(TriggerAction::Clear.to_byte(), 0);
@@ -674,6 +744,7 @@ fn client_settings_roundtrip_full() {
         fixed_sell_price: 0.05,
         price_drop_level: 1.5,
         trailing_drop: 0.5,
+        trailing_stop: true,
         g_take_profit: 100.0,
         use_g_take_profit: true,
         unused_spread: 0,
@@ -711,6 +782,7 @@ fn client_settings_roundtrip_full() {
             assert_eq!(p.uid, 1);
             assert_eq!(p.x_sell, 50);
             assert_eq!(p.fixed_sell_price, 0.05);
+            assert!(p.trailing_stop);
             assert!(p.buy_iceberg);
             assert!(!p.sell_iceberg);
             assert!(p.sign_orders);

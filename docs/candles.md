@@ -129,3 +129,38 @@ if let Some(snapshot) = client.snapshot() {
 and `time()` helpers.
 
 Desktop UI code should use the non-blocking request plus event/snapshot state.
+
+## Live TF Candle Updates
+
+After a chart loads its base TF history, subscribe to live updates for the
+visible markets:
+
+```rust
+use moonproto::DeepHistoryKind;
+use moonproto::Event;
+
+client
+    .streams()
+    .subscribe_candles_for([&market], DeepHistoryKind::Hour4)?;
+
+for event in client.drain_events() {
+    if let Event::LiveCandle(ev) = event {
+        if ev.applied_to_history {
+            redraw_chart(ev.market_name, ev.kind, ev.history_revision);
+        }
+    }
+}
+
+if let Some(rows) = client
+    .snapshot()
+    .and_then(|s| s.tf_candles_for(&market, DeepHistoryKind::Hour4).map(|r| r.to_vec()))
+{
+    draw_tf_candles(&rows);
+}
+```
+
+Live TF updates do not create a full history by themselves. They replace the
+last loaded row or append the next row using the core candle-window rule. If the
+base `request_coin_card_for(..., kind)` history has not been applied yet,
+`Event::LiveCandle` still reports the pushed candle, but
+`applied_to_history == false` and `tf_candles_for` remains empty.

@@ -37,6 +37,7 @@ pub use balances::{BalanceEvent, BalancesState, GlobalBalance};
 pub use chart_ui::{
     ChartAlertEvent, ChartAlertObject, ChartAlertsState, ChartTextSnapshot, ChartTextState,
 };
+pub(crate) use coin_card_candles::LiveCandleApply;
 pub use coin_card_candles::{CoinCardCandlesEvent, CoinCardCandlesState};
 pub use history::{
     hl_address_color, hl_address_hex, Candle5mRow, CandleVolumeSnapshot,

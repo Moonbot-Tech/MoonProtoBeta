@@ -709,6 +709,8 @@ pub struct Market {
     pub delta_state: MarketDeltaState,
     // --- Active Lib UI/config blacklist state ---
     pub(crate) market_blacklisted_cfg: bool,
+    // --- Active Lib UI/config leverage-management state ---
+    pub(crate) max_control_lev: i32,
     // --- Active Lib live arbitrage state ---
     #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
@@ -921,6 +923,25 @@ impl Market {
 
     pub fn max_qty(&self) -> f64 {
         self.bn_max_qty
+    }
+
+    /// MoonBot markets-table `Max.Order` value.
+    ///
+    /// The table shows the exchange quantity cap converted through the current
+    /// ask price (`bnMaxQty * LastAsk`). This is intentionally separate from
+    /// `bn_max_value`, which can be refreshed from balance/account state.
+    pub fn max_order_value(&self) -> f64 {
+        self.bn_max_qty * self.price.last_ask
+    }
+
+    /// MoonBot markets-table `MaxPos` value.
+    ///
+    /// This is the per-market value derived from leverage-management
+    /// `lev_control` text. `0` means the market has no explicit/wildcard
+    /// `MaxPos` entry; the leverage worker may still use the global `def`
+    /// fallback from [`crate::LevManage::default_max_pos_limit`].
+    pub fn max_pos_limit(&self) -> i32 {
+        self.max_control_lev
     }
 
     pub fn min_notional(&self) -> f64 {
@@ -1244,6 +1265,7 @@ pub(crate) fn read_market_with_local_shift(
         price: MarketPrice::default(),
         delta_state: MarketDeltaState::default(),
         market_blacklisted_cfg: false,
+        max_control_lev: 0,
         arb_slots: HashMap::new(),
     })
 }

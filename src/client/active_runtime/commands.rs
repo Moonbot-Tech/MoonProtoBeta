@@ -15,6 +15,12 @@ pub(super) enum RuntimeCommand {
         markets: Vec<String>,
     },
     UnsubscribeAllTrades,
+    SubscribeCandles {
+        markets: Vec<String>,
+        kind: crate::commands::candles::DeepHistoryKind,
+    },
+    UnsubscribeCandles(Vec<String>),
+    SetDeltasByTrades(bool),
     BalanceRefresh,
     AccountHedgeModeRefresh,
     AccountApiExpirationRefresh,
@@ -87,6 +93,7 @@ pub(super) enum UiRuntimeCommand {
     OrdersHistoryRequest(String),
     RestartNow,
     KernelLicenseStateRequest,
+    AutoDetect(bool),
 }
 
 pub(super) enum StratRuntimeCommand {
@@ -182,15 +189,18 @@ impl RuntimeCommand {
             Self::SubscribeAllTrades(_) => (6, 0),
             Self::SubscribeTradesFor { markets, .. } => (7, markets.len()),
             Self::UnsubscribeAllTrades => (8, 0),
-            Self::BalanceRefresh => (9, 0),
-            Self::AccountHedgeModeRefresh => (10, 0),
-            Self::AccountApiExpirationRefresh => (11, 0),
-            Self::OrderSnapshotRefresh => (12, 0),
-            Self::TransferAssetsRefresh => (13, 0),
-            Self::TransferAssetsRefreshKind(_) => (14, 1),
-            Self::SetExcludeBlacklistedMarketsFromExchangeDelta(_) => (15, 0),
-            Self::EngineAction { payload, .. } => (16, payload.len()),
-            Self::CoinCardCandles { payload, .. } => (17, payload.len()),
+            Self::SubscribeCandles { markets, .. } => (9, markets.len()),
+            Self::UnsubscribeCandles(markets) => (10, markets.len()),
+            Self::SetDeltasByTrades(_) => (11, 0),
+            Self::BalanceRefresh => (12, 0),
+            Self::AccountHedgeModeRefresh => (13, 0),
+            Self::AccountApiExpirationRefresh => (14, 0),
+            Self::OrderSnapshotRefresh => (15, 0),
+            Self::TransferAssetsRefresh => (16, 0),
+            Self::TransferAssetsRefreshKind(_) => (17, 1),
+            Self::SetExcludeBlacklistedMarketsFromExchangeDelta(_) => (18, 0),
+            Self::EngineAction { payload, .. } => (19, payload.len()),
+            Self::CoinCardCandles { payload, .. } => (20, payload.len()),
             Self::Ui(cmd) => cmd.profile_source(),
             Self::Strat(cmd) => cmd.profile_source(),
             Self::StrategySnapshotBatch(strategies) => (50, strategies.len()),
@@ -230,6 +240,7 @@ impl UiRuntimeCommand {
             Self::OrdersHistoryRequest(_) => (34, 1),
             Self::RestartNow => (35, 0),
             Self::KernelLicenseStateRequest => (36, 0),
+            Self::AutoDetect(_) => (37, 0),
         }
     }
 }

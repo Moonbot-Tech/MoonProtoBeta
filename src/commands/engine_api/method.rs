@@ -105,6 +105,10 @@ impl EngineMethod {
     pub const UpdateTransferAssets: Self = Self(30);
     /// `GetCoinCardCandles`: short candle history for a coin-card UI component.
     pub const GetCoinCardCandles: Self = Self(31);
+    /// `SubscribeCandles`: subscribe to live TF candle updates for market names.
+    pub const SubscribeCandles: Self = Self(32);
+    /// `UnsubscribeCandles`: unsubscribe from live TF candle updates.
+    pub const UnsubscribeCandles: Self = Self(33);
 
     /// Keep the raw Delphi ordinal byte. Delphi reads/writes
     /// `TEngineMethodKind` via `ms.Read/Stream.Write` and does not turn an
@@ -120,7 +124,7 @@ impl EngineMethod {
     }
 
     pub const fn is_known(self) -> bool {
-        self.0 <= Self::GetCoinCardCandles.0
+        self.0 <= Self::UnsubscribeCandles.0
     }
 
     pub const fn name(self) -> &'static str {
@@ -157,6 +161,8 @@ impl EngineMethod {
             Self::DoTransferAsset => "DoTransferAsset",
             Self::UpdateTransferAssets => "UpdateTransferAssets",
             Self::GetCoinCardCandles => "GetCoinCardCandles",
+            Self::SubscribeCandles => "SubscribeCandles",
+            Self::UnsubscribeCandles => "UnsubscribeCandles",
             _ => "Unknown",
         }
     }
@@ -182,6 +188,11 @@ mod tests {
         assert_eq!(
             EngineMethod::from_byte(31),
             EngineMethod::GetCoinCardCandles
+        );
+        assert_eq!(EngineMethod::from_byte(32), EngineMethod::SubscribeCandles);
+        assert_eq!(
+            EngineMethod::from_byte(33),
+            EngineMethod::UnsubscribeCandles
         );
         assert_eq!(EngineMethod::from_byte(0), EngineMethod::None);
     }

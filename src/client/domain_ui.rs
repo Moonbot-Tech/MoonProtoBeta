@@ -196,4 +196,11 @@ impl Client {
         );
         self.send_typed_domain_cmd(raw, Command::UI);
     }
+
+    #[doc(hidden)]
+    /// Send `TAutoDetectCommand` (UI CmdId=25, High).
+    pub(crate) fn ui_auto_detect(&self, active: bool) {
+        let raw = crate::commands::ui::build_auto_detect(rand::random(), active);
+        self.send_typed_domain_cmd(raw, Command::UI);
+    }
 }

@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 
 use moonproto::state::OrderBookEvent;
 use moonproto::{
-    parse_key_info, ClientConfig, ConnectConfig, Event, InitConfig, InitialStrategies,
-    ExchangeCode, LifecycleEvent, MoonClient, TradesStreamMode,
+    parse_key_info, ClientConfig, ConnectConfig, Event, ExchangeCode, InitConfig,
+    InitialStrategies, LifecycleEvent, MoonClient, TradesStreamMode,
 };
 
 const STREAM_DURATION_SECS: u64 = 15;

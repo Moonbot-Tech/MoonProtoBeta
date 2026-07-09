@@ -1,8 +1,7 @@
 use super::*;
 use crate::events::{Event, EventDispatcher};
 use crate::transport::{
-    outer_light_crypt, ClientMsgHeader, MacContext, ServerMsgHeader, CLIENT_HDR_SIZE,
-    TRANSPORT_VER,
+    outer_light_crypt, ClientMsgHeader, MacContext, ServerMsgHeader, CLIENT_HDR_SIZE, TRANSPORT_VER,
 };
 
 static ERR_EMU_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

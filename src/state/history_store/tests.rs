@@ -747,12 +747,21 @@ fn retained_trades_update_current_candle_and_derived_volumes() {
     assert_eq!(derived.trade_volumes.one_minute.sell_value, 110.0);
     assert_eq!(derived.trade_volumes.one_minute.min_price, 100.0);
     assert_eq!(derived.trade_volumes.one_minute.max_price, 110.0);
-    assert!((derived.trade_deltas.one_minute - 10.0).abs() < 1e-9);
+    assert_eq!(
+        derived.trade_deltas.one_minute, 0.0,
+        "cfg.DeltasByTrades defaults to false in the core"
+    );
     assert_eq!(derived.candle_deltas.one_minute, 0.0);
     assert_eq!(
         derived.candle_volumes.five_minutes, 0.0,
         "Delphi RecalcPumpQ exits before candle-derived values while Deep5m has fewer than 3 sealed candles"
     );
+    assert_eq!(derived.deltas.one_minute, 0.0);
+
+    store.set_deltas_by_trades(true);
+    store.refresh_derived_analytics(mt(now));
+    let derived = store.derived_snapshot();
+    assert!((derived.trade_deltas.one_minute - 10.0).abs() < 1e-9);
     assert!((derived.deltas.one_minute - 10.0).abs() < 1e-9);
 }
 

@@ -135,6 +135,24 @@ impl MoonStateSnapshot {
         self.coin_card_candles.get(market.name(), kind)
     }
 
+    /// Loaded chart TF candles for one market/history kind.
+    ///
+    /// This is the chart-oriented name for the same retained candle state that
+    /// `request_coin_card_candles` fills. Live TF-candle pushes update these
+    /// rows after the base history has been loaded.
+    pub fn tf_candles(&self, market_name: &str, kind: DeepHistoryKind) -> Option<&[DeepPrice]> {
+        self.coin_card_candles.get(market_name, kind)
+    }
+
+    /// Loaded chart TF candles for a stable market handle.
+    pub fn tf_candles_for(
+        &self,
+        market: &MarketHandle,
+        kind: DeepHistoryKind,
+    ) -> Option<&[DeepPrice]> {
+        self.tf_candles(market.name(), kind)
+    }
+
     /// Read-only strategy state.
     pub fn strats(&self) -> &StratsState {
         &self.strats

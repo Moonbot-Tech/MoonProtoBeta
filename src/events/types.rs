@@ -326,6 +326,22 @@ pub struct ClosedSellOrderReportEvent {
     pub sql: String,
 }
 
+/// Live TF candle update pushed by the core for a subscribed market.
+///
+/// `applied_to_history` is true only when Active Lib already had a loaded
+/// demand-history ring for the same market/TF and the row passed the core's
+/// candle-window checks. The raw pushed candle is always included so UI code
+/// can still react without guessing why retained history did not move.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LiveCandleEvent {
+    pub market_name: String,
+    pub kind: crate::commands::candles::DeepHistoryKind,
+    pub candle: crate::commands::candles::DeepPrice,
+    pub applied_to_history: bool,
+    pub history_count: usize,
+    pub history_revision: u64,
+}
+
 /// Arbitrage relay was applied to retained market state.
 ///
 /// Active Lib applies compact arbitrage payloads directly to retained market
@@ -381,6 +397,8 @@ pub enum Event {
     TransferAssets(TransferAssetsEvent),
     /// Demand-driven CoinCard candles for one market/history kind.
     CoinCardCandles(crate::state::CoinCardCandlesEvent),
+    /// Live TF candle update for a subscribed market.
+    LiveCandle(LiveCandleEvent),
     /// Initial full 5m candles snapshot for retained Active Lib history.
     ///
     /// This is emitted only after the history worker acknowledges that the

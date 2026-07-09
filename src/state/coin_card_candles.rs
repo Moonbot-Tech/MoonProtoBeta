@@ -36,6 +36,14 @@ pub struct CoinCardCandlesState {
     revision: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LiveCandleApply {
+    Applied { count: usize, revision: u64 },
+    NoBaseHistory,
+    BadCandle,
+    LateCandle,
+}
+
 #[derive(Debug, Clone, Default)]
 struct CoinCardCandlesEntry {
     candles: Arc<Vec<DeepPrice>>,
@@ -93,6 +101,45 @@ impl CoinCardCandlesState {
             #[cfg(any(test, feature = "diagnostics"))]
             request_uid,
             count,
+            revision: self.revision,
+        }
+    }
+
+    pub(crate) fn apply_live_update(
+        &mut self,
+        market: &str,
+        kind: DeepHistoryKind,
+        candle: DeepPrice,
+    ) -> LiveCandleApply {
+        if candle.low() <= 0.0 || candle.high() <= 0.0 {
+            return LiveCandleApply::BadCandle;
+        }
+        let Some(entry) = self
+            .by_market
+            .get_mut(market)
+            .and_then(|m| m.get_mut(&kind))
+        else {
+            return LiveCandleApply::NoBaseHistory;
+        };
+        let mut candles = entry.candles.as_ref().clone();
+        if let Some(last) = candles.last().copied() {
+            let half_bar_days = kind.minutes() as f64 / 1440.0 * 0.5;
+            if candle.time < last.time - half_bar_days {
+                return LiveCandleApply::LateCandle;
+            }
+            if candle.time > last.time + half_bar_days {
+                candles.push(candle);
+            } else if let Some(last_mut) = candles.last_mut() {
+                *last_mut = candle;
+            }
+        } else {
+            candles.push(candle);
+        }
+        self.revision = self.revision.wrapping_add(1).max(1);
+        entry.candles = Arc::new(candles);
+        entry.revision = self.revision;
+        LiveCandleApply::Applied {
+            count: entry.candles.len(),
             revision: self.revision,
         }
     }
@@ -175,5 +222,72 @@ mod tests {
         let snap_day = &snapshot.by_market["BTCUSDT"][&DeepHistoryKind::Day1].candles;
         assert!(!Arc::ptr_eq(live_hour, snap_hour));
         assert!(Arc::ptr_eq(live_day, snap_day));
+    }
+
+    #[test]
+    fn live_update_replaces_or_appends_loaded_tf_history_only() {
+        let mut state = CoinCardCandlesState::new();
+        let base = DeepPrice {
+            open: 100.0,
+            close: 101.0,
+            high: 102.0,
+            low: 99.0,
+            volume: 10.0,
+            time: 45_000.0,
+        };
+        state.apply_update("BTCUSDT".to_string(), DeepHistoryKind::Hour1, 1, vec![base]);
+
+        let replace = DeepPrice {
+            close: 105.0,
+            time: base.time + (20.0 / 1440.0),
+            ..base
+        };
+        assert_eq!(
+            state.apply_live_update("BTCUSDT", DeepHistoryKind::Hour1, replace),
+            LiveCandleApply::Applied {
+                count: 1,
+                revision: 2
+            }
+        );
+        assert_eq!(
+            state.get("BTCUSDT", DeepHistoryKind::Hour1).unwrap()[0].close(),
+            105.0
+        );
+
+        let append = DeepPrice {
+            close: 110.0,
+            time: base.time + (60.0 / 1440.0),
+            ..base
+        };
+        assert_eq!(
+            state.apply_live_update("BTCUSDT", DeepHistoryKind::Hour1, append),
+            LiveCandleApply::Applied {
+                count: 2,
+                revision: 3
+            }
+        );
+        assert_eq!(
+            state
+                .get("BTCUSDT", DeepHistoryKind::Hour1)
+                .unwrap()
+                .last()
+                .unwrap()
+                .close(),
+            110.0
+        );
+
+        let late = DeepPrice {
+            close: 90.0,
+            time: base.time - (40.0 / 1440.0),
+            ..base
+        };
+        assert_eq!(
+            state.apply_live_update("BTCUSDT", DeepHistoryKind::Hour1, late),
+            LiveCandleApply::LateCandle
+        );
+        assert_eq!(
+            state.apply_live_update("ETHUSDT", DeepHistoryKind::Hour1, append),
+            LiveCandleApply::NoBaseHistory
+        );
     }
 }

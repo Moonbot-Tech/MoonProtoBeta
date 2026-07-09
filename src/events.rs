@@ -69,7 +69,7 @@ pub(crate) use active::{ActiveAction, ActiveDispatchContext};
 pub use snapshot::MoonStateSnapshot;
 pub use types::{
     ArbEvent, ClosedSellOrderReportEvent, DetectEvent, DetectWatcherRow, EngineActionEvent,
-    EngineActionKind, Event, ServerLogEvent, WatcherFillEvent, WatcherFillsEvent,
+    EngineActionKind, Event, LiveCandleEvent, ServerLogEvent, WatcherFillEvent, WatcherFillsEvent,
 };
 pub(crate) use types::{MissingOrderStatusRequest, StrategySnapshotReply};
 
@@ -217,6 +217,10 @@ pub(crate) struct EventDispatcher {
     /// `None` means trades stream is not subscribed and retained trade/candle/
     /// derived state must stay disabled.
     trade_storage_scope: Option<TradeStorageScope>,
+    /// Delphi `cfg.DeltasByTrades` analogue for retained derived analytics.
+    /// Default is false: 1m/5m deltas come from robust candle/last-price paths,
+    /// and raw-trade deltas are opt-in legacy behavior.
+    deltas_by_trades: bool,
     /// Delphi `_eps` / `_epsStep` / `_epsM` profile selected from
     /// `ServerInfo::exchange_code`. Hidden from public API; unknown/missing
     /// exchange falls back to the Huobi-class profile.
@@ -261,6 +265,7 @@ impl Default for EventDispatcher {
             market_history_auto_enabled: true,
             market_history_sizing: MarketHistorySizing::default(),
             trade_storage_scope: None,
+            deltas_by_trades: false,
             eps_profile: EpsProfile::default(),
             last_market_history_scope: None,
             last_market_history_markets_version: None,

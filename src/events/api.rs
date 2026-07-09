@@ -7,6 +7,7 @@
 //! caller after `SendAndWait`/receiver completion.
 
 use super::{copy_max_leverage_from_markets_list, Event, EventDispatcher};
+use crate::commands::candles::parse_candle_update_command;
 use crate::commands::engine_api::{
     parse_base_check_response, parse_engine_response, EngineMethod, EngineResponse,
 };
@@ -14,6 +15,7 @@ use crate::commands::market::parse_markets_indexes_response;
 use crate::protocol::Command;
 use crate::state::eps::EpsProfile;
 use crate::state::markets::MarketLastPriceHistoryInput;
+use crate::state::LiveCandleApply;
 use crate::state::{MarketHistoryLastPriceBatch, MarketHistoryLastPriceInput, MarketsEvent};
 
 impl EventDispatcher {
@@ -24,10 +26,42 @@ impl EventDispatcher {
         history_now_time_days: Option<f64>,
         out: &mut Vec<Event>,
     ) {
+        if let Some(cmd) = parse_candle_update_command(payload) {
+            self.process_candle_update_command(cmd, out);
+            return;
+        }
         match parse_engine_response(payload) {
             Some(resp) => self.process_api_command(resp, now_ms, history_now_time_days, out),
             None => Self::push_parse_failed(out, Command::API, payload),
         }
+    }
+
+    fn process_candle_update_command(
+        &mut self,
+        cmd: crate::commands::candles::CandleUpdateCommand,
+        out: &mut Vec<Event>,
+    ) {
+        let Some(market_name) = self.markets.market_name_by_index(cmd.market_index) else {
+            return;
+        };
+        let market_name = market_name.to_string();
+        let apply = self
+            .coin_card_candles
+            .apply_live_update(&market_name, cmd.kind, cmd.candle);
+        let (applied_to_history, history_count, history_revision) = match apply {
+            LiveCandleApply::Applied { count, revision } => (true, count, revision),
+            LiveCandleApply::NoBaseHistory
+            | LiveCandleApply::BadCandle
+            | LiveCandleApply::LateCandle => (false, 0, 0),
+        };
+        out.push(Event::LiveCandle(crate::events::LiveCandleEvent {
+            market_name,
+            kind: cmd.kind,
+            candle: cmd.candle,
+            applied_to_history,
+            history_count,
+            history_revision,
+        }));
     }
 
     /// Active dispatcher counterpart of Delphi `TMoonProtoNetClient.ProcessApiCommand`.
@@ -95,6 +129,9 @@ impl EventDispatcher {
         else {
             return false;
         };
+        if let Some(lev) = self.settings.lev_manage.as_ref() {
+            self.markets.apply_lev_manage_to_markets(lev);
+        }
         out.push(Event::Markets(ev));
         let new_markets = self.markets.take_new_markets_added();
         if !new_markets.is_empty() {

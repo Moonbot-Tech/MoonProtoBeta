@@ -497,8 +497,11 @@ client.streams().subscribe_trades_for(
 )?;
 client.streams().subscribe_orderbook("BTCUSDT")?;
 client.streams().subscribe_orderbooks(["ETHUSDT", "SOLUSDT"])?;
+client.streams().subscribe_candles(["BTCUSDT"], moonproto::DeepHistoryKind::Hour4)?;
+client.streams().set_deltas_by_trades(false)?;
 client.streams().unsubscribe_orderbook("BTCUSDT")?;
 client.streams().unsubscribe_orderbooks(["ETHUSDT", "SOLUSDT"])?;
+client.streams().unsubscribe_candles(["BTCUSDT"])?;
 client.streams().unsubscribe_all_orderbooks()?;
 client.streams().unsubscribe_all_trades()?;
 ```

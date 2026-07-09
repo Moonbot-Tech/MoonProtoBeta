@@ -35,18 +35,25 @@ if let Some(market) = markets.find("BTC") {
     let price = market.price();
     let tail = market.trade_state();
     let deltas = market.delta_state();
+    let max_pos = market.max_pos_limit();
     let protection = state.position_protection_for(&market);
     market.with(|market| {
-        println!("tick={} max_lev={}", market.tick_size(), market.max_leverage);
+        println!(
+            "tick={} max_lev={} max_order={}",
+            market.tick_size(),
+            market.max_leverage,
+            market.max_order_value()
+        );
     });
     println!(
-        "liq={} bid={} ask={} mark={} last_trade={} coin1h={} protected={}",
+        "liq={} bid={} ask={} mark={} last_trade={} coin1h={} max_pos={} protected={}",
         pos.liq_price,
         price.bid,
         price.ask,
         price.mark_price,
         tail.last_trade_price,
         deltas.coin_1h_delta,
+        max_pos,
         !protection.both.has_warning
     );
 }
@@ -83,6 +90,15 @@ checkbox, call
 `client.settings().set_exclude_blacklisted_markets_from_exchange_delta(true)`;
 the runtime then applies `coins_black_list_text` to retained markets before
 computing `Exchange1hDelta` / `Exchange24hDelta`.
+
+Markets-table style values are also read from the retained market handle:
+
+- `market.with(|m| m.max_order_value())` is the `Max.Order` column: exchange
+  `max_qty` converted through the current ask price.
+- `market.max_pos_limit()` is the per-market `MaxPos` value derived from the
+  latest leverage-management config. `0` means there is no explicit/wildcard
+  per-market rule; the global `def` fallback remains available through
+  `snapshot.settings().lev_manage.as_ref().map(|l| l.default_max_pos_limit())`.
 
 Arbitrage relay packets also apply to the live market. Use
 `MarketHandle::arb_slot(ArbPlatformCode::...)` or

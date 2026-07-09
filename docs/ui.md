@@ -181,6 +181,17 @@ if let Some(runtime) = client
 means automatic detection is active; if it is false, the core is in passive
 mode.
 
+To switch AutoDetect/passive mode, send the typed settings intent and wait for
+the next runtime-state update:
+
+```rust
+client.settings().set_auto_detect_active(true)?;
+```
+
+The call does not optimistically mutate local state. The server either changes
+the mode or echoes the current runtime state, and the terminal updates after
+`SettingsEvent::RuntimeStateUpdated`.
+
 `client.settings().restart_now()?` queues the normal MoonBot restart-now action:
 start the market runtime if needed, leave passive mode if needed, and start
 checked strategies. The call returns after the intent is queued; the observable
@@ -241,7 +252,14 @@ Leverage-management fields are UI controls, not protocol switches:
 | `auto_cross` | Force cross margin where supported. |
 | `auto_fix_lev` / `fix_lev` | Force a fixed target leverage value. |
 | `tlg_report` | Send leverage-change reports to Telegram. |
-| `lev_control` | Text configuration used by MoonBot's leverage-control table/commands. |
+| `lev_control` | Text config for the markets-table `MaxPos` values and auto-leverage worker. |
+
+Active Lib parses `lev_control` when `LevManage` arrives and applies the
+per-market values to retained markets. Terminal code should read
+`MarketHandle::max_pos_limit()` for the `MaxPos` column instead of parsing this
+text itself. The `def` fallback is not copied into every market; it is available
+as `LevManage::default_max_pos_limit()`, matching the core worker model where a
+market with `MaxPos = 0` can still use the global fallback.
 
 ### Arbitrage Activation
 

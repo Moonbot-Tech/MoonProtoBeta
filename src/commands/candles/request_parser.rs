@@ -1,8 +1,8 @@
 //! Chunked `emk_RequestCandlesData` response parser.
 
 use super::{
-    current_local_time_shift_minutes, read_zero_tail, DeepPrice, RequestCandlesMarket, WallItem,
-    WireDeepPricePack, WireDeepPricePackOld, DEEP_PRICE_PACK_OLD_SIZE, DEEP_PRICE_PACK_SIZE,
+    read_zero_tail, DeepPrice, RequestCandlesMarket, WallItem, WireDeepPricePack,
+    WireDeepPricePackOld, DEEP_PRICE_PACK_OLD_SIZE, DEEP_PRICE_PACK_SIZE,
     MAX_REQUEST_CANDLES_DECOMPRESSED_BYTES, MAX_REQUEST_CANDLES_MARKETS,
     MAX_REQUEST_CANDLES_PER_MARKET, MAX_REQUEST_CANDLES_TOTAL, MINS_IN_DAY,
     REQUEST_CANDLES_MARKET_MIN_SIZE,
@@ -28,23 +28,21 @@ use zerocopy::FromBytes;
 ///   sell_wall: 4 * TWallItem
 /// ```
 ///
+/// MoonProto stores candle times as public [`crate::MoonTime`] values. The
+/// server writes candle rows in its local Delphi time and puts that timezone
+/// offset into the stream; the normal parser converts rows to UTC instead of
+/// reproducing Delphi client's client-local `TDateTime` storage.
 pub fn parse_request_candles_data_response(
     zipped_data: &[u8],
 ) -> Option<Vec<RequestCandlesMarket>> {
-    parse_request_candles_data_response_with_local_shift(
-        zipped_data,
-        current_local_time_shift_minutes(),
-    )
+    parse_request_candles_data_response_with_local_shift(zipped_data, 0.0)
 }
 
 // parity: MoonBot MoonProtoClient.pas:ProcessApiCommand (chunked emk_RequestCandlesData read)
 pub(crate) fn parse_request_candles_data_response_partial(
     zipped_data: &[u8],
 ) -> Option<Vec<RequestCandlesMarket>> {
-    parse_request_candles_data_response_partial_with_local_shift(
-        zipped_data,
-        current_local_time_shift_minutes(),
-    )
+    parse_request_candles_data_response_partial_with_local_shift(zipped_data, 0.0)
 }
 
 pub(crate) fn parse_request_candles_data_response_with_local_shift(

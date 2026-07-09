@@ -47,6 +47,8 @@ pub(crate) const UK_SPOT_SWITCH: u8 = 14;
 pub(crate) const UK_CHART_TEXT_SNAPSHOT: u8 = 15;
 /// `UK_ChartTextState`: singleton chart text state key.
 pub(crate) const UK_CHART_TEXT_STATE: u8 = 16;
+/// `UK_CandleUpdate`: per-client, per-market, per-TF live candle update key.
+pub(crate) const UK_CANDLE_UPDATE: u8 = 17;
 
 /// Send priority as protocol metadata, independent from the concrete client
 /// queue implementation. Conversion to `SendPriority` happens at the send edge.
@@ -90,6 +92,7 @@ pub(crate) enum UKeyRule {
     StrategyId,
     ImmuneItemsSum,
     SendContextClientId,
+    CandleUpdate,
 }
 
 /// Direction is client-side documentation/checking metadata. It does not change
@@ -713,6 +716,22 @@ pub(crate) const UI_COMMANDS: &[CommandDescriptor] = &[
         priority = High,
         direction = Outbound
     ),
+    cmd_desc!(
+        Command::UI,
+        24,
+        "TProfitStateCommand",
+        base = Base,
+        priority = High,
+        direction = Inbound
+    ),
+    cmd_desc!(
+        Command::UI,
+        25,
+        "TAutoDetectCommand",
+        base = Base,
+        priority = High,
+        direction = Outbound
+    ),
 ];
 
 pub(crate) const STRAT_COMMANDS: &[CommandDescriptor] = &[
@@ -899,6 +918,17 @@ pub(crate) const API_COMMANDS: &[CommandDescriptor] = &[
         priority = Sliced,
         direction = Outbound
     ),
+    cmd_desc!(
+        Command::API,
+        3,
+        "TCandleUpdateCommand",
+        base = Base,
+        priority = High,
+        retries = None,
+        unique = UK_CANDLE_UPDATE,
+        ukey = UKeyRule::CandleUpdate,
+        direction = Inbound
+    ),
 ];
 
 pub(crate) const COMMAND_DESCRIPTOR_DOMAINS: &[&[CommandDescriptor]] = &[
@@ -999,10 +1029,10 @@ mod tests {
     #[test]
     fn descriptor_map_covers_known_typed_domains() {
         assert_eq!(ORDER_COMMANDS.len(), 32);
-        assert_eq!(UI_COMMANDS.len(), 24);
+        assert_eq!(UI_COMMANDS.len(), 26);
         assert_eq!(STRAT_COMMANDS.len(), 11);
         assert_eq!(BALANCE_COMMANDS.len(), 7);
-        assert_eq!(API_COMMANDS.len(), 3);
+        assert_eq!(API_COMMANDS.len(), 4);
     }
 
     #[test]

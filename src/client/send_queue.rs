@@ -185,7 +185,8 @@ fn descriptor_u_key(
         UKeyRule::MarketIndex
         | UKeyRule::StrategyId
         | UKeyRule::ImmuneItemsSum
-        | UKeyRule::SendContextClientId => None,
+        | UKeyRule::SendContextClientId
+        | UKeyRule::CandleUpdate => None,
     }
 }
 

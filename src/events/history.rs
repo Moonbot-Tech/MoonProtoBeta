@@ -34,6 +34,7 @@ impl EventDispatcher {
         self.owned_market_history = None;
         self.market_history_auto_enabled = false;
         handle.set_eps_profile(self.eps_profile);
+        handle.set_deltas_by_trades(self.deltas_by_trades);
         self.market_history = Some(handle);
         self.last_market_history_scope = None;
         self.last_market_history_markets_version = None;
@@ -185,6 +186,16 @@ impl EventDispatcher {
         }
     }
 
+    pub(crate) fn set_deltas_by_trades(&mut self, enabled: bool) {
+        if self.deltas_by_trades == enabled {
+            return;
+        }
+        self.deltas_by_trades = enabled;
+        if let Some(handle) = &self.market_history {
+            handle.set_deltas_by_trades(enabled);
+        }
+    }
+
     fn ensure_default_market_history_worker(&mut self, active_market_count: usize) {
         if self.trade_storage_scope.is_none() {
             if self.owned_market_history.is_some() {
@@ -207,6 +218,7 @@ impl EventDispatcher {
         self.owned_market_history = Some(worker);
         if let Some(handle) = &self.market_history {
             handle.set_eps_profile(self.eps_profile);
+            handle.set_deltas_by_trades(self.deltas_by_trades);
         }
         self.last_market_history_scope = None;
         self.last_market_history_markets_version = None;
@@ -313,6 +325,14 @@ fn build_candle_rows_and_baseline(
             }
         }
         rows.push(row);
+    }
+
+    if crate::state::history_store::candles_snapshot_is_stale(
+        rows.last().map(|row| row.time()).unwrap_or_default(),
+        now_time,
+    ) {
+        rows.clear();
+        return (rows, None);
     }
 
     let baseline = can_build_baseline.then(|| CandleDeltaBaseline {

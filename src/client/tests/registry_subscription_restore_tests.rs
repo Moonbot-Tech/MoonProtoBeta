@@ -1,4 +1,5 @@
 use super::*;
+use crate::commands::candles::DeepHistoryKind;
 use crate::commands::engine_api::EngineMethod;
 
 fn dummy_cfg() -> ClientConfig {
@@ -34,6 +35,33 @@ fn subscribe_all_trades_want_mm(payload: &[u8]) -> Option<bool> {
         return None;
     }
     payload.last().map(|v| *v != 0)
+}
+
+fn market_names_count(payload: &[u8]) -> Option<i32> {
+    let mut pos = 12usize;
+    let market_len = u16::from_le_bytes(payload.get(pos..pos + 2)?.try_into().ok()?) as usize;
+    pos += 2 + market_len;
+    Some(i32::from_le_bytes(
+        payload.get(pos..pos + 4)?.try_into().ok()?,
+    ))
+}
+
+fn engine_request_tf_param(payload: &[u8]) -> Option<u8> {
+    let mut pos = 12usize;
+    let market_len = u16::from_le_bytes(payload.get(pos..pos + 2)?.try_into().ok()?) as usize;
+    pos += 2 + market_len;
+    let count = i32::from_le_bytes(payload.get(pos..pos + 4)?.try_into().ok()?);
+    pos += 4;
+    for _ in 0..count {
+        let len = u16::from_le_bytes(payload.get(pos..pos + 2)?.try_into().ok()?) as usize;
+        pos += 2 + len;
+    }
+    let params_size = i32::from_le_bytes(payload.get(pos..pos + 4)?.try_into().ok()?);
+    pos += 4;
+    if params_size != 1 {
+        return None;
+    }
+    payload.get(pos).copied()
 }
 
 fn drain_api_requests(client: &Client) -> Vec<Vec<u8>> {
@@ -199,6 +227,30 @@ fn restore_orderbooks_are_batched_into_single_request() {
     assert_eq!(
         method_id(&sent[0]),
         Some(EngineMethod::SubscribeOrderBook.to_byte())
+    );
+}
+
+#[test]
+fn restore_candle_subscriptions_are_batched_with_tf_kind() {
+    let mut client = Client::new(dummy_cfg());
+    mark_post_init(&mut client);
+    client.with_subscription_registry_mut(|registry| {
+        registry.candle_subs.insert("BTCUSDT".to_string());
+        registry.candle_subs.insert("ETHUSDT".to_string());
+        registry.candle_tf = Some(DeepHistoryKind::Hour4);
+    });
+    client.server_token = 1;
+    client.restore_registry_subscriptions();
+    let sent = drain_api_requests(&client);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        method_id(&sent[0]),
+        Some(EngineMethod::SubscribeCandles.to_byte())
+    );
+    assert_eq!(market_names_count(&sent[0]), Some(2));
+    assert_eq!(
+        engine_request_tf_param(&sent[0]),
+        Some(DeepHistoryKind::Hour4.to_byte())
     );
 }
 

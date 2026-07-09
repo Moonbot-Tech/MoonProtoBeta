@@ -9,9 +9,10 @@ use std::sync::Arc;
 
 use crate::state::eps::EpsProfile;
 use crate::state::history::{
-    compact_trades_to_mini_candles, hl_address_color, Candle5mRow, LastPricePoint,
-    MMOrderCompanionData, MMOrderHistoryRow, MarkPricePoint, MarketDerivedSnapshot, MiniCandle,
-    RollingTradeVolumeSnapshot, RollingTradeVolumes, TradeHistoryRow, TradesPacketTimeShift,
+    compact_trades_to_mini_candles, hl_address_color, Candle5mRow, DerivedDeltaSnapshot,
+    LastPricePoint, MMOrderCompanionData, MMOrderHistoryRow, MarkPricePoint, MarketDerivedSnapshot,
+    MiniCandle, RollingTradeVolumeSnapshot, RollingTradeVolumes, TradeHistoryRow,
+    TradesPacketTimeShift,
 };
 use crate::state::seq_ring::{SeqRingReader, SeqRingWriter};
 #[cfg(any(test, feature = "diagnostics"))]
@@ -112,6 +113,7 @@ pub(crate) struct MarketHistoryStore {
     candle_deltas_bucket: Option<i64>,
     derived: MarketDerivedSnapshot,
     eps_profile: EpsProfile,
+    deltas_by_trades: bool,
 }
 
 impl MarketHistoryStore {
@@ -175,11 +177,21 @@ impl MarketHistoryStore {
             candle_deltas_bucket: None,
             derived: MarketDerivedSnapshot::default(),
             eps_profile,
+            deltas_by_trades: false,
         }
     }
 
     pub(crate) fn set_eps_profile(&mut self, eps_profile: EpsProfile) {
         self.eps_profile = eps_profile;
+    }
+
+    pub(crate) fn set_deltas_by_trades(&mut self, enabled: bool) {
+        if self.deltas_by_trades == enabled {
+            return;
+        }
+        self.deltas_by_trades = enabled;
+        self.candle_deltas_dirty = true;
+        self.derived.trade_deltas = DerivedDeltaSnapshot::default();
     }
 
     #[cfg(test)]
@@ -574,7 +586,7 @@ impl MarketHistoryStore {
     }
 }
 
-fn candles_snapshot_is_stale(last_time: MoonTime, now_time: MoonTime) -> bool {
+pub(crate) fn candles_snapshot_is_stale(last_time: MoonTime, now_time: MoonTime) -> bool {
     if last_time == MoonTime::ZERO || now_time == MoonTime::ZERO {
         return false;
     }

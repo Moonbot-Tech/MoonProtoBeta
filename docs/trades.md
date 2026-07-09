@@ -417,6 +417,20 @@ Rolling trade volumes use 5-second buckets and update only from newly accepted
 trades. Candle-derived windows are recalculated from retained 5-minute candles
 plus the current candle.
 
+By default, short delta labels do not use raw trade extrema. This matches the
+normal core setting: `trade_volumes` are always maintained, while
+`trade_deltas` stay zero and `derived.deltas` is built from candle/LastPrice
+derived paths. If a terminal intentionally wants the legacy
+`DeltasByTrades` behavior, opt in explicitly:
+
+```rust
+client.streams().set_deltas_by_trades(true)?;
+```
+
+Use this as a chart-analytics policy switch, not as a substitute for signed
+market signal deltas. `BTC1hDelta`, `Exchange1hDelta`, and per-market signed
+signal deltas remain in `snapshot.markets()`.
+
 ## Storage Configuration
 
 ```rust

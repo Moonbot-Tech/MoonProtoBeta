@@ -13,6 +13,7 @@ impl Client {
         self.rs = 1.0;
         self.used_sliced_limit = false;
         self.recv.data_read_state.reset();
+        self.pre_auth_crypted.clear();
         self.send_lock.lock().reset_tmp_slider();
         self.recv.recvd_slider = Slider::new();
         self.transport.recv_slicer = slicing::SlicingReceiver::new();

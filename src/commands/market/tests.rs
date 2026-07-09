@@ -76,8 +76,19 @@ fn sample_market(name: &str, with_v2: bool) -> Market {
         price: Default::default(),
         delta_state: Default::default(),
         market_blacklisted_cfg: false,
+        max_control_lev: 0,
         arb_slots: std::collections::HashMap::new(),
     }
+}
+
+#[test]
+fn max_order_value_matches_moonbot_market_table() {
+    let mut m = sample_market("BTC", true);
+    m.bn_max_qty = 2.5;
+    m.price.last_ask = 100.0;
+    m.bn_max_value = 9999.0;
+
+    assert_eq!(m.max_order_value(), 250.0);
 }
 
 #[test]

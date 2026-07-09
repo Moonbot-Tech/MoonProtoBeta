@@ -1,4 +1,4 @@
-﻿//! `ClientSender` subscription helpers and reconnect registry updates.
+//! `ClientSender` subscription helpers and reconnect registry updates.
 #![allow(dead_code)]
 
 use super::*;
@@ -90,6 +90,34 @@ impl ClientSender {
         if let Err(e) = self.try_unsubscribe_all_trades() {
             log::warn!(target: "moonproto::client",
                 "unsubscribe_all_trades dropped: {e}");
+        }
+    }
+
+    /// Subscribe to live TF candles and remember the intent for reconnect
+    /// restore.
+    pub(crate) fn subscribe_candles<I, S>(
+        &self,
+        market_names: I,
+        kind: crate::commands::candles::DeepHistoryKind,
+    ) where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        if let Err(e) = self.try_subscribe_candles(market_names, kind) {
+            log::warn!(target: "moonproto::client",
+                "subscribe_candles(kind={kind:?}) dropped: {e}");
+        }
+    }
+
+    /// Unsubscribe from live TF candles and update the reconnect registry.
+    pub(crate) fn unsubscribe_candles<I, S>(&self, market_names: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        if let Err(e) = self.try_unsubscribe_candles(market_names) {
+            log::warn!(target: "moonproto::client",
+                "unsubscribe_candles dropped: {e}");
         }
     }
 
@@ -293,6 +321,102 @@ impl ClientSender {
         };
         if had_subscription && self.domain_ready_for_typed_send() {
             self.try_send_api_request(crate::commands::engine_request::unsubscribe_all_trades())?;
+        }
+        Ok(())
+    }
+
+    /// Fallible live TF-candles subscription.
+    pub(crate) fn try_subscribe_candles<I, S>(
+        &self,
+        market_names: I,
+        kind: crate::commands::candles::DeepHistoryKind,
+    ) -> Result<(), SubscribeError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let market_names: Vec<String> = market_names
+            .into_iter()
+            .map(|name| name.as_ref().to_string())
+            .filter(|name| !name.is_empty())
+            .collect();
+        if market_names.is_empty() {
+            return Ok(());
+        }
+        if !self.shared.app_queue_alive.load(Ordering::Relaxed) {
+            return Err(SubscribeError::Disconnected);
+        }
+        let mut to_unsubscribe = Vec::new();
+        let mut to_subscribe = Vec::new();
+        {
+            let mut registry = self.shared.subscription_registry.lock();
+            let tf_changed = registry.candle_tf != Some(kind);
+            if tf_changed {
+                to_unsubscribe = registry.candle_subs.iter().cloned().collect();
+                to_unsubscribe.sort_unstable();
+            }
+            registry.candle_tf = Some(kind);
+            for market_name in market_names {
+                let inserted = registry.candle_subs.insert(market_name.clone());
+                if inserted && !tf_changed {
+                    to_subscribe.push(market_name);
+                }
+            }
+            if tf_changed {
+                to_subscribe = registry.candle_subs.iter().cloned().collect();
+                to_subscribe.sort_unstable();
+            }
+        }
+        if self.domain_ready_for_typed_send() {
+            if !to_unsubscribe.is_empty() {
+                let refs: Vec<&str> = to_unsubscribe.iter().map(String::as_str).collect();
+                self.try_send_api_request(crate::commands::candles::unsubscribe_candles(&refs))?;
+            }
+            if !to_subscribe.is_empty() {
+                let refs: Vec<&str> = to_subscribe.iter().map(String::as_str).collect();
+                self.try_send_api_request(crate::commands::candles::subscribe_candles(
+                    &refs, kind,
+                ))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Fallible live TF-candles unsubscribe.
+    pub(crate) fn try_unsubscribe_candles<I, S>(
+        &self,
+        market_names: I,
+    ) -> Result<(), SubscribeError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let market_names: Vec<String> = market_names
+            .into_iter()
+            .map(|name| name.as_ref().to_string())
+            .filter(|name| !name.is_empty())
+            .collect();
+        if market_names.is_empty() {
+            return Ok(());
+        }
+        if !self.shared.app_queue_alive.load(Ordering::Relaxed) {
+            return Err(SubscribeError::Disconnected);
+        }
+        let mut removed = Vec::new();
+        {
+            let mut registry = self.shared.subscription_registry.lock();
+            for market_name in market_names {
+                if registry.candle_subs.remove(&market_name) {
+                    removed.push(market_name);
+                }
+            }
+            if registry.candle_subs.is_empty() {
+                registry.candle_tf = None;
+            }
+        }
+        if !removed.is_empty() && self.domain_ready_for_typed_send() {
+            let refs: Vec<&str> = removed.iter().map(String::as_str).collect();
+            self.try_send_api_request(crate::commands::candles::unsubscribe_candles(&refs))?;
         }
         Ok(())
     }

@@ -322,6 +322,34 @@ fn request_candles_data_parser_applies_delphi_timezone_shift() {
 }
 
 #[test]
+fn request_candles_data_public_parser_converts_server_local_candles_to_utc() {
+    let now = crate::MoonTime::now();
+    let server_shift_minutes = 180.0;
+    let server_local_days = now.to_delphi_days() + server_shift_minutes / MINS_IN_DAY;
+
+    let mut plain = Vec::new();
+    plain.extend_from_slice(&0i32.to_le_bytes());
+    plain.push(2);
+    plain.extend_from_slice(&1i32.to_le_bytes());
+    plain.extend_from_slice(&server_shift_minutes.to_le_bytes());
+    write_delphi_utf16_string(&mut plain, "BTCUSDT");
+    plain.extend_from_slice(&1i32.to_le_bytes());
+    write_deep_price_pack(&mut plain, 101.0, 99.0, 12.5, server_local_days);
+    for _ in 0..8 {
+        plain.extend_from_slice(&0f32.to_le_bytes());
+        plain.extend_from_slice(&0i32.to_le_bytes());
+    }
+
+    let markets = parse_request_candles_data_response(&zip_plain(&plain)).unwrap();
+    let candle_time = markets[0].candles_5m[0].time();
+    let age_ms = crate::MoonTime::now().unix_millis() - candle_time.unix_millis();
+    assert!(
+        age_ms.abs() < 60_000,
+        "public parser must expose UTC MoonTime, not server/client-local Delphi time; age_ms={age_ms}"
+    );
+}
+
+#[test]
 fn request_candles_data_rejects_impossible_market_count_before_alloc() {
     let mut plain = Vec::new();
     plain.extend_from_slice(&0i32.to_le_bytes());
@@ -509,4 +537,79 @@ fn get_coin_card_candles_builder() {
     assert_eq!(raw.len(), 30);
     // Method byte after header (offset 11)
     assert_eq!(raw[11], EngineMethod::GetCoinCardCandles.to_byte());
+}
+
+#[test]
+fn subscribe_candles_builder_matches_engine_request_layout() {
+    let raw = subscribe_candles(&["BTCUSDT", "ETHUSDT"], DeepHistoryKind::Hour4);
+    assert_eq!(raw[0], 2);
+    assert_eq!(raw[11], EngineMethod::SubscribeCandles.to_byte());
+
+    let mut pos = 12usize;
+    let market_len = u16::from_le_bytes(raw[pos..pos + 2].try_into().unwrap()) as usize;
+    pos += 2 + market_len;
+    assert_eq!(market_len, 0, "SubscribeCandles uses empty MarketName");
+
+    let count = i32::from_le_bytes(raw[pos..pos + 4].try_into().unwrap());
+    pos += 4;
+    assert_eq!(count, 2);
+    for expected in ["BTCUSDT", "ETHUSDT"] {
+        let len = u16::from_le_bytes(raw[pos..pos + 2].try_into().unwrap()) as usize;
+        pos += 2;
+        assert_eq!(&raw[pos..pos + len], expected.as_bytes());
+        pos += len;
+    }
+
+    let params_size = i32::from_le_bytes(raw[pos..pos + 4].try_into().unwrap());
+    pos += 4;
+    assert_eq!(params_size, 1);
+    assert_eq!(raw[pos], DeepHistoryKind::Hour4.to_byte());
+    assert_eq!(pos + 1, raw.len());
+}
+
+#[test]
+fn unsubscribe_candles_builder_has_no_params() {
+    let raw = unsubscribe_candles(&["BTCUSDT"]);
+    assert_eq!(raw[0], 2);
+    assert_eq!(raw[11], EngineMethod::UnsubscribeCandles.to_byte());
+
+    let mut pos = 12usize;
+    let market_len = u16::from_le_bytes(raw[pos..pos + 2].try_into().unwrap()) as usize;
+    pos += 2 + market_len;
+    assert_eq!(market_len, 0);
+    let count = i32::from_le_bytes(raw[pos..pos + 4].try_into().unwrap());
+    pos += 4;
+    assert_eq!(count, 1);
+    let len = u16::from_le_bytes(raw[pos..pos + 2].try_into().unwrap()) as usize;
+    pos += 2 + len;
+    let params_size = i32::from_le_bytes(raw[pos..pos + 4].try_into().unwrap());
+    assert_eq!(params_size, 0);
+    assert_eq!(pos + 4, raw.len());
+}
+
+#[test]
+fn candle_update_command_parser_matches_delphi_wire() {
+    let mut raw = Vec::new();
+    raw.push(3);
+    raw.extend_from_slice(&crate::commands::registry::CURRENT_PROTO_CMD_VER.to_le_bytes());
+    raw.extend_from_slice(&777u64.to_le_bytes());
+    raw.extend_from_slice(&42u16.to_le_bytes());
+    raw.push(DeepHistoryKind::Min30.to_byte());
+    raw.extend_from_slice(&100.0f32.to_le_bytes());
+    raw.extend_from_slice(&105.0f32.to_le_bytes());
+    raw.extend_from_slice(&110.0f32.to_le_bytes());
+    raw.extend_from_slice(&95.0f32.to_le_bytes());
+    raw.extend_from_slice(&1234.5f32.to_le_bytes());
+    raw.extend_from_slice(&45_123.25f64.to_le_bytes());
+
+    let parsed = parse_candle_update_command(&raw).unwrap();
+    assert_eq!(parsed.uid, 777);
+    assert_eq!(parsed.market_index, 42);
+    assert_eq!(parsed.kind, DeepHistoryKind::Min30);
+    assert_eq!(parsed.candle.open(), 100.0);
+    assert_eq!(parsed.candle.close(), 105.0);
+    assert_eq!(parsed.candle.high(), 110.0);
+    assert_eq!(parsed.candle.low(), 95.0);
+    assert_eq!(parsed.candle.volume(), 1234.5);
+    assert_eq!(parsed.candle.time, 45_123.25);
 }

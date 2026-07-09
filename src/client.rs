@@ -258,6 +258,13 @@ impl SessionIdentity {
     }
 }
 
+struct PreAuthCryptedCommand {
+    msg_num: u64,
+    cmd: u8,
+    payload: Vec<u8>,
+    timestamp_ms: i64,
+}
+
 /// Low-level UDP session object behind [`MoonClient`].
 ///
 /// Regular applications should not own this directly. It remains public under
@@ -369,6 +376,10 @@ pub(crate) struct Client {
     // SizeAck series, decode cipher) and the `recvd_slider` server-ACK bitmap
     // copied from TmpSlider. Both survive a soft reconnect. See [`RecvState`].
     recv: RecvState,
+    // Encrypted app packets received after session keys are known but before
+    // `MPC_Fine/AuthDone`. They must not move `MPSlider` until AuthDone, but
+    // dropping them can lose SrvConnect high-state if Fine is delayed/lost.
+    pre_auth_crypted: Vec<PreAuthCryptedCommand>,
     ping_count: u32,
 
     /// In-flight Engine API response collectors: the pending-request registry
@@ -626,6 +637,7 @@ impl Client {
             copy_send_low: Vec::new(),
             copy_sliced_acks: Vec::new(),
             recv: RecvState::new(),
+            pre_auth_crypted: Vec::new(),
             ping_count: 0,
             pending_api: PendingApi::new(),
             prev_auth_status: AuthStatus::Base,
