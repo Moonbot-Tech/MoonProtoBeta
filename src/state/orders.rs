@@ -496,9 +496,15 @@ impl Orders {
             }
 
             // --- Dispatcher-level payloads, handled before ProcessCommandOrder ---
-            TradeCommand::AllStatuses(_) | TradeCommand::ClosedSellOrderReport(_) => {
-                ignored_order_event(uid, ApplyResult::NotApplicable)
-            }
+            TradeCommand::AllStatuses(_)
+            | TradeCommand::ClosedSellOrderReport(_)
+            | TradeCommand::ReportRowUpsert(_)
+            | TradeCommand::ReportRowDelete(_)
+            | TradeCommand::ReportSyncRequest(_)
+            | TradeCommand::ReportSyncBatch(_)
+            | TradeCommand::ReportSyncDone(_)
+            | TradeCommand::ReportSchemaRequest(_)
+            | TradeCommand::ReportSchema(_) => ignored_order_event(uid, ApplyResult::NotApplicable),
 
             // --- Client-originated outgoing commands: ignored by state ---
             TradeCommand::OrderReplace(c) => self.apply_noop_trade_epoch(uid, &c.epoch_header),

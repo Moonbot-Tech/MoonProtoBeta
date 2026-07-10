@@ -46,9 +46,10 @@ use crate::state::{
     AccountEvent, AccountState, BalanceEvent, BalancesState, Candle5mRow, ChartAlertsState,
     ChartTextState, MarketDerivedSnapshot, MarketHistoryCandlesSnapshot, MarketHistoryHandle,
     MarketHistoryReaders, MarketHistorySizing, MarketHistoryWorker, MarketsEvent, MarketsState,
-    OrderBookControl, OrderBookEvent, OrderBooks, OrderEvent, Orders, RollingTradeVolumeSnapshot,
-    SettingsEvent, SettingsState, StratEvent, StratsState, TradeStorageScope, TradesEvent,
-    TradesState, TransferAssetsEvent, TransferAssetsState,
+    OrderBookControl, OrderBookEvent, OrderBooks, OrderEvent, Orders, ReportControl,
+    ReportReplicationState, ReportSchema, ReportSyncRequest, ReportSyncTicket,
+    RollingTradeVolumeSnapshot, SettingsEvent, SettingsState, StratEvent, StratsState,
+    TradeStorageScope, TradesEvent, TradesState, TransferAssetsEvent, TransferAssetsState,
 };
 use std::ops::{Deref, DerefMut};
 
@@ -130,6 +131,7 @@ impl<T: Clone> CowState<T> {
 /// immutable [`MoonStateSnapshot`] copies published by [`crate::MoonClient`].
 pub(crate) struct EventDispatcher {
     pub(crate) orders: CowState<Orders>,
+    pub(crate) reports: ReportReplicationState,
     pub(crate) order_books: CowState<OrderBooks>,
     pub(crate) trades: CowState<TradesState>,
     pub(crate) account: CowState<AccountState>,
@@ -201,6 +203,9 @@ pub(crate) struct EventDispatcher {
     order_book_events: Vec<OrderBookEvent>,
     /// Reused hot-path buffer for internal orderbook recovery controls.
     order_book_controls: Vec<OrderBookControl>,
+    /// Internal report follow-up controls (schema-unblocked sync and completed
+    /// subscription watermark).
+    report_controls: Vec<ReportControl>,
     /// Optional retained-history writer. The dispatcher only queues typed
     /// batches into this handle; the worker owns `MarketHistoryStore`.
     market_history: Option<MarketHistoryHandle>,
@@ -235,6 +240,7 @@ impl Default for EventDispatcher {
     fn default() -> Self {
         Self {
             orders: CowState::default(),
+            reports: ReportReplicationState::default(),
             order_books: CowState::default(),
             trades: CowState::default(),
             account: CowState::default(),
@@ -260,6 +266,7 @@ impl Default for EventDispatcher {
             queued_events: AppQueue::default(),
             order_book_events: Vec::new(),
             order_book_controls: Vec::new(),
+            report_controls: Vec::new(),
             market_history: None,
             owned_market_history: None,
             market_history_auto_enabled: true,
@@ -331,6 +338,29 @@ impl EventDispatcher {
     /// It is updated automatically when order-channel payloads are dispatched.
     pub(crate) fn orders(&self) -> &Orders {
         &self.orders
+    }
+
+    pub(crate) fn report_schema(&self) -> Option<&Arc<ReportSchema>> {
+        self.reports.schema()
+    }
+
+    pub(crate) fn defer_report_sync_until_schema(
+        &mut self,
+        ticket: ReportSyncTicket,
+        request: ReportSyncRequest,
+    ) {
+        self.reports.defer_sync_until_schema(ticket, request);
+    }
+
+    pub(crate) fn begin_report_sync(
+        &mut self,
+        ticket: ReportSyncTicket,
+        request: ReportSyncRequest,
+    ) {
+        let mut events = Vec::with_capacity(1);
+        self.reports.begin_sync(ticket, request, &mut events);
+        self.queued_events
+            .extend(events.into_iter().map(Event::Report));
     }
 
     /// Mutable order state for local Delphi-equivalent UI side effects.

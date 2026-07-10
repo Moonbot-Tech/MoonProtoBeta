@@ -345,6 +345,7 @@ Start here:
 - `docs/trades.md`
 - `docs/order_books.md`
 - `docs/orders.md`
+- `docs/reports.md`
 - `docs/candles.md`
 - `docs/engine_api.md`
 - `docs/strats.md`

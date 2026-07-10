@@ -80,6 +80,17 @@ pub(crate) enum ActiveAction {
     TradesResend {
         payload: Vec<u8>,
     },
+    ReportSync {
+        ticket: crate::state::ReportSyncTicket,
+        request: crate::state::ReportSyncRequest,
+    },
+    ReportSyncCompleted {
+        request_uid: u64,
+        server_token: u64,
+    },
+    ReportSyncProgress {
+        request_uid: u64,
+    },
 }
 
 impl EventDispatcher {
@@ -200,6 +211,22 @@ impl EventDispatcher {
         let start_len = out.len();
         self.dispatch_into_with_history(cmd, payload, now_ms, Some(ctx.now_time_days), out);
         self.sync_market_history_storage();
+        for control in self.report_controls.drain(..) {
+            match control {
+                crate::state::ReportControl::SendSync { ticket, request } => {
+                    actions.push(ActiveAction::ReportSync { ticket, request });
+                }
+                crate::state::ReportControl::SyncCompleted { request_uid } => {
+                    actions.push(ActiveAction::ReportSyncCompleted {
+                        request_uid,
+                        server_token: ctx.server_token,
+                    });
+                }
+                crate::state::ReportControl::SyncProgress { request_uid } => {
+                    actions.push(ActiveAction::ReportSyncProgress { request_uid });
+                }
+            }
+        }
         if self.force_markets_list_refresh
             || (self.markets.markets_list_refresh_needed()
                 && (self.last_markets_list_refresh_ms == 0

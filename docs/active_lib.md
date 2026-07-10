@@ -36,6 +36,10 @@ state.
   `Event::Account`.
 - Orders and order traces, including local stateful effects for move/cancel,
   stops, vstop, panic, immune, and snapshot cleanup.
+- Typed report-database replication: append-only schema, row upsert/delete,
+  verified catch-up completion, and automatic catch-up/resubscription after a
+  hard session change. The application owns its SQLite database and durable
+  cursor; see `reports.md`.
 - Strategy schema and strategy snapshots. Applications can provide local
   strategies before Init; the runtime answers server snapshot requests from its
   owned strategy state. If the request arrives before Init opens the domain
@@ -83,6 +87,8 @@ state.
   accepted core-owned set from `snapshot().chart_alerts()`.
 - Chart-text UI tells the core which chart is visible through
   `client.chart_text()` and reads ready rows from `snapshot().chart_text()`.
+- Report/database tools submit non-blocking catch-up intent through
+  `client.reports()` and apply `Event::Report` to their own durable store.
 
 Regular applications should start from `MoonClient`: it owns the protocol loop,
 event sink, and retained state.

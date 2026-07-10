@@ -111,7 +111,7 @@ fn handle_event(event: Event) {
         Event::Detect(detect_event) => handle_detect_fact(detect_event),
         Event::ChartAlert(alert_event) => handle_alert_object_state(alert_event),
         Event::ChartText(rows) => redraw_chart_text(rows),
-        Event::ClosedSellOrderReport(report) => sync_report_db(report.db_id, &report.sql),
+        Event::Report(report) => apply_typed_report_replication(report),
         Event::Settings(settings_event) => handle_settings_event(settings_event),
         Event::EngineAction(action) => handle_engine_action(action),
         Event::ServerLog(log) => append_server_log(log.time(), &log.msg),
@@ -182,6 +182,7 @@ pub enum Event {
     ChartAlert(ChartAlertEvent),
     ChartText(ChartTextSnapshot),
     ClosedSellOrderReport(ClosedSellOrderReportEvent),
+    Report(ReportEvent),
     Settings(SettingsEvent),
     Markets(MarketsEvent),
     EngineAction(EngineActionEvent),
@@ -214,12 +215,15 @@ currently requested chart-text market. Late snapshots for an older selected
 market are dropped. Read the latest rows from `snapshot().chart_text().get(...)`
 when repainting the selected chart.
 
-`ClosedSellOrderReportEvent` carries the exact expanded Orders SQL that the
-core wrote for a closed sell order report, plus the MoonBot Orders DB row id.
-Use `db_id` as the mirror/update key: later SQL for price changes, partial
-fills, or final execution updates the same DB record. This event is for external
-report/DB sync; it does not mutate the retained `Orders` model and is not a
-second order schema.
+`ClosedSellOrderReportEvent` is deprecated and remains only for compatibility
+with existing consumers of the core's expanded Orders SQL. It does not mutate
+the retained `Orders` model. New report databases should not consume it.
+
+`ReportEvent` is the typed, resumable report-database replication domain. It
+delivers the append-only schema, typed row upserts/deletes, and a verified
+completion with the reconciliation keep-set. See `reports.md` for cursor,
+transaction, retry, hard-reconnect, and legacy migration rules. Do not write the
+deprecated SQL stream and `ReportEvent` into the same replica.
 
 `ArbEvent` is only a change signal/summary. Incoming arb data is applied to the
 selected market state, so UI code reads

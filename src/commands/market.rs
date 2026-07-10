@@ -114,7 +114,7 @@ impl ExchangeCode {
     /// Use this when a terminal needs to group several MoonProto clients by the
     /// exchange/platform they are connected to, for example to choose one market
     /// data provider among several Binance Futures cores. This is intentionally
-    /// public while [`Self::to_byte`] remains diagnostics/protocol-facing.
+    /// public while `Self::to_byte` remains diagnostics/protocol-facing.
     pub const fn stable_id(self) -> u8 {
         self.0
     }

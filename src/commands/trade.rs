@@ -19,7 +19,7 @@
 use super::registry::{read_string, write_string, CURRENT_PROTO_CMD_VER};
 use std::convert::TryInto;
 
-mod builders;
+pub(crate) mod builders;
 pub use builders::TradeCtx;
 pub(crate) use builders::{
     build_all_statuses_request, build_do_close_position, build_do_limit_close_position,

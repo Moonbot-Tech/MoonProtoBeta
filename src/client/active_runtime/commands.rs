@@ -48,6 +48,11 @@ pub(super) enum RuntimeCommand {
     StrategyStartStop {
         is_start: bool,
     },
+    ReportSchemaRefresh,
+    ReportSync {
+        ticket: crate::state::ReportSyncTicket,
+        request: crate::state::ReportSyncRequest,
+    },
     #[cfg(any(test, feature = "diagnostics"))]
     DebugOutgoingBlackhole(bool),
     #[cfg(any(test, feature = "diagnostics"))]
@@ -207,12 +212,14 @@ impl RuntimeCommand {
             Self::StrategySetChecked { .. } => (51, 1),
             Self::StrategySendCheckedDelta => (52, 0),
             Self::StrategyStartStop { .. } => (53, 0),
+            Self::ReportSchemaRefresh => (54, 0),
+            Self::ReportSync { .. } => (55, 1),
             #[cfg(any(test, feature = "diagnostics"))]
-            Self::DebugOutgoingBlackhole(_) => (54, 0),
+            Self::DebugOutgoingBlackhole(_) => (56, 0),
             #[cfg(any(test, feature = "diagnostics"))]
-            Self::DebugResetErrEmuDiagnostics => (55, 0),
+            Self::DebugResetErrEmuDiagnostics => (57, 0),
             #[cfg(any(test, feature = "diagnostics"))]
-            Self::DiagFillMarketHistoryToCapacity { .. } => (56, 1),
+            Self::DiagFillMarketHistoryToCapacity { .. } => (58, 1),
             Self::OrderAction(kind) => kind.profile_source(),
             Self::TradeAction(kind) => kind.profile_source(),
         }

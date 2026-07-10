@@ -55,6 +55,18 @@ impl Client {
                 crate::events::ActiveAction::TradesResend { payload } => {
                     self.send_api_request(&payload);
                 }
+                crate::events::ActiveAction::ReportSync { ticket, request } => {
+                    self.send_report_sync_at(ticket, request, self.now_ms());
+                }
+                crate::events::ActiveAction::ReportSyncCompleted {
+                    request_uid,
+                    server_token,
+                } => {
+                    self.complete_report_sync(request_uid, server_token);
+                }
+                crate::events::ActiveAction::ReportSyncProgress { request_uid } => {
+                    self.record_report_sync_progress(request_uid, self.now_ms());
+                }
             }
         }
     }

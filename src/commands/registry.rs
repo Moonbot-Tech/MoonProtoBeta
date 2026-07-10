@@ -506,6 +506,62 @@ pub(crate) const ORDER_COMMANDS: &[CommandDescriptor] = &[
         priority = Sliced,
         direction = Inbound
     ),
+    cmd_desc!(
+        Command::Order,
+        32,
+        "TRepRowUpsert",
+        base = Base,
+        priority = Sliced,
+        direction = Inbound
+    ),
+    cmd_desc!(
+        Command::Order,
+        33,
+        "TRepRowDelete",
+        base = Base,
+        priority = High,
+        direction = Inbound
+    ),
+    cmd_desc!(
+        Command::Order,
+        34,
+        "TRepSyncRequest",
+        base = Base,
+        priority = High,
+        direction = Outbound
+    ),
+    cmd_desc!(
+        Command::Order,
+        35,
+        "TRepSyncBatch",
+        base = Base,
+        priority = Sliced,
+        direction = Inbound
+    ),
+    cmd_desc!(
+        Command::Order,
+        36,
+        "TRepSyncDone",
+        base = Base,
+        priority = High,
+        direction = Inbound
+    ),
+    cmd_desc!(
+        Command::Order,
+        37,
+        "TRepSchemaRequest",
+        base = Base,
+        priority = High,
+        direction = Outbound
+    ),
+    cmd_desc!(
+        Command::Order,
+        38,
+        "TRepSchema",
+        base = Base,
+        priority = Sliced,
+        direction = Inbound
+    ),
 ];
 
 pub(crate) const UI_COMMANDS: &[CommandDescriptor] = &[
@@ -1028,7 +1084,7 @@ mod tests {
 
     #[test]
     fn descriptor_map_covers_known_typed_domains() {
-        assert_eq!(ORDER_COMMANDS.len(), 32);
+        assert_eq!(ORDER_COMMANDS.len(), 39);
         assert_eq!(UI_COMMANDS.len(), 26);
         assert_eq!(STRAT_COMMANDS.len(), 11);
         assert_eq!(BALANCE_COMMANDS.len(), 7);
@@ -1048,6 +1104,29 @@ mod tests {
         let balance_refresh = find_descriptor(Command::Balance, 5).unwrap();
         assert_eq!(balance_refresh.priority, CommandPriority::High);
         assert_eq!(balance_refresh.max_retries, 3);
+    }
+
+    #[test]
+    fn report_descriptors_match_delphi_metadata() {
+        let expected = [
+            (32, CommandPriority::Sliced, CommandDirection::Inbound),
+            (33, CommandPriority::High, CommandDirection::Inbound),
+            (34, CommandPriority::High, CommandDirection::Outbound),
+            (35, CommandPriority::Sliced, CommandDirection::Inbound),
+            (36, CommandPriority::High, CommandDirection::Inbound),
+            (37, CommandPriority::High, CommandDirection::Outbound),
+            (38, CommandPriority::Sliced, CommandDirection::Inbound),
+        ];
+        for (id, priority, direction) in expected {
+            let descriptor = find_descriptor(Command::Order, id).unwrap();
+            assert_eq!(descriptor.base, CommandBase::Base);
+            assert_eq!(descriptor.priority, priority);
+            assert_eq!(descriptor.max_retries, priority.default_retries());
+            assert!(descriptor.default_encrypted);
+            assert_eq!(descriptor.unique_kind, UK_NONE);
+            assert_eq!(descriptor.ukey, UKeyRule::None);
+            assert_eq!(descriptor.direction, direction);
+        }
     }
 
     #[test]

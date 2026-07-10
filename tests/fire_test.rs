@@ -61,7 +61,7 @@
 //! missing startup request/response is compared against the protocol retry
 //! budget instead of being dismissed as random loss.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
@@ -83,8 +83,9 @@ use moonproto::{
     parse_key_info, ClientConfig, ClientSettingsCommand, ConnectConfig, DeepHistoryKind,
     EngineMethod, EngineResponse, ExchangeKind, ExchangeOrder, FieldValue, ImportedKeys,
     InitConfig, InitialStrategies, LifecycleEvent, MoonClient, MoonShotStrategy, MoonStateSnapshot,
-    MoonTime, OrderWorkerStatus, ProfitStateCommand, ProtocolMetricsSnapshot,
-    StrategyDynamicPicklist, StrategyFieldLayout, StrategyFieldUiKind, StrategyFields,
+    MoonTime, OrderWorkerStatus, ProfitStateCommand, ProtocolMetricsSnapshot, ReportEvent,
+    ReportHistoryDepth, ReportRow, ReportSchema, ReportSyncComplete, ReportSyncRequest,
+    ReportValue, StrategyDynamicPicklist, StrategyFieldLayout, StrategyFieldUiKind, StrategyFields,
     StrategyKind, StrategySchema, StrategySnapshot, TradesStreamMode, TransportMode,
 };
 
@@ -123,6 +124,9 @@ const ACTIVE_LIB_REPORT_MARKETS: [&str; 2] = ["BTCUSDT", "ETHUSDT"];
 const FIRETEST_COIN_CARD_KIND: DeepHistoryKind = DeepHistoryKind::Hour4;
 const FIRETEST_MIN_COIN_CARD_CANDLES: usize = 24;
 const FIRETEST_RETAINED_CANDLE_MAX_AGE_SECS: f64 = 11.0 * 60.0;
+const FIRETEST_REPORT_SYNC_TIMEOUT: Duration = Duration::from_secs(180);
+const FIRETEST_REPORT_TABLE: &str = "Orders";
+const FIRETEST_REPORT_PARTIAL_FIELDS: usize = 4;
 
 static FIRETEST_LIVE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -723,6 +727,15 @@ struct Session {
     latest_snapshot: Option<Arc<MoonStateSnapshot>>,
     stats: Arc<Mutex<SessionStats>>,
     parse_failure_correlations_logged: usize,
+    report_events: Vec<ReportEvent>,
+}
+
+#[derive(Clone, Debug)]
+struct FireTestClosedOrderProbe {
+    server_uid: u64,
+    market: String,
+    buy_price: f64,
+    bought_q: f64,
 }
 
 impl Session {
@@ -773,6 +786,7 @@ impl Session {
             latest_snapshot: None,
             stats,
             parse_failure_correlations_logged: 0,
+            report_events: Vec::new(),
         };
         assert!(
             pump_session_until(&mut session, cfg.connect_timeout, "connect ready", |s| {
@@ -810,8 +824,15 @@ impl Session {
         let mut events = Vec::new();
         self.client.drain_events_into(&mut events);
         for event in events {
+            if let Event::Report(report) = &event {
+                self.report_events.push(report.clone());
+            }
             record_event(&self.stats, &event, snapshot.as_deref(), None);
         }
+    }
+
+    fn take_report_events(&mut self) -> Vec<ReportEvent> {
+        std::mem::take(&mut self.report_events)
     }
 
     fn record_lifecycle_event(&self, event: LifecycleEvent) {
@@ -2947,6 +2968,41 @@ fn record_event(
         }
         Event::OrderBook(other) => {
             log_server_event(&st, event_no, format!("OrderBook {other:?}"));
+        }
+        Event::Report(report) => {
+            let summary = match report {
+                ReportEvent::Schema(schema) => format!(
+                    "Report Schema format={} fields={}",
+                    schema.format_version(),
+                    schema.revision()
+                ),
+                ReportEvent::RowUpsert(row) => format!(
+                    "Report RowUpsert rec_id={} fields={}",
+                    row.rec_id,
+                    row.fields.len()
+                ),
+                ReportEvent::RowDelete { rec_id } => {
+                    format!("Report RowDelete rec_id={rec_id}")
+                }
+                ReportEvent::SyncStarted { ticket, request } => format!(
+                    "Report SyncStarted uid={} from={} depth={}",
+                    ticket.request_uid, request.from_rec_id, request.history_depth
+                ),
+                ReportEvent::SyncComplete(done) => format!(
+                    "Report SyncComplete uid={} from={} batches={} rows={} max_rec_id={} keep={} recreated={}",
+                    done.request_uid,
+                    done.from_rec_id,
+                    done.batch_count,
+                    done.total_rows,
+                    done.max_rec_id,
+                    done.keep_rec_ids.len(),
+                    done.database_recreated
+                ),
+                ReportEvent::SchemaRejected { reason } => {
+                    format!("Report SchemaRejected reason={reason}")
+                }
+            };
+            log_server_event(&st, event_no, summary);
         }
         Event::EngineResponse(resp) => {
             record_engine_response(&mut st, event_no, resp, candles_snapshot_tx);
@@ -5428,10 +5484,568 @@ fn assert_balance_stream_seen(session: &Session) {
     );
 }
 
+fn firetest_report_db_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("firetest_report_replica.sqlite")
+}
+
+fn remove_firetest_report_db(path: &std::path::Path) {
+    for candidate in [
+        path.to_path_buf(),
+        PathBuf::from(format!("{}-wal", path.display())),
+        PathBuf::from(format!("{}-shm", path.display())),
+    ] {
+        match fs::remove_file(&candidate) {
+            Ok(()) => println!("FIRETEST report DB: removed {}", candidate.display()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => panic!(
+                "FireTest report DB: cannot remove {}: {err}",
+                candidate.display()
+            ),
+        }
+    }
+}
+
+fn quote_sqlite_identifier(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
+}
+
+fn sqlite_table_columns(connection: &rusqlite::Connection, table: &str) -> Vec<(String, String)> {
+    let sql = format!("PRAGMA table_info({})", quote_sqlite_identifier(table));
+    let mut statement = connection
+        .prepare(&sql)
+        .unwrap_or_else(|err| panic!("FireTest report DB: prepare {sql:?} failed: {err}"));
+    statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        })
+        .unwrap_or_else(|err| panic!("FireTest report DB: query {sql:?} failed: {err}"))
+        .map(|row| row.expect("FireTest report DB: table_info row must decode"))
+        .collect()
+}
+
+fn assert_report_table_matches_schema(
+    connection: &rusqlite::Connection,
+    schema: &ReportSchema,
+    require_wire_order: bool,
+) {
+    let columns = sqlite_table_columns(connection, FIRETEST_REPORT_TABLE);
+    let expected_names = schema
+        .fields()
+        .iter()
+        .map(|field| field.name.clone())
+        .collect::<Vec<_>>();
+    let actual_names = columns
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    if require_wire_order {
+        assert_eq!(
+            actual_names, expected_names,
+            "fresh report DB columns must preserve schema order"
+        );
+    } else {
+        assert_eq!(actual_names.len(), expected_names.len());
+        assert_eq!(
+            actual_names.iter().cloned().collect::<HashSet<_>>(),
+            expected_names.iter().cloned().collect::<HashSet<_>>(),
+            "migrated report DB must contain every schema field"
+        );
+    }
+    for field in schema.fields() {
+        let (_, declared_type) = columns
+            .iter()
+            .find(|(name, _)| name == &field.name)
+            .expect("schema field must exist in SQLite table_info");
+        let expected_type = field.sql_spec.split_whitespace().next().unwrap_or("");
+        assert!(
+            declared_type.eq_ignore_ascii_case(expected_type),
+            "SQLite type mismatch for {}: actual={declared_type:?} expected={expected_type:?}",
+            field.name
+        );
+    }
+}
+
+fn create_and_migrate_firetest_report_db(
+    path: &std::path::Path,
+    schema: &ReportSchema,
+) -> rusqlite::Connection {
+    remove_firetest_report_db(path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap_or_else(|err| {
+            panic!(
+                "FireTest report DB: cannot create {}: {err}",
+                parent.display()
+            )
+        });
+    }
+
+    {
+        let connection = rusqlite::Connection::open(path)
+            .unwrap_or_else(|err| panic!("FireTest report DB: full create open failed: {err}"));
+        let ddl = schema.sqlite_create_table_sql(FIRETEST_REPORT_TABLE);
+        connection
+            .execute_batch(&ddl)
+            .unwrap_or_else(|err| panic!("FireTest report DB: full schema create failed: {err}"));
+        assert_report_table_matches_schema(&connection, schema, true);
+        println!(
+            "OK: report DB full create fields={} path={}",
+            schema.revision(),
+            path.display()
+        );
+    }
+
+    remove_firetest_report_db(path);
+    let connection = rusqlite::Connection::open(path)
+        .unwrap_or_else(|err| panic!("FireTest report DB: partial create open failed: {err}"));
+    let rec_id = schema
+        .field_by_name("newRecID")
+        .expect("report schema must contain newRecID");
+    let mut initial_fields = schema
+        .fields()
+        .iter()
+        .filter(|field| field.index != rec_id.index)
+        .take(FIRETEST_REPORT_PARTIAL_FIELDS)
+        .collect::<Vec<_>>();
+    initial_fields.push(rec_id);
+    initial_fields.sort_by_key(|field| field.index);
+
+    let mut definitions = initial_fields
+        .iter()
+        .map(|field| {
+            format!(
+                "{} {}",
+                quote_sqlite_identifier(&field.name),
+                field.sql_spec
+            )
+        })
+        .collect::<Vec<_>>();
+    definitions.push(format!(
+        "PRIMARY KEY ({})",
+        quote_sqlite_identifier(&rec_id.name)
+    ));
+    let partial_ddl = format!(
+        "CREATE TABLE {} ({})",
+        quote_sqlite_identifier(FIRETEST_REPORT_TABLE),
+        definitions.join(", ")
+    );
+    connection
+        .execute_batch(&partial_ddl)
+        .unwrap_or_else(|err| panic!("FireTest report DB: partial schema create failed: {err}"));
+
+    let mut existing = sqlite_table_columns(&connection, FIRETEST_REPORT_TABLE)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect::<HashSet<_>>();
+    let initial_count = existing.len();
+    for field in schema.fields() {
+        if existing.insert(field.name.clone()) {
+            connection
+                .execute_batch(&schema.sqlite_add_column_sql(FIRETEST_REPORT_TABLE, field))
+                .unwrap_or_else(|err| {
+                    panic!(
+                        "FireTest report DB: append field {} failed: {err}",
+                        field.name
+                    )
+                });
+        }
+    }
+    connection
+        .execute_batch(&schema.sqlite_unique_index_sql(FIRETEST_REPORT_TABLE))
+        .unwrap_or_else(|err| panic!("FireTest report DB: unique index create failed: {err}"));
+    assert_report_table_matches_schema(&connection, schema, false);
+    println!(
+        "OK: report DB append-only migration initial_fields={} appended={} final_fields={}",
+        initial_count,
+        schema.revision().saturating_sub(initial_count),
+        schema.revision()
+    );
+    connection
+}
+
+fn wait_report_schema(session: &mut Session, timeout: Duration) -> Arc<ReportSchema> {
+    if let Some(schema) = session.state_snapshot().report_schema() {
+        return Arc::new(schema.clone());
+    }
+    session
+        .client
+        .reports()
+        .refresh_schema()
+        .expect("MoonReports::refresh_schema must queue");
+    let started = Instant::now();
+    while started.elapsed() < timeout {
+        session.pump(PUMP_SLICE);
+        if let Some(schema) = session.state_snapshot().report_schema() {
+            let schema = Arc::new(schema.clone());
+            println!(
+                "OK: report schema received fields={} format={}",
+                schema.revision(),
+                schema.format_version()
+            );
+            session.take_report_events();
+            return schema;
+        }
+    }
+    panic!("report schema was not received within {timeout:?}")
+}
+
+fn wait_report_sync<F>(
+    session: &mut Session,
+    request: ReportSyncRequest,
+    timeout: Duration,
+    mut on_event: F,
+) -> ReportSyncComplete
+where
+    F: FnMut(&ReportEvent),
+{
+    session.take_report_events();
+    let ticket = session
+        .client
+        .reports()
+        .sync(request)
+        .expect("MoonReports::sync must queue");
+    let started = Instant::now();
+    while started.elapsed() < timeout {
+        session.pump(PUMP_SLICE);
+        let mut completed = None;
+        for event in session.take_report_events() {
+            on_event(&event);
+            match event {
+                ReportEvent::SyncComplete(done) if done.request_uid == ticket.request_uid => {
+                    completed = Some(done);
+                }
+                ReportEvent::SchemaRejected { ref reason } => {
+                    panic!("report schema rejected during sync: {reason}")
+                }
+                _ => {}
+            }
+        }
+        if let Some(done) = completed {
+            println!(
+                "OK: report sync uid={} from={} batches={} rows={} max_rec_id={} recreated={} elapsed={:.2}s",
+                done.request_uid,
+                done.from_rec_id,
+                done.batch_count,
+                done.total_rows,
+                done.max_rec_id,
+                done.database_recreated,
+                started.elapsed().as_secs_f64()
+            );
+            return done;
+        }
+    }
+    panic!(
+        "report sync uid={} from={} did not complete within {:?}",
+        ticket.request_uid, request.from_rec_id, timeout
+    )
+}
+
+fn sqlite_value(value: &ReportValue) -> rusqlite::types::Value {
+    match value {
+        ReportValue::Integer(value) => rusqlite::types::Value::Integer(*value),
+        ReportValue::Float(value) => rusqlite::types::Value::Real(*value),
+        ReportValue::Text(value) => rusqlite::types::Value::Text(value.clone()),
+    }
+}
+
+fn apply_report_row_to_db(
+    connection: &rusqlite::Connection,
+    schema: &ReportSchema,
+    row: &ReportRow,
+) {
+    let rec_id_index = schema.rec_id_field_index();
+    let mut columns = vec!["newRecID".to_string()];
+    let mut values = vec![rusqlite::types::Value::Integer(row.rec_id)];
+    for field_value in &row.fields {
+        if field_value.field_index == rec_id_index {
+            continue;
+        }
+        let Some(field) = schema.field(field_value.field_index) else {
+            continue;
+        };
+        columns.push(field.name.clone());
+        values.push(sqlite_value(&field_value.value));
+    }
+
+    let quoted_columns = columns
+        .iter()
+        .map(|column| quote_sqlite_identifier(column))
+        .collect::<Vec<_>>();
+    let placeholders = vec!["?"; columns.len()].join(", ");
+    let updates = columns
+        .iter()
+        .skip(1)
+        .map(|column| {
+            let column = quote_sqlite_identifier(column);
+            format!("{column}=excluded.{column}")
+        })
+        .collect::<Vec<_>>();
+    let conflict = if updates.is_empty() {
+        "DO NOTHING".to_string()
+    } else {
+        format!("DO UPDATE SET {}", updates.join(", "))
+    };
+    let sql = format!(
+        "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ({}) {}",
+        quote_sqlite_identifier(FIRETEST_REPORT_TABLE),
+        quoted_columns.join(", "),
+        placeholders,
+        quote_sqlite_identifier("newRecID"),
+        conflict
+    );
+    connection
+        .execute(&sql, rusqlite::params_from_iter(values))
+        .unwrap_or_else(|err| {
+            panic!(
+                "FireTest report DB: upsert rec_id={} failed: {err}; sql={sql}",
+                row.rec_id
+            )
+        });
+}
+
+fn apply_report_event_to_db(
+    connection: &rusqlite::Connection,
+    schema: &ReportSchema,
+    event: &ReportEvent,
+) {
+    match event {
+        ReportEvent::RowUpsert(row) => apply_report_row_to_db(connection, schema, row),
+        ReportEvent::RowDelete { rec_id } => {
+            connection
+                .execute(
+                    &format!(
+                        "DELETE FROM {} WHERE {}=?",
+                        quote_sqlite_identifier(FIRETEST_REPORT_TABLE),
+                        quote_sqlite_identifier("newRecID")
+                    ),
+                    [rec_id],
+                )
+                .unwrap_or_else(|err| {
+                    panic!("FireTest report DB: delete rec_id={rec_id} failed: {err}")
+                });
+        }
+        _ => {}
+    }
+}
+
+fn reconcile_report_db(connection: &rusqlite::Connection, complete: &ReportSyncComplete) {
+    let keep = complete
+        .keep_rec_ids
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    let sql = format!(
+        "SELECT {} FROM {} WHERE {}>=?",
+        quote_sqlite_identifier("newRecID"),
+        quote_sqlite_identifier(FIRETEST_REPORT_TABLE),
+        quote_sqlite_identifier("newRecID")
+    );
+    let mut statement = connection
+        .prepare(&sql)
+        .unwrap_or_else(|err| panic!("FireTest report DB: reconcile select failed: {err}"));
+    let existing = statement
+        .query_map([complete.from_rec_id], |row| row.get::<_, i64>(0))
+        .unwrap_or_else(|err| panic!("FireTest report DB: reconcile query failed: {err}"))
+        .map(|row| row.expect("FireTest report DB: reconcile rec_id must decode"))
+        .collect::<Vec<_>>();
+    drop(statement);
+    for rec_id in existing {
+        if !keep.contains(&rec_id) {
+            connection
+                .execute(
+                    &format!(
+                        "DELETE FROM {} WHERE {}=?",
+                        quote_sqlite_identifier(FIRETEST_REPORT_TABLE),
+                        quote_sqlite_identifier("newRecID")
+                    ),
+                    [rec_id],
+                )
+                .unwrap_or_else(|err| {
+                    panic!("FireTest report DB: reconcile delete rec_id={rec_id} failed: {err}")
+                });
+        }
+    }
+}
+
+fn run_report_database_gate(cfg: &FireConfig, keys: ImportedKeys, pump_peer: &mut Session) {
+    println!("FIRETEST report DB: starting schema/migration/offline catch-up gate");
+    let seeded_strategy = firetest_strategy(cfg);
+    let mut report_a = Session::connect("ReportDB-A", cfg, keys, Some(seeded_strategy.clone()));
+    let schema = wait_report_schema(&mut report_a, cfg.connect_timeout);
+    for required in ["newRecID", "TaskID", "Status", "Emulator"] {
+        assert!(
+            schema.field_by_name(required).is_some(),
+            "report schema must contain {required} for FireTest DB verification"
+        );
+    }
+    let db_path = firetest_report_db_path();
+    let connection = create_and_migrate_firetest_report_db(&db_path, &schema);
+
+    let baseline = wait_report_sync(
+        &mut report_a,
+        ReportSyncRequest::fresh(ReportHistoryDepth::Days(1)),
+        FIRETEST_REPORT_SYNC_TIMEOUT,
+        |_| {},
+    );
+    assert!(
+        !baseline.database_recreated,
+        "fresh report sync cannot report a recreated database"
+    );
+    let offline_from_rec_id = baseline.max_rec_id.saturating_add(1).max(1);
+    report_a.take_report_events();
+
+    let restore_emu_mode = ensure_server_emulator_mode(cfg, &mut report_a, pump_peer);
+    let order_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_order_lifecycle_gate_body(cfg, &mut report_a, pump_peer)
+    }));
+    restore_server_emulator_mode(cfg, &mut report_a, pump_peer, restore_emu_mode);
+    let order_probe = match order_result {
+        Ok(probe) => probe,
+        Err(payload) => std::panic::resume_unwind(payload),
+    };
+    let expected_coin = order_probe
+        .market
+        .strip_suffix("USDT")
+        .unwrap_or(&order_probe.market);
+
+    let live_started = Instant::now();
+    let mut closed_row = None;
+    while live_started.elapsed() < cfg.connect_timeout {
+        report_a.pump(PUMP_SLICE);
+        pump_peer.pump(PUMP_SLICE);
+        for event in report_a.take_report_events() {
+            if let ReportEvent::RowUpsert(row) = event {
+                let task_id = row.integer_by_name(&schema, "TaskID");
+                let status = row.integer_by_name(&schema, "Status");
+                let emulator = row.integer_by_name(&schema, "Emulator");
+                let coin = row.text_by_name(&schema, "Coin");
+                let buy_price = row.float_by_name(&schema, "BuyPrice");
+                let bought_q = row.float_by_name(&schema, "BoughtQ");
+                println!(
+                    "FIRETEST report live candidate rec_id={} task_id={:?} coin={:?} status={:?} emulator={:?} buy_price={:?} bought_q={:?}",
+                    row.rec_id, task_id, coin, status, emulator, buy_price, bought_q
+                );
+                let price_matches = buy_price.is_some_and(|value| {
+                    (value - order_probe.buy_price).abs()
+                        <= order_probe.buy_price.abs().max(1.0) * 1e-9
+                });
+                let quantity_matches = bought_q.is_some_and(|value| {
+                    (value - order_probe.bought_q).abs()
+                        <= order_probe.bought_q.abs().max(1.0) * 1e-9
+                });
+                if row.rec_id >= offline_from_rec_id
+                    && status == Some(1)
+                    && row.integer_by_name(&schema, "Emulator") == Some(1)
+                    && coin == Some(expected_coin)
+                    && price_matches
+                    && quantity_matches
+                {
+                    closed_row = Some(row);
+                }
+            }
+        }
+        if closed_row.is_some() {
+            break;
+        }
+    }
+    let closed_row = closed_row.unwrap_or_else(|| {
+        panic!(
+            "ReportDB-A did not receive the closed emulator deal {:?} within {:?}",
+            order_probe, cfg.connect_timeout
+        )
+    });
+    let report_task_id = closed_row
+        .integer_by_name(&schema, "TaskID")
+        .expect("matched report row must contain TaskID");
+    assert!(
+        closed_row.rec_id >= offline_from_rec_id,
+        "closed deal rec_id={} must be newer than committed offline cursor {}",
+        closed_row.rec_id,
+        offline_from_rec_id
+    );
+    println!(
+        "OK: ReportDB-A live closed deal moonproto_uid={} report_task_id={} rec_id={} status=1 emulator=1 buy_price={:.8} bought_q={:.8}",
+        order_probe.server_uid,
+        report_task_id,
+        closed_row.rec_id,
+        order_probe.buy_price,
+        order_probe.bought_q
+    );
+
+    let mut report_b = Session::connect("ReportDB-B", cfg, keys, Some(seeded_strategy));
+    let b_schema = Arc::new(
+        report_b
+            .state_snapshot()
+            .report_schema()
+            .cloned()
+            .unwrap_or_else(|| schema.as_ref().clone()),
+    );
+    let complete = wait_report_sync(
+        &mut report_b,
+        ReportSyncRequest::resume(offline_from_rec_id),
+        FIRETEST_REPORT_SYNC_TIMEOUT,
+        |event| {
+            if let ReportEvent::Schema(received) = event {
+                assert_eq!(
+                    received.fields(),
+                    schema.fields(),
+                    "ReportDB-B schema must match ReportDB-A schema"
+                );
+            }
+            apply_report_event_to_db(&connection, &b_schema, event);
+        },
+    );
+    assert!(
+        !complete.database_recreated,
+        "server report DB unexpectedly moved behind the committed FireTest cursor"
+    );
+    reconcile_report_db(&connection, &complete);
+
+    let sql = format!(
+        "SELECT {}, {}, {}, {}, {} FROM {} WHERE {}=?",
+        quote_sqlite_identifier("TaskID"),
+        quote_sqlite_identifier("Status"),
+        quote_sqlite_identifier("Emulator"),
+        quote_sqlite_identifier("BuyPrice"),
+        quote_sqlite_identifier("BoughtQ"),
+        quote_sqlite_identifier(FIRETEST_REPORT_TABLE),
+        quote_sqlite_identifier("newRecID")
+    );
+    let stored = connection
+        .query_row(&sql, [closed_row.rec_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, f64>(3)?,
+                row.get::<_, f64>(4)?,
+            ))
+        })
+        .unwrap_or_else(|err| {
+            panic!(
+                "ReportDB-B offline sync did not persist rec_id={}: {err}",
+                closed_row.rec_id
+            )
+        });
+    assert_eq!((stored.0, stored.1, stored.2), (report_task_id, 1, 1));
+    assert!(
+        (stored.3 - order_probe.buy_price).abs() <= order_probe.buy_price.abs().max(1.0) * 1e-9
+    );
+    assert!((stored.4 - order_probe.bought_q).abs() <= order_probe.bought_q.abs().max(1.0) * 1e-9);
+    println!(
+        "OK: ReportDB-B offline catch-up persisted report_task_id={} rec_id={} from_cursor={} path={}",
+        report_task_id,
+        closed_row.rec_id,
+        offline_from_rec_id,
+        db_path.display()
+    );
+}
+
 fn run_order_lifecycle_gate(cfg: &FireConfig, a: &mut Session, b: &mut Session) {
     let restore_emu_mode = ensure_server_emulator_mode(cfg, a, b);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        run_order_lifecycle_gate_body(cfg, a, b);
+        let _ = run_order_lifecycle_gate_body(cfg, a, b);
     }));
     restore_server_emulator_mode(cfg, a, b, restore_emu_mode);
     if let Err(payload) = result {
@@ -6161,7 +6775,11 @@ fn wait_order_replace_local_effect(
     ))
 }
 
-fn run_order_lifecycle_gate_body(cfg: &FireConfig, a: &mut Session, b: &mut Session) {
+fn run_order_lifecycle_gate_body(
+    cfg: &FireConfig,
+    a: &mut Session,
+    b: &mut Session,
+) -> FireTestClosedOrderProbe {
     let before_uids = a
         .state_snapshot()
         .orders()
@@ -6196,13 +6814,8 @@ fn run_order_lifecycle_gate_body(cfg: &FireConfig, a: &mut Session, b: &mut Sess
             |a, _| {
                 let st = a.snapshot();
                 st.order_uid_by_request.contains_key(&request_uid)
-                    || st.order_status_by_uid.iter().any(|(uid, _)| {
-                        !before_uids.contains(uid)
-                            && st
-                                .order_market_by_uid
-                                .get(uid)
-                                .map(|market| market == &cfg.market)
-                                .unwrap_or(false)
+                    || a.state_snapshot().orders().iter().any(|order| {
+                        !before_uids.contains(&order.uid) && order.market_name == cfg.market
                     })
             }
         ),
@@ -6215,14 +6828,9 @@ fn run_order_lifecycle_gate_body(cfg: &FireConfig, a: &mut Session, b: &mut Sess
         .get(&request_uid)
         .copied()
         .or_else(|| {
-            st.order_status_by_uid.iter().find_map(|(uid, _)| {
-                (!before_uids.contains(uid)
-                    && st
-                        .order_market_by_uid
-                        .get(uid)
-                        .map(|market| market == &cfg.market)
-                        .unwrap_or(false))
-                .then_some(*uid)
+            a.state_snapshot().orders().iter().find_map(|order| {
+                (!before_uids.contains(&order.uid) && order.market_name == cfg.market)
+                    .then_some(order.uid)
             })
         })
         .expect("order server uid must be known after gate");
@@ -6284,6 +6892,23 @@ fn run_order_lifecycle_gate_body(cfg: &FireConfig, a: &mut Session, b: &mut Sess
         describe_session_order(a, server_uid)
     );
 
+    let filled_order = a
+        .state_snapshot()
+        .orders()
+        .get(server_uid)
+        .cloned()
+        .expect("SellSet order must still be retained before PanicSell");
+    let closed_probe = FireTestClosedOrderProbe {
+        server_uid,
+        market: cfg.market.clone(),
+        buy_price: filled_order.buy_order.mean_price,
+        bought_q: filled_order.buy_order.actual_q,
+    };
+    assert!(
+        closed_probe.buy_price > 0.0 && closed_probe.bought_q > 0.0,
+        "filled order probe must contain canonical buy price and quantity: {closed_probe:?}"
+    );
+
     assert!(
         a.panic_sell_order(server_uid, true),
         "panic sell did not pass Delphi local gate for uid={server_uid}"
@@ -6331,6 +6956,7 @@ fn run_order_lifecycle_gate_body(cfg: &FireConfig, a: &mut Session, b: &mut Sess
             server_uid
         );
     }
+    closed_probe
 }
 
 fn delphi_sell_report_delta_base(
@@ -6460,6 +7086,24 @@ fn fire_test_strategy_runtime_state_delivery_stats() {
         total_delivered,
         firetest_percent(total_dropped, total_valid)
     );
+}
+
+#[test]
+#[ignore = "live MoonBot server required; mutates emulator settings and report DB"]
+fn fire_test_report_database_replication() {
+    let _live_test_lock = firetest_live_test_lock();
+    let cfg = FireConfig::load_required();
+    assert!(
+        cfg.allow_mutation,
+        "Report DB FireTest mutates live server settings/orders"
+    );
+    let key_info = parse_key_info(&cfg.key_b64).expect("invalid MoonProto key in FireTest config");
+    let keys = key_info.keys;
+    let mut err_emu = ErrEmuGuard::set(0);
+    let mut pump_peer =
+        Session::connect("ReportDB-Peer", &cfg, keys, Some(firetest_strategy(&cfg)));
+    run_report_database_gate(&cfg, keys, &mut pump_peer);
+    err_emu.reset("report database replication gate");
 }
 
 #[test]
@@ -6618,6 +7262,7 @@ fn fire_test_active_library_health() {
         .debug_reset_err_emu_diagnostics()
         .expect("reset B err_emu diagnostics");
 
+    run_report_database_gate(&cfg, keys, &mut a);
     run_order_lifecycle_gate(&cfg, &mut a, &mut b);
     run_real_order_cancel_gate(&cfg, &mut a, &mut b);
     run_moonshot_strategy_gate(&cfg, &mut a, &mut b);

@@ -13,6 +13,7 @@ use crate::state::{MarketHandle, OrderBookKind, OrderBookReadGuard, TopOfBook};
 #[derive(Debug, Clone)]
 pub struct MoonStateSnapshot {
     orders: CowState<Orders>,
+    report_schema: Option<std::sync::Arc<crate::state::ReportSchema>>,
     order_books: CowState<OrderBooks>,
     account: CowState<AccountState>,
     balances: CowState<BalancesState>,
@@ -33,6 +34,11 @@ impl MoonStateSnapshot {
     /// Read-only order state, keyed by server order UID.
     pub fn orders(&self) -> &Orders {
         &self.orders
+    }
+
+    /// Last validated append-only report DB schema received from the core.
+    pub fn report_schema(&self) -> Option<&crate::state::ReportSchema> {
+        self.report_schema.as_deref()
     }
 
     /// Read-only orderbook state.
@@ -327,6 +333,7 @@ impl EventDispatcher {
     pub(crate) fn snapshot(&self) -> MoonStateSnapshot {
         MoonStateSnapshot {
             orders: self.orders.clone(),
+            report_schema: self.reports.schema().cloned(),
             order_books: self.order_books.clone(),
             account: self.account.clone(),
             balances: self.balances.clone(),

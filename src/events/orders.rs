@@ -24,6 +24,58 @@ impl EventDispatcher {
                     sql: report.sql,
                 }));
             }
+            Some(TradeCommand::ReportRowUpsert(report)) => {
+                let mut events = Vec::new();
+                if self
+                    .reports
+                    .apply_live_upsert(report.rec_id, &report.row, &mut events)
+                {
+                    out.extend(events.into_iter().map(Event::Report));
+                } else {
+                    Self::push_parse_failed(out, Command::Order, payload);
+                }
+            }
+            Some(TradeCommand::ReportRowDelete(report)) => {
+                let mut events = Vec::new();
+                if self.reports.apply_live_delete(report.rec_id, &mut events) {
+                    out.extend(events.into_iter().map(Event::Report));
+                } else {
+                    Self::push_parse_failed(out, Command::Order, payload);
+                }
+            }
+            Some(TradeCommand::ReportSyncBatch(report)) => {
+                let mut events = Vec::new();
+                if self
+                    .reports
+                    .apply_sync_batch(report, &mut events, &mut self.report_controls)
+                {
+                    out.extend(events.into_iter().map(Event::Report));
+                } else {
+                    Self::push_parse_failed(out, Command::Order, payload);
+                }
+            }
+            Some(TradeCommand::ReportSyncDone(report)) => {
+                let mut events = Vec::new();
+                if self
+                    .reports
+                    .apply_sync_done(report, &mut events, &mut self.report_controls)
+                {
+                    out.extend(events.into_iter().map(Event::Report));
+                } else {
+                    Self::push_parse_failed(out, Command::Order, payload);
+                }
+            }
+            Some(TradeCommand::ReportSchema(report)) => {
+                let mut events = Vec::new();
+                if self
+                    .reports
+                    .apply_schema(report, &mut events, &mut self.report_controls)
+                {
+                    out.extend(events.into_iter().map(Event::Report));
+                } else {
+                    Self::push_parse_failed(out, Command::Order, payload);
+                }
+            }
             Some(tc) => self.process_command_order(tc, now_ms, out),
             None => Self::push_parse_failed(out, Command::Order, payload),
         }

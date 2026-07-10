@@ -47,6 +47,45 @@ pub struct MoonOrders {
     pub(super) tx: mpsc::Sender<RuntimeCommand>,
 }
 
+/// Report database replication handle.
+///
+/// The handle only submits non-blocking intent. Typed schema/row/completion
+/// results arrive through [`crate::Event::Report`].
+#[derive(Clone)]
+pub struct MoonReports {
+    pub(super) tx: mpsc::Sender<RuntimeCommand>,
+}
+
+impl MoonReports {
+    /// Request the latest append-only report schema.
+    pub fn refresh_schema(&self) -> Result<(), MoonClientError> {
+        self.tx
+            .send(RuntimeCommand::ReportSchemaRefresh)
+            .map_err(|_| MoonClientError::RuntimeStopped)
+    }
+
+    /// Start or replace report catch-up intent and return immediately.
+    ///
+    /// The same committed cursor is replayed automatically after a hard
+    /// reconnect. Call this again only after the application has durably
+    /// advanced its local cursor.
+    pub fn sync(
+        &self,
+        request: crate::state::ReportSyncRequest,
+    ) -> Result<crate::state::ReportSyncTicket, MoonClientError> {
+        if !request.is_valid() {
+            return Err(MoonClientError::InvalidReportSyncRequest);
+        }
+        let ticket = crate::state::ReportSyncTicket {
+            request_uid: random_nonzero_u64(),
+        };
+        self.tx
+            .send(RuntimeCommand::ReportSync { ticket, request })
+            .map_err(|_| MoonClientError::RuntimeStopped)?;
+        Ok(ticket)
+    }
+}
+
 impl MoonOrders {
     /// Request a fresh order snapshot and return immediately.
     pub fn request_snapshot(&self) -> Result<(), MoonClientError> {

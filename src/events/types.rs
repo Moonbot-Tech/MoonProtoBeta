@@ -318,6 +318,10 @@ impl EngineActionEvent {
 /// need external DB/report sync receive the canonical SQL text and the MoonBot
 /// Orders DB row id. Use `db_id` as the stable mirror key: later SQL for price
 /// changes, partial fills, or final execution updates the same DB record.
+///
+/// This is a legacy compatibility path. New report databases should use
+/// [`crate::MoonClient::reports`] and [`Event::Report`] for typed, resumable
+/// replication.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClosedSellOrderReportEvent {
     /// MoonBot Orders database row id. This is not the order worker UID.
@@ -406,8 +410,12 @@ pub enum Event {
     CandlesSnapshot(crate::state::CandlesSnapshotEvent),
     /// Completion of a non-blocking user-facing Engine API action.
     EngineAction(EngineActionEvent),
-    /// Closed sell order report: exact expanded Orders SQL from the core.
+    /// Legacy closed-sell SQL compatibility stream.
+    ///
+    /// New report databases should use [`Event::Report`].
     ClosedSellOrderReport(ClosedSellOrderReportEvent),
+    /// Typed report-database replication stream.
+    Report(crate::state::ReportEvent),
     /// Compact arbitrage relay applied to retained market state.
     Arb(ArbEvent),
     /// Strat channel: snapshot/delete/sell-price update.

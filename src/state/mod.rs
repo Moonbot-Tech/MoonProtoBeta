@@ -26,6 +26,7 @@ pub(crate) mod history_worker;
 pub(crate) mod markets;
 pub(crate) mod order_books;
 pub(crate) mod orders;
+pub(crate) mod report;
 pub(crate) mod seq_ring;
 pub(crate) mod settings;
 pub(crate) mod strats;
@@ -73,6 +74,11 @@ pub(crate) use orders::ApplyResult;
 pub use orders::{
     MarketPositionProtection, Order, OrderEvent, OrderTraceChartPoint, OrderTraceLine, Orders,
     PositionProtectionSide, SellReason,
+};
+pub(crate) use report::{ReportControl, ReportReplicationState};
+pub use report::{
+    ReportEvent, ReportFieldKind, ReportFieldValue, ReportHistoryDepth, ReportRow, ReportSchema,
+    ReportSchemaField, ReportSyncComplete, ReportSyncRequest, ReportSyncTicket, ReportValue,
 };
 #[cfg(test)]
 pub(crate) use seq_ring::SeqRingWriter;

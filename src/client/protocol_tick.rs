@@ -86,6 +86,7 @@ impl ProtocolCore<'_> {
         // successful trades packets, like Delphi `ProcessTradesStream`.
         self.periodic_trades_reconnect_tick(cur_tm, mode);
         self.periodic_orderbook_reconnect_tick(cur_tm, mode);
+        self.periodic_report_replication_tick(cur_tm, mode);
         self.periodic_orders_tick(cur_tm, mode);
 
         self.transport_reconnect_tail_tick(cur_tm);
@@ -213,6 +214,72 @@ impl ProtocolCore<'_> {
         if self.client.tick_orderbook_reconnect_sequence(cur_tm) {
             mode.dispatcher.reset_orderbook_caches_keep_books();
         }
+    }
+
+    pub(crate) fn periodic_report_replication_tick(&mut self, cur_tm: i64, mode: &mut RunMode<'_>) {
+        if !matches!(self.client.auth_status, AuthStatus::AuthDone)
+            || !self.client.subscriptions.domain_ready
+            || self.client.server_token == 0
+        {
+            return;
+        }
+        let Some(request) = self.client.report_sync_intent() else {
+            return;
+        };
+
+        if mode.dispatcher.report_schema().is_none() {
+            if cur_tm.saturating_sub(
+                self.client
+                    .reconnect
+                    .last_report_schema_request_ms
+                    .load(Ordering::Relaxed),
+            ) < crate::client::domain_report::REPORT_RESPONSE_TIMEOUT_MS
+            {
+                return;
+            }
+            let ticket = Client::next_report_sync_ticket();
+            mode.dispatcher
+                .defer_report_sync_until_schema(ticket, request);
+            self.client.request_report_schema_at(cur_tm);
+            return;
+        }
+
+        let pending_uid = self
+            .client
+            .reconnect
+            .pending_report_sync_uid
+            .load(Ordering::Relaxed);
+        let pending_for_current_token = pending_uid != 0
+            && self
+                .client
+                .reconnect
+                .pending_report_server_token
+                .load(Ordering::Relaxed)
+                == self.client.server_token;
+        if pending_for_current_token
+            && cur_tm.saturating_sub(
+                self.client
+                    .reconnect
+                    .last_report_sync_request_ms
+                    .load(Ordering::Relaxed),
+            ) < crate::client::domain_report::REPORT_RESPONSE_TIMEOUT_MS
+        {
+            return;
+        }
+        if pending_uid == 0
+            && self
+                .client
+                .reconnect
+                .subscribed_report_server_token
+                .load(Ordering::Relaxed)
+                == self.client.server_token
+        {
+            return;
+        }
+
+        let ticket = Client::next_report_sync_ticket();
+        mode.dispatcher.begin_report_sync(ticket, request);
+        self.client.send_report_sync_at(ticket, request, cur_tm);
     }
 
     pub(crate) fn periodic_orders_tick(&mut self, cur_tm: i64, mode: &mut RunMode<'_>) {

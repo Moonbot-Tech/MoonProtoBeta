@@ -167,7 +167,7 @@ pub use client::{
     ConnectError, EngineActionTicket, InitConfig, InitError, InitialStrategies, LifecycleEvent,
     MoonAccount, MoonBalances, MoonCandles, MoonChartAlerts, MoonChartText, MoonClient,
     MoonClientError, MoonClientEvent, MoonClientSnapshot, MoonEmulator, MoonEventQueue,
-    MoonEventSink, MoonOrders, MoonSettings, MoonStrategies, MoonStreams, MoonTrade,
+    MoonEventSink, MoonOrders, MoonReports, MoonSettings, MoonStrategies, MoonStreams, MoonTrade,
     NewOrderParams, NewOrderTicket, OrderSide, OrderTarget, RefreshConfig, SellOrderParams,
     SplitOrderParams, TradeContextError, TradesStreamMode, TradesSubscription, TransportMode,
     VStopParams,
@@ -229,6 +229,10 @@ pub use state::{
     ChartAlertEvent, ChartAlertObject, ChartAlertsState, ChartTextSnapshot, ChartTextState,
     CoinCardCandlesEvent, CoinCardCandlesState, ExchangeKind, TransferAssetsEvent,
     TransferAssetsState,
+};
+pub use state::{
+    ReportEvent, ReportFieldKind, ReportFieldValue, ReportHistoryDepth, ReportRow, ReportSchema,
+    ReportSchemaField, ReportSyncComplete, ReportSyncRequest, ReportSyncTicket, ReportValue,
 };
 #[cfg(any(test, feature = "diagnostics"))]
 #[doc(hidden)]

@@ -19,7 +19,7 @@ use crate::commands::ui::SpotMarketKind;
 use commands::{RuntimeCommand, StratRuntimeCommand, UiRuntimeCommand};
 pub use handles::{
     MoonAccount, MoonBalances, MoonCandles, MoonChartAlerts, MoonChartText, MoonEmulator,
-    MoonOrders, MoonSettings, MoonStrategies, MoonStreams, MoonTrade, OrderTarget,
+    MoonOrders, MoonReports, MoonSettings, MoonStrategies, MoonStreams, MoonTrade, OrderTarget,
 };
 use runtime_loop::runtime_loop;
 pub use types::{
@@ -520,6 +520,13 @@ impl MoonClient {
     /// Unsubscribe from all trades and clear the reconnect registry intent.
     pub(crate) fn unsubscribe_all_trades(&self) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::UnsubscribeAllTrades)
+    }
+
+    /// Report DB schema/live/catch-up API.
+    pub fn reports(&self) -> MoonReports {
+        MoonReports {
+            tx: self.tx.clone(),
+        }
     }
 
     /// Set local retained-history delta policy.

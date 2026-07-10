@@ -48,6 +48,8 @@ pub struct ActiveSubscriptions {
     /// The current live TF-candles interval. The MoonBot core keeps this as a
     /// single chart-TF setting, so one session has one active TF for the batch.
     pub live_candles_kind: Option<DeepHistoryKind>,
+    /// Report DB catch-up intent maintained across hard reconnects.
+    pub report_replication: Option<crate::state::ReportSyncRequest>,
 }
 
 /// Subscription registry — what the app asked for, what the library must maintain across the session.
@@ -68,6 +70,7 @@ pub(crate) struct SubscriptionRegistry {
     pub mm_orders_sub: Option<bool>,
     pub candle_subs: HashSet<String>,
     pub candle_tf: Option<DeepHistoryKind>,
+    pub report_sync: Option<crate::state::ReportSyncRequest>,
 }
 
 impl SubscriptionRegistry {
@@ -83,6 +86,7 @@ impl SubscriptionRegistry {
             mm_orders: self.mm_orders_sub.unwrap_or(false),
             live_candles,
             live_candles_kind: self.candle_tf,
+            report_replication: self.report_sync,
         }
     }
 }
@@ -272,6 +276,18 @@ pub(crate) struct ReconnectRestore {
     /// `subscribed_book_server_token`.
     pub(crate) pending_orderbook_resubscribe_uid: Option<u64>,
 
+    /// ServerToken for which a complete report catch-up was verified.
+    pub(crate) subscribed_report_server_token: AtomicU64,
+    /// Last report schema request send time.
+    pub(crate) last_report_schema_request_ms: AtomicI64,
+    /// Last report catch-up request send time.
+    pub(crate) last_report_sync_request_ms: AtomicI64,
+    /// Current report request UID; completion advances the token watermark only
+    /// when this UID matches.
+    pub(crate) pending_report_sync_uid: AtomicU64,
+    /// ServerToken under which `pending_report_sync_uid` was sent.
+    pub(crate) pending_report_server_token: AtomicU64,
+
     /// Delayed `DoSubscribeAllTrades(false)` after Delphi `Sleep(100)` in
     /// `BMarketHistoryWorker.Execute` reconnect branch.
     ///
@@ -307,6 +323,11 @@ impl ReconnectRestore {
             last_orderbook_subscribe_request_ms,
             last_orderbook_subscribe_request_uid,
             pending_orderbook_resubscribe_uid: None,
+            subscribed_report_server_token: AtomicU64::new(0),
+            last_report_schema_request_ms: AtomicI64::new(super::constants::NEVER_TIME_MS),
+            last_report_sync_request_ms: AtomicI64::new(super::constants::NEVER_TIME_MS),
+            pending_report_sync_uid: AtomicU64::new(0),
+            pending_report_server_token: AtomicU64::new(0),
             pending_trades_unsubscribe: None,
             pending_trades_resubscribe_after_ms: None,
             last_trades_tick_ms: i64::MIN / 2,

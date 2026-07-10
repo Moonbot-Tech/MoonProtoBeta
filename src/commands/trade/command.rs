@@ -2,6 +2,10 @@
 
 use super::*;
 use crate::commands::registry::CURRENT_PROTO_CMD_VER;
+use crate::commands::report::{
+    CMD_ROW_DELETE, CMD_ROW_UPSERT, CMD_SCHEMA, CMD_SCHEMA_REQUEST, CMD_SYNC_BATCH, CMD_SYNC_DONE,
+    CMD_SYNC_REQUEST,
+};
 use std::convert::TryInto;
 
 /// Parsed `TBaseTradeCommand` payloads mapped by Delphi CmdId.
@@ -65,6 +69,20 @@ pub enum TradeCommand {
     DoMarketSplitPosition(JoinOrdersCommand),
     /// CmdId=31: `TClosedSellOrderReportCommand`, exact DB Orders SQL report.
     ClosedSellOrderReport(ClosedSellOrderReport),
+    /// CmdId=32: live full-row upsert for the report DB replica.
+    ReportRowUpsert(crate::commands::report::RepRowUpsert),
+    /// CmdId=33: live row delete for the report DB replica.
+    ReportRowDelete(crate::commands::report::RepRowDelete),
+    /// CmdId=34: client catch-up request.
+    ReportSyncRequest(crate::commands::report::RepSyncRequest),
+    /// CmdId=35: one compressed catch-up batch.
+    ReportSyncBatch(crate::commands::report::RepSyncBatch),
+    /// CmdId=36: catch-up completion declaration.
+    ReportSyncDone(crate::commands::report::RepSyncDone),
+    /// CmdId=37: report schema request.
+    ReportSchemaRequest(BaseCommandHeader),
+    /// CmdId=38: compressed report schema.
+    ReportSchema(crate::commands::report::RepSchema),
 
     /// CmdId=1: raw `TBaseMarketCommand`, used as an ancestor type.
     BaseMarket(MarketCommandHeader),
@@ -169,6 +187,27 @@ impl TradeCommand {
             31 => Some(TradeCommand::ClosedSellOrderReport(
                 ClosedSellOrderReport::read(&mut r)?,
             )),
+            CMD_ROW_UPSERT => Some(TradeCommand::ReportRowUpsert(
+                crate::commands::report::RepRowUpsert::read(&mut r)?,
+            )),
+            CMD_ROW_DELETE => Some(TradeCommand::ReportRowDelete(
+                crate::commands::report::RepRowDelete::read(&mut r)?,
+            )),
+            CMD_SYNC_REQUEST => Some(TradeCommand::ReportSyncRequest(
+                crate::commands::report::RepSyncRequest::read(&mut r)?,
+            )),
+            CMD_SYNC_BATCH => Some(TradeCommand::ReportSyncBatch(
+                crate::commands::report::RepSyncBatch::read(&mut r)?,
+            )),
+            CMD_SYNC_DONE => Some(TradeCommand::ReportSyncDone(
+                crate::commands::report::RepSyncDone::read(&mut r)?,
+            )),
+            CMD_SCHEMA_REQUEST => Some(TradeCommand::ReportSchemaRequest(BaseCommandHeader::read(
+                &mut r,
+            )?)),
+            CMD_SCHEMA => Some(TradeCommand::ReportSchema(
+                crate::commands::report::RepSchema::read(&mut r)?,
+            )),
             _ => {
                 let uid = u64::from_le_bytes(r[3..11].try_into().unwrap());
                 Some(TradeCommand::Unknown {
@@ -210,6 +249,13 @@ impl TradeCommand {
             Self::VStopUpdate(c) => c.epoch_header.market.base.uid,
             Self::DoMarketSplitPosition(c) => c.market.base.uid,
             Self::ClosedSellOrderReport(c) => c.header.uid,
+            Self::ReportRowUpsert(c) => c.header.uid,
+            Self::ReportRowDelete(c) => c.header.uid,
+            Self::ReportSyncRequest(c) => c.header.uid,
+            Self::ReportSyncBatch(c) => c.header.uid,
+            Self::ReportSyncDone(c) => c.header.uid,
+            Self::ReportSchemaRequest(h) => h.uid,
+            Self::ReportSchema(c) => c.header.uid,
             Self::BaseMarket(h) => h.base.uid,
             Self::TradeEpoch(h) => h.market.base.uid,
             Self::NewOrder(c) => c.market.base.uid,

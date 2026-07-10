@@ -37,6 +37,7 @@ mod constants;
 mod diagnostic_api;
 mod diagnostics;
 mod domain_balance;
+mod domain_report;
 mod domain_send;
 mod domain_strat;
 mod domain_trade;
@@ -82,9 +83,9 @@ pub use active_runtime::DIAG_MARKET_HISTORY_FILL_SPAN_MS;
 pub use active_runtime::{
     ClosePositionParams, CoinCardCandlesTicket, EngineActionTicket, MoonAccount, MoonBalances,
     MoonCandles, MoonChartAlerts, MoonChartText, MoonClient, MoonClientError, MoonClientEvent,
-    MoonClientSnapshot, MoonEmulator, MoonEventQueue, MoonEventSink, MoonOrders, MoonSettings,
-    MoonStrategies, MoonStreams, MoonTrade, NewOrderParams, NewOrderTicket, OrderSide, OrderTarget,
-    SellOrderParams, SplitOrderParams, TradesStreamMode, VStopParams,
+    MoonClientSnapshot, MoonEmulator, MoonEventQueue, MoonEventSink, MoonOrders, MoonReports,
+    MoonSettings, MoonStrategies, MoonStreams, MoonTrade, NewOrderParams, NewOrderTicket,
+    OrderSide, OrderTarget, SellOrderParams, SplitOrderParams, TradesStreamMode, VStopParams,
 };
 pub(crate) use candles::MergedCandles;
 pub(crate) use clock::set_ntp_offset;

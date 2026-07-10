@@ -446,6 +446,8 @@ pub enum MoonClientError {
     UnknownMarket(String),
     /// A UI emulator command cannot fit the wire `Word Count` field.
     TooManyEmuTradePoints(usize),
+    /// Report replication request has a negative cursor or an invalid depth.
+    InvalidReportSyncRequest,
     /// The runtime thread stopped, panicked, or its command channel is closed.
     RuntimeStopped,
 }
@@ -465,6 +467,10 @@ impl std::fmt::Display for MoonClientError {
                     "MoonProto emulated trade command has too many points: {count}"
                 )
             }
+            Self::InvalidReportSyncRequest => write!(
+                f,
+                "MoonProto report sync request has an invalid cursor or history depth"
+            ),
             Self::RuntimeStopped => write!(f, "MoonProto runtime is stopped"),
         }
     }
@@ -479,7 +485,8 @@ impl std::error::Error for MoonClientError {
             | Self::RequestDisconnected
             | Self::StateUnavailable(_)
             | Self::UnknownMarket(_)
-            | Self::TooManyEmuTradePoints(_) => None,
+            | Self::TooManyEmuTradePoints(_)
+            | Self::InvalidReportSyncRequest => None,
             Self::RuntimeStopped => None,
         }
     }

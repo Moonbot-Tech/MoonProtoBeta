@@ -3,7 +3,7 @@
 use super::*;
 use crate::commands::market::{BaseCurrency, ExchangeCode};
 
-pub(super) fn write_base_command_header(out: &mut Vec<u8>, cmd_id: u8, uid: u64) {
+pub(crate) fn write_base_command_header(out: &mut Vec<u8>, cmd_id: u8, uid: u64) {
     out.push(cmd_id);
     out.extend_from_slice(&CURRENT_PROTO_CMD_VER.to_le_bytes());
     out.extend_from_slice(&uid.to_le_bytes());

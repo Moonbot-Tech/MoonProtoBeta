@@ -20,6 +20,7 @@ pub(crate) mod inflate;
 pub(crate) mod market;
 pub(crate) mod order_book;
 pub(crate) mod registry;
+pub(crate) mod report;
 pub(crate) mod strat;
 pub(crate) mod strategy_schema;
 pub(crate) mod strategy_serializer;

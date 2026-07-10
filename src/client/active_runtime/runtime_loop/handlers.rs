@@ -214,6 +214,28 @@ pub(super) fn handle_command(
             dispatcher.ui_strat_start_stop_v2(client, is_start);
             false
         }
+        RuntimeCommand::ReportSchemaRefresh => {
+            client.request_report_schema_at(client.now_ms());
+            false
+        }
+        RuntimeCommand::ReportSync { ticket, request } => {
+            client.set_report_sync_intent(request);
+            let can_send = matches!(client.auth_status, crate::client::AuthStatus::AuthDone)
+                && client.subscriptions.domain_ready
+                && client.server_token != 0;
+            if !can_send {
+                dispatcher.defer_report_sync_until_schema(ticket, request);
+                return false;
+            }
+            if dispatcher.report_schema().is_some() {
+                dispatcher.begin_report_sync(ticket, request);
+                client.send_report_sync_at(ticket, request, client.now_ms());
+            } else {
+                dispatcher.defer_report_sync_until_schema(ticket, request);
+                client.request_report_schema_at(client.now_ms());
+            }
+            false
+        }
         #[cfg(any(test, feature = "diagnostics"))]
         RuntimeCommand::DebugOutgoingBlackhole(enabled) => {
             client.debug_set_outgoing_blackhole(enabled);

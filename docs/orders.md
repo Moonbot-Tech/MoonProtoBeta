@@ -63,6 +63,11 @@ and chart overlays continue to read live retained orders from
 
 ## Closed Sell Reports
 
+`Event::ClosedSellOrderReport` is deprecated. It remains a compatibility path
+for existing consumers that already execute the core's expanded report SQL.
+New application-owned report databases should use `MoonClient::reports()` and
+`Event::Report`; see `reports.md` for the replication and migration contract.
+
 When the core closes a sell order or later updates that report row, it can emit
 `Event::ClosedSellOrderReport`. The payload is:
 
@@ -84,6 +89,9 @@ that Orders row. Active Lib does not parse this SQL back into `Order` fields and
 does not update retained orders from it; regular trading UI should keep using
 `snapshot().orders()`. The report event is for external report/DB sync tools
 that need the exact row operation the core wrote.
+
+Do not combine this stream with typed report replication in one database.
+`db_id` is not `newRecID`, and the two paths can report the same closed sell.
 
 ## Order Fields
 
