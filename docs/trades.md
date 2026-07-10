@@ -413,9 +413,17 @@ pub struct MarketDerivedSnapshot {
 }
 ```
 
-Rolling trade volumes use 5-second buckets and update only from newly accepted
-trades. Candle-derived windows are recalculated from retained 5-minute candles
-plus the current candle.
+Rolling trade volumes use fixed 5-second buckets. LastPrice ranges use
+5-second buckets for 1m/5m and 1-minute buckets for 15m/30m/1h. Both are
+updated only by newly accepted rows, so retained chart depth does not increase
+their CPU cost. Closed-candle aggregates are rebuilt only after a candles
+snapshot, a 5-minute seal, or a 5-minute expiry boundary. The current candle is
+then overlaid without rescanning closed history.
+
+Derived candle calculation uses at most the newest 500 sealed 5-minute candles,
+even when the public chart ring retains more. The `seventy_two_hours` fields
+therefore describe the available long tail; at the full 500-candle calculation
+limit that tail is about 41 hours 40 minutes.
 
 By default, short delta labels do not use raw trade extrema. This matches the
 normal core setting: `trade_volumes` are always maintained, while

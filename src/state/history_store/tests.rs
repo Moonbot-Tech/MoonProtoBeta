@@ -917,3 +917,349 @@ fn candle_windows_exclude_exact_old_boundary() {
     assert!((derived.candle_deltas.fifteen_minutes - 50.0).abs() < 1e-9);
     assert_eq!(derived.candle_volumes.fifteen_minutes, 3.0);
 }
+
+#[test]
+fn candle_derived_long_tail_uses_only_newest_five_hundred_rows() {
+    let now = 45_000.0;
+    let mut store = MarketHistoryStore::new(MarketHistoryConfig {
+        futures_trades_capacity: 0,
+        spot_trades_capacity: 0,
+        liquidation_capacity: 0,
+        mm_orders_capacity: 0,
+        last_price_capacity: 0,
+        mini_candles_capacity: 0,
+        candles_5m_capacity: 600,
+    });
+    let candles = (0..501)
+        .map(|idx| {
+            let is_excluded_oldest = idx == 0;
+            Candle5mRow {
+                time: mt(now - (500 - idx) as f64 * 5.0 / 1440.0),
+                open: if is_excluded_oldest { 1.0 } else { 100.0 },
+                close: 100.0,
+                high: 100.0,
+                low: if is_excluded_oldest { 1.0 } else { 100.0 },
+                volume: 1.0,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    store.replace_candles_5m_from_snapshot(&candles, mt(now));
+
+    let mut retained = Vec::new();
+    store
+        .readers()
+        .candles_5m
+        .unwrap()
+        .copy_last(600, &mut retained);
+    assert_eq!(retained.len(), 501);
+    assert_eq!(
+        store.derived_snapshot().candle_deltas.seventy_two_hours,
+        0.0
+    );
+    assert_eq!(store.last_refresh_work.candle_rows_visited, 500);
+}
+
+#[test]
+fn derived_refresh_work_is_bounded_by_baskets_and_candle_limit() {
+    let now = MoonTime::from_unix_millis(1_800_000_000_000);
+    let mut store = MarketHistoryStore::new(MarketHistoryConfig {
+        futures_trades_capacity: 4,
+        spot_trades_capacity: 0,
+        liquidation_capacity: 0,
+        mm_orders_capacity: 0,
+        last_price_capacity: 5_000,
+        mini_candles_capacity: 0,
+        candles_5m_capacity: 1_000,
+    });
+    store.diag_fill_to_capacity(now, 3_600_000);
+
+    store.trade_analytics_dirty = true;
+    store.last_price_analytics_dirty = true;
+    store.sealed_candle_analytics_dirty = true;
+    store.refresh_derived_analytics(now);
+
+    assert_eq!(
+        store.last_refresh_work.trade_buckets_visited,
+        crate::state::history::ROLLING_VOLUME_BUCKETS
+    );
+    assert_eq!(
+        store.last_refresh_work.last_price_buckets_visited,
+        crate::state::history::ROLLING_PRICE_RANGE_BUCKETS
+    );
+    assert_eq!(store.last_refresh_work.candle_rows_visited, 500);
+    assert!(store.last_refresh_work.published);
+
+    store.refresh_derived_analytics(now);
+    assert_eq!(
+        store.last_refresh_work,
+        derived::DerivedRefreshWork::default()
+    );
+
+    store.append_futures_trade(TradeHistoryRow {
+        time: MoonTime::from_unix_millis(now.unix_millis() + 1_000),
+        price: 101.0,
+        qty: 2.0,
+    });
+    store.refresh_derived_analytics(MoonTime::from_unix_millis(now.unix_millis() + 1_000));
+    assert_eq!(
+        store.last_refresh_work.trade_buckets_visited,
+        crate::state::history::ROLLING_VOLUME_BUCKETS
+    );
+    assert_eq!(store.last_refresh_work.last_price_buckets_visited, 0);
+    assert_eq!(
+        store.last_refresh_work.candle_rows_visited, 0,
+        "a live trade must overlay the cached candle aggregate without rescanning sealed history"
+    );
+    assert!(store.last_refresh_work.published);
+}
+
+#[test]
+#[ignore = "diagnostic CPU benchmark; run with --ignored --nocapture"]
+fn derived_refresh_full_rings_cpu_benchmark() {
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    use crate::client::thread_cpu::ThreadCpuTimer;
+
+    const MAX_CONFIG: MarketHistoryConfig = MarketHistoryConfig {
+        futures_trades_capacity: 200_000,
+        spot_trades_capacity: 150_000,
+        liquidation_capacity: 50_000,
+        mm_orders_capacity: 50_000,
+        last_price_capacity: 80_000,
+        mini_candles_capacity: 50_000,
+        candles_5m_capacity: 20_000,
+    };
+    const REALISTIC_MARKETS: usize = 500;
+    const REALISTIC_LAST_PRICES: usize = 7_200;
+    const REALISTIC_CANDLES: usize = 500;
+    const REALISTIC_TICKS: usize = 3;
+
+    let now = MoonTime::from_unix_millis(1_800_000_000_000);
+
+    let mut max_store = MarketHistoryStore::new(MAX_CONFIG);
+    max_store.diag_fill_to_capacity(now, 3_600_000);
+    max_store.trade_analytics_dirty = true;
+    max_store.last_price_analytics_dirty = true;
+    max_store.sealed_candle_analytics_dirty = true;
+    let max_cpu = ThreadCpuTimer::start();
+    let max_wall = Instant::now();
+    max_store.refresh_derived_analytics(now);
+    let max_wall = max_wall.elapsed();
+    let max_cpu = max_cpu.elapsed();
+    black_box(max_store.derived_snapshot());
+    eprintln!(
+        "DERIVED_CPU max-one-market last_rows={} candle_rows={} wall_us={} thread_cpu_ns={:?} thread_cycles={:?}",
+        MAX_CONFIG.last_price_capacity,
+        MAX_CONFIG.candles_5m_capacity,
+        max_wall.as_micros(),
+        max_cpu.time.map(|value| value.as_nanos()),
+        max_cpu.cycles
+    );
+
+    let realistic_config = MarketHistoryConfig {
+        futures_trades_capacity: 1,
+        spot_trades_capacity: 0,
+        liquidation_capacity: 0,
+        mm_orders_capacity: 0,
+        last_price_capacity: REALISTIC_LAST_PRICES,
+        mini_candles_capacity: 0,
+        candles_5m_capacity: REALISTIC_CANDLES,
+    };
+    let names = (0..REALISTIC_MARKETS)
+        .map(|idx| format!("PERF{idx:04}USDT"))
+        .collect::<Vec<_>>();
+    let mut registry = MarketHistoryRegistry::new(realistic_config);
+    registry.configure_markets(&names, Some(&TradeStorageScope::All));
+    for name in &names {
+        registry
+            .get_mut(name)
+            .expect("configured benchmark market")
+            .diag_fill_to_capacity(now, 3_600_000);
+    }
+
+    for name in &names {
+        registry
+            .get_mut(name)
+            .expect("configured benchmark market")
+            .trade_analytics_dirty = true;
+        registry
+            .get_mut(name)
+            .expect("configured benchmark market")
+            .last_price_analytics_dirty = true;
+        registry
+            .get_mut(name)
+            .expect("configured benchmark market")
+            .sealed_candle_analytics_dirty = true;
+    }
+    registry.refresh_derived_analytics(now);
+
+    let realistic_cpu = ThreadCpuTimer::start();
+    let realistic_wall = Instant::now();
+    for _ in 0..REALISTIC_TICKS {
+        for name in &names {
+            registry
+                .get_mut(name)
+                .expect("configured benchmark market")
+                .trade_analytics_dirty = true;
+            registry
+                .get_mut(name)
+                .expect("configured benchmark market")
+                .last_price_analytics_dirty = true;
+            registry
+                .get_mut(name)
+                .expect("configured benchmark market")
+                .sealed_candle_analytics_dirty = true;
+        }
+        registry.refresh_derived_analytics(now);
+    }
+    let realistic_wall = realistic_wall.elapsed();
+    let realistic_cpu = realistic_cpu.elapsed();
+    black_box(registry.get(&names[0]).unwrap().derived_snapshot());
+    eprintln!(
+        "DERIVED_CPU forced-all markets={} ticks={} last_rows_per_market={} candle_rows_per_market={} wall_us={} wall_us_per_tick={} thread_cpu_ns={:?} thread_cycles={:?}",
+        REALISTIC_MARKETS,
+        REALISTIC_TICKS,
+        REALISTIC_LAST_PRICES,
+        REALISTIC_CANDLES,
+        realistic_wall.as_micros(),
+        realistic_wall.as_micros() / REALISTIC_TICKS as u128,
+        realistic_cpu.time.map(|value| value.as_nanos()),
+        realistic_cpu.cycles
+    );
+
+    let idle_cpu = ThreadCpuTimer::start();
+    let idle_wall = Instant::now();
+    for _ in 0..REALISTIC_TICKS {
+        registry.refresh_derived_analytics(now);
+    }
+    let idle_wall = idle_wall.elapsed();
+    let idle_cpu = idle_cpu.elapsed();
+    eprintln!(
+        "DERIVED_CPU idle markets={} ticks={} wall_us={} wall_us_per_tick={} thread_cycles={:?}",
+        REALISTIC_MARKETS,
+        REALISTIC_TICKS,
+        idle_wall.as_micros(),
+        idle_wall.as_micros() / REALISTIC_TICKS as u128,
+        idle_cpu.cycles
+    );
+
+    let trade_cpu = ThreadCpuTimer::start();
+    let trade_wall = Instant::now();
+    for tick in 0..REALISTIC_TICKS {
+        let trade_time = MoonTime::from_unix_millis(now.unix_millis() + tick as i64 * 250);
+        for market_index in 0..REALISTIC_MARKETS {
+            registry
+                .get_mut_by_server_index(market_index as u16)
+                .expect("configured benchmark market index")
+                .append_futures_trade(TradeHistoryRow {
+                    time: trade_time,
+                    price: 100.0 + tick as f32 * 0.01,
+                    qty: 1.0,
+                });
+        }
+        registry.refresh_derived_analytics(trade_time);
+    }
+    let trade_wall = trade_wall.elapsed();
+    let trade_cpu = trade_cpu.elapsed();
+    eprintln!(
+        "DERIVED_CPU live-trades markets={} ticks={} wall_us={} wall_us_per_tick={} thread_cycles={:?}",
+        REALISTIC_MARKETS,
+        REALISTIC_TICKS,
+        trade_wall.as_micros(),
+        trade_wall.as_micros() / REALISTIC_TICKS as u128,
+        trade_cpu.cycles
+    );
+
+    let last_price_cpu = ThreadCpuTimer::start();
+    let last_price_wall = Instant::now();
+    for tick in 0..REALISTIC_TICKS {
+        let price_time = MoonTime::from_unix_millis(now.unix_millis() + tick as i64 * 250);
+        for name in &names {
+            registry
+                .get_mut(name)
+                .expect("configured benchmark market")
+                .append_last_price(
+                    100.0 + tick as f64 * 0.01,
+                    price_time,
+                    99.0,
+                    101.0,
+                    true,
+                    false,
+                );
+        }
+        registry.refresh_derived_analytics(price_time);
+    }
+    let last_price_wall = last_price_wall.elapsed();
+    let last_price_cpu = last_price_cpu.elapsed();
+    eprintln!(
+        "DERIVED_CPU live-last-price markets={} ticks={} wall_us={} wall_us_per_tick={} thread_cycles={:?}",
+        REALISTIC_MARKETS,
+        REALISTIC_TICKS,
+        last_price_wall.as_micros(),
+        last_price_wall.as_micros() / REALISTIC_TICKS as u128,
+        last_price_cpu.cycles
+    );
+
+    for name in &names {
+        registry
+            .get_mut(name)
+            .expect("configured benchmark market")
+            .sealed_candle_analytics_dirty = true;
+    }
+    let candle_cpu = ThreadCpuTimer::start();
+    let candle_wall = Instant::now();
+    registry.refresh_derived_analytics(now);
+    let candle_wall = candle_wall.elapsed();
+    let candle_cpu = candle_cpu.elapsed();
+    eprintln!(
+        "DERIVED_CPU candle-seal markets={} candle_rows_per_market={} wall_us={} thread_cycles={:?}",
+        REALISTIC_MARKETS,
+        REALISTIC_CANDLES,
+        candle_wall.as_micros(),
+        candle_cpu.cycles
+    );
+
+    const COMPONENT_PASSES: usize = 20;
+    let volume_component_wall = Instant::now();
+    for _ in 0..COMPONENT_PASSES {
+        for name in &names {
+            let store = registry.get(name).expect("configured benchmark market");
+            black_box(store.rolling_volumes.snapshot(now));
+        }
+    }
+    let volume_component_wall = volume_component_wall.elapsed();
+
+    let price_component_wall = Instant::now();
+    for _ in 0..COMPONENT_PASSES {
+        for name in &names {
+            let store = registry.get(name).expect("configured benchmark market");
+            black_box(
+                store
+                    .rolling_last_price_ranges
+                    .snapshot(now, store.eps_profile.eps),
+            );
+        }
+    }
+    let price_component_wall = price_component_wall.elapsed();
+
+    let publish_component_wall = Instant::now();
+    for _ in 0..COMPONENT_PASSES {
+        for name in &names {
+            let store = registry.get(name).expect("configured benchmark market");
+            store
+                .read_handle
+                .publish(&store.rolling_volumes, store.derived);
+        }
+    }
+    let publish_component_wall = publish_component_wall.elapsed();
+    eprintln!(
+        "DERIVED_CPU components markets={} passes={} volume_snapshot_us_per_pass={} last_price_snapshot_us_per_pass={} publish_us_per_pass={}",
+        REALISTIC_MARKETS,
+        COMPONENT_PASSES,
+        volume_component_wall.as_micros() / COMPONENT_PASSES as u128,
+        price_component_wall.as_micros() / COMPONENT_PASSES as u128,
+        publish_component_wall.as_micros() / COMPONENT_PASSES as u128,
+    );
+}

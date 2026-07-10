@@ -1311,9 +1311,16 @@ impl Session {
             derived.trade_volumes.five_minutes.sell_value,
         );
 
-        let zero_reason = active_lib_zero_reason(profile, last_stats, futures_all.len());
         let zero_fields = active_lib_zero_fields(&derived, profile);
         if !zero_fields.is_empty() {
+            let zero_reason = if zero_fields
+                .iter()
+                .all(|field| field.starts_with("trade_delta_"))
+            {
+                "expected: DeltasByTrades is disabled in the normal ActiveLib profile".to_string()
+            } else {
+                active_lib_zero_reason(profile, last_stats, futures_all.len())
+            };
             println!(
                 "FIRETEST ActiveLib market={market} ZERO_FIELDS [{}] reason={zero_reason}",
                 zero_fields.join(",")

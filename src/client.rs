@@ -73,7 +73,7 @@ mod socket_lifecycle;
 mod subscription_api;
 mod subscriptions;
 #[cfg(any(test, feature = "diagnostics"))]
-mod thread_cpu;
+pub(crate) mod thread_cpu;
 mod transport_state;
 
 #[cfg(any(test, feature = "diagnostics"))]

@@ -1216,9 +1216,10 @@ pub struct AutoDetectCommand {
     pub active: bool,
 }
 
-/// Trigger-management action for
-/// [`crate::MoonSettings::manage_triggers_for_markets`] and all-market trigger
-/// helpers.
+/// Trigger-management action used by
+/// [`crate::MoonSettings::set_triggers_for_markets`],
+/// [`crate::MoonSettings::clear_triggers_for_markets`], and the all-market
+/// trigger helpers.
 ///
 /// Maps the trigger-management action byte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

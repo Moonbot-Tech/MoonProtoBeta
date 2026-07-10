@@ -11,8 +11,8 @@ use crate::state::eps::EpsProfile;
 use crate::state::history::{
     compact_trades_to_mini_candles, hl_address_color, Candle5mRow, DerivedDeltaSnapshot,
     LastPricePoint, MMOrderCompanionData, MMOrderHistoryRow, MarkPricePoint, MarketDerivedSnapshot,
-    MiniCandle, RollingTradeVolumeSnapshot, RollingTradeVolumes, TradeHistoryRow,
-    TradesPacketTimeShift,
+    MiniCandle, RollingPriceRanges, RollingTradeVolumeSnapshot, RollingTradeVolumes,
+    TradeHistoryRow, TradesPacketTimeShift,
 };
 use crate::state::seq_ring::{SeqRingReader, SeqRingWriter};
 #[cfg(any(test, feature = "diagnostics"))]
@@ -89,6 +89,10 @@ impl MarketHistoryReadHandle {
         state.rolling_volumes = rolling_volumes.clone();
         state.derived = derived;
     }
+
+    fn publish_derived(&self, derived: MarketDerivedSnapshot) {
+        self.inner.write().derived = derived;
+    }
 }
 
 pub(crate) struct MarketHistoryStore {
@@ -106,14 +110,23 @@ pub(crate) struct MarketHistoryStore {
     evicted_futures_for_compaction: Vec<TradeHistoryRow>,
     mini_scratch: Vec<MiniCandle>,
     rolling_volumes: RollingTradeVolumes,
+    rolling_volumes_publish_dirty: bool,
+    rolling_last_price_ranges: RollingPriceRanges,
     /// In-progress 5m candle: a separate accumulator, NOT stored in the
     /// `candles_5m` ring (which holds only sealed, end-stamped candles).
     current_candle: Option<Candle5mRow>,
-    candle_deltas_dirty: bool,
-    candle_deltas_bucket: Option<i64>,
+    trade_analytics_dirty: bool,
+    last_price_analytics_dirty: bool,
+    short_analytics_bucket: Option<i64>,
+    sealed_candle_analytics_dirty: bool,
+    current_candle_analytics_dirty: bool,
+    sealed_candle_analytics_bucket: Option<i64>,
+    sealed_candle_derived: Option<derived::CandleDerivedAccumulator>,
     derived: MarketDerivedSnapshot,
     eps_profile: EpsProfile,
     deltas_by_trades: bool,
+    #[cfg(test)]
+    last_refresh_work: derived::DerivedRefreshWork,
 }
 
 impl MarketHistoryStore {
@@ -172,17 +185,32 @@ impl MarketHistoryStore {
             evicted_futures_for_compaction: Vec::new(),
             mini_scratch: Vec::new(),
             rolling_volumes: RollingTradeVolumes::default(),
+            rolling_volumes_publish_dirty: false,
+            rolling_last_price_ranges: RollingPriceRanges::default(),
             current_candle: None,
-            candle_deltas_dirty: false,
-            candle_deltas_bucket: None,
+            trade_analytics_dirty: false,
+            last_price_analytics_dirty: false,
+            short_analytics_bucket: None,
+            sealed_candle_analytics_dirty: false,
+            current_candle_analytics_dirty: false,
+            sealed_candle_analytics_bucket: None,
+            sealed_candle_derived: None,
             derived: MarketDerivedSnapshot::default(),
             eps_profile,
             deltas_by_trades: false,
+            #[cfg(test)]
+            last_refresh_work: derived::DerivedRefreshWork::default(),
         }
     }
 
     pub(crate) fn set_eps_profile(&mut self, eps_profile: EpsProfile) {
+        if self.eps_profile == eps_profile {
+            return;
+        }
         self.eps_profile = eps_profile;
+        self.last_price_analytics_dirty = true;
+        self.sealed_candle_analytics_dirty = true;
+        self.current_candle_analytics_dirty = true;
     }
 
     pub(crate) fn set_deltas_by_trades(&mut self, enabled: bool) {
@@ -190,7 +218,7 @@ impl MarketHistoryStore {
             return;
         }
         self.deltas_by_trades = enabled;
-        self.candle_deltas_dirty = true;
+        self.trade_analytics_dirty = true;
         self.derived.trade_deltas = DerivedDeltaSnapshot::default();
     }
 
@@ -243,7 +271,7 @@ impl MarketHistoryStore {
             |idx, count, time| synthetic_liquidation_row(idx, count, time, price_anchor),
         );
         self.diag_fill_mm_orders_to_capacity(now_ms, span_ms, price_anchor);
-        diag_fill_timed_ring(
+        let last_price_rows = diag_fill_timed_ring(
             &mut self.last_prices,
             self.readers.last_prices.as_ref(),
             now_ms,
@@ -277,9 +305,20 @@ impl MarketHistoryStore {
             for row in rows {
                 self.rolling_volumes.add_trade(row);
             }
+            self.rolling_volumes_publish_dirty = true;
+        }
+        if let Some(rows) = last_price_rows {
+            self.rolling_last_price_ranges = RollingPriceRanges::default();
+            for row in rows {
+                self.rolling_last_price_ranges
+                    .add_price(row.time, row.current);
+            }
         }
         self.evicted_futures_for_compaction.clear();
-        self.candle_deltas_dirty = true;
+        self.trade_analytics_dirty = true;
+        self.last_price_analytics_dirty = true;
+        self.sealed_candle_analytics_dirty = true;
+        self.current_candle_analytics_dirty = true;
         self.refresh_derived_analytics(now_time);
     }
 
@@ -302,7 +341,8 @@ impl MarketHistoryStore {
             candles
         };
         self.current_candle = None;
-        self.candle_deltas_dirty = true;
+        self.sealed_candle_analytics_dirty = true;
+        self.current_candle_analytics_dirty = true;
         if let Some(writer) = self.candles_5m.as_mut() {
             writer.clear();
             writer.push_batch(candles);
@@ -339,12 +379,15 @@ impl MarketHistoryStore {
         {
             return None;
         }
-        self.last_prices.as_mut().map(|writer| {
-            writer.push(LastPricePoint {
-                current: current as f32,
-                time: real_time,
-            })
-        })
+        let row = LastPricePoint {
+            current: current as f32,
+            time: real_time,
+        };
+        let seq = self.last_prices.as_mut()?.push(row);
+        self.rolling_last_price_ranges
+            .add_price(row.time, row.current);
+        self.last_price_analytics_dirty = true;
+        Some(seq)
     }
 
     pub(crate) fn append_mark_price(
@@ -368,8 +411,11 @@ impl MarketHistoryStore {
     // parity: MoonBot MoonProtoEngine.pas:ProcessTradesStream (futures trade -> m.FuturesTrades)
     pub(crate) fn append_futures_trade(&mut self, row: TradeHistoryRow) -> Option<u64> {
         let seq = self.push_retained_futures_trade(row)?;
-        self.rolling_volumes.add_trade(row);
-        self.update_current_candle_from_trade(row);
+        let quantity = row.quantity();
+        self.rolling_volumes.add_trade_with_quantity(row, quantity);
+        self.rolling_volumes_publish_dirty = true;
+        self.trade_analytics_dirty = true;
+        self.update_current_candle_from_trade(row, row.price * quantity);
         Some(seq)
     }
 

@@ -12,7 +12,14 @@ const SECONDS_PER_DAY: f64 = 86_400.0;
 pub(crate) const DELPHI_MSECS_PER_DAY: f64 = 86_400_000.0;
 const MINI_CANDLE_SPLIT_MS: i64 = 5_000;
 const ROLLING_VOLUME_BUCKET_SECONDS: i64 = 5;
-const ROLLING_VOLUME_BUCKETS: usize = 5 * 60 / ROLLING_VOLUME_BUCKET_SECONDS as usize;
+pub(crate) const ROLLING_VOLUME_BUCKETS: usize = 5 * 60 / ROLLING_VOLUME_BUCKET_SECONDS as usize;
+const ROLLING_PRICE_SHORT_BUCKET_SECONDS: i64 = 5;
+const ROLLING_PRICE_SHORT_BUCKETS: usize = 5 * 60 / ROLLING_PRICE_SHORT_BUCKET_SECONDS as usize;
+const ROLLING_PRICE_LONG_BUCKET_SECONDS: i64 = 60;
+const ROLLING_PRICE_LONG_BUCKETS: usize = 60 * 60 / ROLLING_PRICE_LONG_BUCKET_SECONDS as usize;
+#[cfg(test)]
+pub(crate) const ROLLING_PRICE_RANGE_BUCKETS: usize =
+    ROLLING_PRICE_SHORT_BUCKETS + ROLLING_PRICE_LONG_BUCKETS;
 
 /// Counts from one full 5m candles snapshot after Active Lib applies the
 /// current trades-retention scope.
@@ -108,10 +115,12 @@ impl TradeHistoryRow {
         self.time.unix_millis()
     }
 
+    #[inline]
     pub fn quantity(self) -> f32 {
         self.qty.abs()
     }
 
+    #[inline]
     pub fn is_buy(self) -> bool {
         self.qty.to_bits() & 0x8000_0000 == 0
     }
@@ -120,6 +129,7 @@ impl TradeHistoryRow {
         (self.qty.to_bits() ^ other.qty.to_bits()) & 0x8000_0000 == 0
     }
 
+    #[inline]
     pub fn traded_value(self) -> f32 {
         self.price * self.quantity()
     }
@@ -557,8 +567,8 @@ impl TradeVolumeTotals {
         (f64::from(self.max_price) / f64::from(self.min_price) - 1.0) * 100.0
     }
 
-    fn add_trade(&mut self, row: TradeHistoryRow) {
-        let qty = row.quantity() as f64;
+    fn add_trade_with_quantity(&mut self, row: TradeHistoryRow, quantity: f32) {
+        let qty = f64::from(quantity);
         let value = row.price as f64 * qty;
         if row.is_buy() {
             self.buy_value += value;
@@ -641,6 +651,9 @@ pub struct MarketDerivedSnapshot {
     /// `two_hours` covers the `h <= 2` buckets (roughly three hours),
     /// `three_hours` covers `h <= 3` (roughly four hours), and
     /// `twenty_four_hours` covers `h <= 24` (roughly 25 hours).
+    /// Derived calculation uses at most the newest 500 sealed candles even if
+    /// the public chart ring retains more. Consequently `seventy_two_hours`
+    /// covers the available tail, at most about 41h40m at 5m resolution.
     pub candle_deltas: DerivedDeltaSnapshot,
     /// Deltas from the retained LastPrice/HistoryPrice line.
     ///
@@ -698,7 +711,12 @@ impl Default for RollingTradeVolumes {
 }
 
 impl RollingTradeVolumes {
+    #[cfg(any(test, feature = "diagnostics"))]
     pub(crate) fn add_trade(&mut self, row: TradeHistoryRow) {
+        self.add_trade_with_quantity(row, row.quantity());
+    }
+
+    pub(crate) fn add_trade_with_quantity(&mut self, row: TradeHistoryRow, quantity: f32) {
         let bucket_id = volume_bucket_id(row.time);
         let idx = volume_bucket_index(bucket_id);
         let bucket = &mut self.buckets[idx];
@@ -708,7 +726,7 @@ impl RollingTradeVolumes {
                 totals: TradeVolumeTotals::default(),
             };
         }
-        bucket.totals.add_trade(row);
+        bucket.totals.add_trade_with_quantity(row, quantity);
     }
 
     pub(crate) fn snapshot(&self, now_time: MoonTime) -> RollingTradeVolumeSnapshot {
@@ -734,6 +752,189 @@ impl RollingTradeVolumes {
     }
 }
 
+/// Hierarchical price baskets for LastPrice-derived windows up to one hour.
+///
+/// Retained LastPrice history is a chart store and may be very large. Derived
+/// ranges only need the latest hour, so they are maintained independently in
+/// 5-second baskets for 1m/5m and 1-minute baskets for 15m/30m/1h. This keeps
+/// short expiry precise while reducing the fixed scan from 720 to 120 baskets.
+#[derive(Debug, Clone)]
+pub(crate) struct RollingPriceRanges {
+    short_buckets: [PriceRangeBucket; ROLLING_PRICE_SHORT_BUCKETS],
+    long_buckets: [PriceRangeBucket; ROLLING_PRICE_LONG_BUCKETS],
+    newest_short_bucket_id: i64,
+    newest_long_bucket_id: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PriceRangeBucket {
+    bucket_id: i64,
+    min_price: f32,
+    max_price: f32,
+}
+
+impl Default for PriceRangeBucket {
+    fn default() -> Self {
+        Self {
+            bucket_id: i64::MIN,
+            min_price: 0.0,
+            max_price: 0.0,
+        }
+    }
+}
+
+impl Default for RollingPriceRanges {
+    fn default() -> Self {
+        Self {
+            short_buckets: [PriceRangeBucket::default(); ROLLING_PRICE_SHORT_BUCKETS],
+            long_buckets: [PriceRangeBucket::default(); ROLLING_PRICE_LONG_BUCKETS],
+            newest_short_bucket_id: i64::MIN,
+            newest_long_bucket_id: i64::MIN,
+        }
+    }
+}
+
+impl RollingPriceRanges {
+    pub(crate) fn add_price(&mut self, time: MoonTime, price: f32) {
+        if time == MoonTime::ZERO || price <= 0.0 || !price.is_finite() {
+            return;
+        }
+        let time_ms = time.unix_millis();
+        add_price_bucket(
+            &mut self.short_buckets,
+            &mut self.newest_short_bucket_id,
+            time_ms.div_euclid(ROLLING_PRICE_SHORT_BUCKET_SECONDS * 1_000),
+            price,
+        );
+        add_price_bucket(
+            &mut self.long_buckets,
+            &mut self.newest_long_bucket_id,
+            time_ms.div_euclid(ROLLING_PRICE_LONG_BUCKET_SECONDS * 1_000),
+            price,
+        );
+    }
+
+    pub(crate) fn snapshot(&self, now_time: MoonTime, eps: f64) -> DerivedDeltaSnapshot {
+        let now_short = price_range_bucket_id(now_time, ROLLING_PRICE_SHORT_BUCKET_SECONDS);
+        let one_minute_oldest =
+            oldest_price_range_bucket(now_short, 60, ROLLING_PRICE_SHORT_BUCKET_SECONDS);
+        let five_minutes_oldest =
+            oldest_price_range_bucket(now_short, 5 * 60, ROLLING_PRICE_SHORT_BUCKET_SECONDS);
+
+        let mut one_minute = PriceRangeTotals::default();
+        let mut five_minutes = PriceRangeTotals::default();
+        for bucket in &self.short_buckets {
+            if bucket.bucket_id < five_minutes_oldest || bucket.bucket_id > now_short {
+                continue;
+            }
+            five_minutes.add_bucket(*bucket);
+            if bucket.bucket_id >= one_minute_oldest {
+                one_minute.add_bucket(*bucket);
+            }
+        }
+
+        let now_long = price_range_bucket_id(now_time, ROLLING_PRICE_LONG_BUCKET_SECONDS);
+        let fifteen_minutes_oldest =
+            oldest_price_range_bucket(now_long, 15 * 60, ROLLING_PRICE_LONG_BUCKET_SECONDS);
+        let thirty_minutes_oldest =
+            oldest_price_range_bucket(now_long, 30 * 60, ROLLING_PRICE_LONG_BUCKET_SECONDS);
+        let one_hour_oldest =
+            oldest_price_range_bucket(now_long, 60 * 60, ROLLING_PRICE_LONG_BUCKET_SECONDS);
+        let mut fifteen_minutes = PriceRangeTotals::default();
+        let mut thirty_minutes = PriceRangeTotals::default();
+        let mut one_hour = PriceRangeTotals::default();
+        for bucket in &self.long_buckets {
+            if bucket.bucket_id < one_hour_oldest || bucket.bucket_id > now_long {
+                continue;
+            }
+            one_hour.add_bucket(*bucket);
+            if bucket.bucket_id >= thirty_minutes_oldest {
+                thirty_minutes.add_bucket(*bucket);
+            }
+            if bucket.bucket_id >= fifteen_minutes_oldest {
+                fifteen_minutes.add_bucket(*bucket);
+            }
+        }
+
+        DerivedDeltaSnapshot {
+            one_minute: one_minute.delta_percent(eps),
+            five_minutes: five_minutes.delta_percent(eps),
+            fifteen_minutes: fifteen_minutes.delta_percent(eps),
+            thirty_minutes: thirty_minutes.delta_percent(eps),
+            one_hour: one_hour.delta_percent(eps),
+            ..DerivedDeltaSnapshot::default()
+        }
+    }
+}
+
+fn add_price_bucket<const N: usize>(
+    buckets: &mut [PriceRangeBucket; N],
+    newest_bucket_id: &mut i64,
+    bucket_id: i64,
+    price: f32,
+) {
+    if *newest_bucket_id != i64::MIN && bucket_id <= *newest_bucket_id - N as i64 {
+        return;
+    }
+    if bucket_id > *newest_bucket_id {
+        *newest_bucket_id = bucket_id;
+    }
+    let idx = bucket_id.rem_euclid(N as i64) as usize;
+    let bucket = &mut buckets[idx];
+    if bucket.bucket_id != bucket_id {
+        *bucket = PriceRangeBucket {
+            bucket_id,
+            min_price: price,
+            max_price: price,
+        };
+    } else {
+        if price < bucket.min_price {
+            bucket.min_price = price;
+        }
+        if price > bucket.max_price {
+            bucket.max_price = price;
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct PriceRangeTotals {
+    min_price: f32,
+    max_price: f32,
+}
+
+impl PriceRangeTotals {
+    fn add_bucket(&mut self, bucket: PriceRangeBucket) {
+        if bucket.min_price <= 0.0 || bucket.max_price < bucket.min_price {
+            return;
+        }
+        if self.min_price <= 0.0 || bucket.min_price < self.min_price {
+            self.min_price = bucket.min_price;
+        }
+        if bucket.max_price > self.max_price {
+            self.max_price = bucket.max_price;
+        }
+    }
+
+    fn delta_percent(self, eps: f64) -> f64 {
+        let min_price = f64::from(self.min_price);
+        let max_price = f64::from(self.max_price);
+        if min_price <= eps || max_price <= eps || max_price < min_price {
+            return 0.0;
+        }
+        (max_price / min_price - 1.0) * 100.0
+    }
+}
+
+fn oldest_price_range_bucket(now_bucket: i64, window_seconds: i64, bucket_seconds: i64) -> i64 {
+    let buckets_back = (window_seconds + bucket_seconds - 1) / bucket_seconds;
+    now_bucket - buckets_back + 1
+}
+
+fn price_range_bucket_id(time: MoonTime, bucket_seconds: i64) -> i64 {
+    time.unix_millis().div_euclid(bucket_seconds * 1_000)
+}
+
 fn oldest_volume_bucket(now_bucket: i64, window_seconds: i64) -> i64 {
     let buckets_back =
         (window_seconds + ROLLING_VOLUME_BUCKET_SECONDS - 1) / ROLLING_VOLUME_BUCKET_SECONDS;
@@ -741,7 +942,8 @@ fn oldest_volume_bucket(now_bucket: i64, window_seconds: i64) -> i64 {
 }
 
 fn volume_bucket_id(time: MoonTime) -> i64 {
-    (time.unix_millis() / 1_000).div_euclid(ROLLING_VOLUME_BUCKET_SECONDS)
+    time.unix_millis()
+        .div_euclid(ROLLING_VOLUME_BUCKET_SECONDS * 1_000)
 }
 
 fn volume_bucket_index(bucket_id: i64) -> usize {

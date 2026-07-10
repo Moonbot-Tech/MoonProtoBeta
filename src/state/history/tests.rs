@@ -332,3 +332,40 @@ fn rolling_trade_volumes_maintain_one_three_five_minute_windows() {
     assert_eq!(snapshot.five_minutes.max_price, 300.0);
     assert!((snapshot.five_minutes.price_delta_percent() - 200.0).abs() < 1e-9);
 }
+
+#[test]
+fn rolling_price_ranges_maintain_fixed_one_hour_baskets() {
+    let now = 45_000.0;
+    let mut ranges = RollingPriceRanges::default();
+
+    ranges.add_price(mt(now - 10.0 / SECONDS_PER_DAY), 100.0);
+    ranges.add_price(mt(now - 70.0 / SECONDS_PER_DAY), 130.0);
+    ranges.add_price(mt(now - 20.0 * 60.0 / SECONDS_PER_DAY), 170.0);
+    ranges.add_price(mt(now - 59.0 * 60.0 / SECONDS_PER_DAY), 200.0);
+    ranges.add_price(mt(now - 60.0 * 60.0 / SECONDS_PER_DAY), 1_000.0);
+
+    let snapshot = ranges.snapshot(mt(now), 1e-12);
+
+    assert_eq!(snapshot.one_minute, 0.0);
+    assert!((snapshot.five_minutes - 30.0).abs() < 1e-9);
+    assert!((snapshot.fifteen_minutes - 30.0).abs() < 1e-9);
+    assert!((snapshot.thirty_minutes - 70.0).abs() < 1e-9);
+    assert!((snapshot.one_hour - 100.0).abs() < 1e-9);
+}
+
+#[test]
+fn rolling_price_ranges_ignore_invalid_and_expired_rows() {
+    let now = 45_000.0;
+    let mut ranges = RollingPriceRanges::default();
+
+    ranges.add_price(mt(now), 100.0);
+    ranges.add_price(MoonTime::ZERO, 1.0);
+    ranges.add_price(mt(now), 0.0);
+    ranges.add_price(mt(now), f32::NAN);
+    ranges.add_price(mt(now - 2.0 / 24.0), 1.0);
+
+    assert_eq!(
+        ranges.snapshot(mt(now), 1e-12),
+        DerivedDeltaSnapshot::default()
+    );
+}
