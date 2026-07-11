@@ -1,16 +1,17 @@
 //! Wire payloads for the `MPC_Order` report-replication commands.
 
-use super::strict_read::{read_i32, read_i64, read_u16, read_u32, read_u64};
+use super::strict_read::{read_i64, read_u16, read_u32, read_u64};
 use super::trade::builders::write_base_command_header;
 use super::trade::BaseCommandHeader;
 
 pub(crate) const CMD_ROW_UPSERT: u8 = 32;
 pub(crate) const CMD_ROW_DELETE: u8 = 33;
 pub(crate) const CMD_SYNC_REQUEST: u8 = 34;
-pub(crate) const CMD_SYNC_BATCH: u8 = 35;
-pub(crate) const CMD_SYNC_DONE: u8 = 36;
 pub(crate) const CMD_SCHEMA_REQUEST: u8 = 37;
 pub(crate) const CMD_SCHEMA: u8 = 38;
+pub(crate) const CMD_SYNC_PAGE: u8 = 39;
+pub(crate) const CMD_CHECK_ROWS_REQUEST: u8 = 40;
+pub(crate) const MAX_CHECK_ROW_IDS: usize = 100;
 
 #[derive(Debug, Clone)]
 pub struct RepRowUpsert {
@@ -74,27 +75,30 @@ impl RepRowDelete {
 }
 
 #[derive(Debug, Clone)]
-pub struct RepSyncBatch {
+pub struct RepSyncPage {
     pub(crate) header: BaseCommandHeader,
     pub(crate) request_uid: u64,
-    pub(crate) batch_num: u16,
+    pub(crate) last_rec_id: i64,
+    pub(crate) max_rec_id: i64,
     pub(crate) row_count: u16,
     pub(crate) blob: Vec<u8>,
 }
 
-impl RepSyncBatch {
+impl RepSyncPage {
     pub(crate) fn read(r: &mut &[u8]) -> Option<Self> {
         let header = BaseCommandHeader::read(r)?;
         let mut pos = 0usize;
         let request_uid = read_u64(r, &mut pos)?;
-        let batch_num = read_u16(r, &mut pos)?;
+        let last_rec_id = read_i64(r, &mut pos)?;
+        let max_rec_id = read_i64(r, &mut pos)?;
         let row_count = read_u16(r, &mut pos)?;
         let blob = read_len_bytes(r, &mut pos)?;
         *r = &r[pos..];
         Some(Self {
             header,
             request_uid,
-            batch_num,
+            last_rec_id,
+            max_rec_id,
             row_count,
             blob,
         })
@@ -102,30 +106,28 @@ impl RepSyncBatch {
 }
 
 #[derive(Debug, Clone)]
-pub struct RepSyncDone {
+#[allow(dead_code)] // Parsed for command-registry parity; clients only send this command.
+pub struct RepCheckRowsRequest {
     pub(crate) header: BaseCommandHeader,
-    pub(crate) request_uid: u64,
-    pub(crate) batch_count: u16,
-    pub(crate) total_rows: i32,
-    pub(crate) max_rec_id: i64,
+    pub(crate) rec_ids: Vec<i64>,
 }
 
-impl RepSyncDone {
+impl RepCheckRowsRequest {
     pub(crate) fn read(r: &mut &[u8]) -> Option<Self> {
         let header = BaseCommandHeader::read(r)?;
         let mut pos = 0usize;
-        let request_uid = read_u64(r, &mut pos)?;
-        let batch_count = read_u16(r, &mut pos)?;
-        let total_rows = read_i32(r, &mut pos)?;
-        let max_rec_id = read_i64(r, &mut pos)?;
+        let count = usize::from(read_u16(r, &mut pos)?);
+        let bytes = count.checked_mul(std::mem::size_of::<i64>())?;
+        if bytes > r.len().saturating_sub(pos) {
+            return None;
+        }
+        let mut rec_ids = Vec::new();
+        rec_ids.try_reserve_exact(count).ok()?;
+        for _ in 0..count {
+            rec_ids.push(read_i64(r, &mut pos)?);
+        }
         *r = &r[pos..];
-        Some(Self {
-            header,
-            request_uid,
-            batch_count,
-            total_rows,
-            max_rec_id,
-        })
+        Some(Self { header, rec_ids })
     }
 }
 
@@ -156,6 +158,18 @@ pub(crate) fn build_sync_request(uid: u64, from_rec_id: i64, depth_days: u16) ->
 pub(crate) fn build_schema_request(uid: u64) -> Vec<u8> {
     let mut out = Vec::with_capacity(11);
     write_base_command_header(&mut out, CMD_SCHEMA_REQUEST, uid);
+    out
+}
+
+pub(crate) fn build_check_rows_request(uid: u64, rec_ids: &[i64]) -> Vec<u8> {
+    let count = rec_ids.len().min(MAX_CHECK_ROW_IDS);
+    let start = rec_ids.len() - count;
+    let mut out = Vec::with_capacity(13 + count * std::mem::size_of::<i64>());
+    write_base_command_header(&mut out, CMD_CHECK_ROWS_REQUEST, uid);
+    out.extend_from_slice(&(count as u16).to_le_bytes());
+    for rec_id in &rec_ids[start..] {
+        out.extend_from_slice(&rec_id.to_le_bytes());
+    }
     out
 }
 
@@ -203,6 +217,15 @@ mod tests {
             build_schema_request(0x1112_1314_1516_1718),
             header(CMD_SCHEMA_REQUEST, 0x1112_1314_1516_1718)
         );
+
+        let rec_ids = (1..=105).map(i64::from).collect::<Vec<_>>();
+        let check = build_check_rows_request(0x3132_3334_3536_3738, &rec_ids);
+        let mut expected = header(CMD_CHECK_ROWS_REQUEST, 0x3132_3334_3536_3738);
+        expected.extend_from_slice(&100u16.to_le_bytes());
+        for rec_id in 6i64..=105 {
+            expected.extend_from_slice(&rec_id.to_le_bytes());
+        }
+        assert_eq!(check, expected);
     }
 
     #[test]
@@ -235,18 +258,27 @@ mod tests {
         assert_eq!(sync.depth_days, 30);
         assert!(input.is_empty());
 
-        let mut batch_raw = header(CMD_SYNC_BATCH, uid);
-        batch_raw.extend_from_slice(&0x2122_2324_2526_2728u64.to_le_bytes());
-        batch_raw.extend_from_slice(&3u16.to_le_bytes());
-        batch_raw.extend_from_slice(&17u16.to_le_bytes());
-        batch_raw.extend_from_slice(&len_bytes(&[5, 6, 7]));
-        let mut input = batch_raw.as_slice();
-        let batch = RepSyncBatch::read(&mut input).unwrap();
-        assert_eq!(batch.header.uid, uid);
-        assert_eq!(batch.request_uid, 0x2122_2324_2526_2728);
-        assert_eq!(batch.batch_num, 3);
-        assert_eq!(batch.row_count, 17);
-        assert_eq!(batch.blob, [5, 6, 7]);
+        let mut page_raw = header(CMD_SYNC_PAGE, uid);
+        page_raw.extend_from_slice(&0x2122_2324_2526_2728u64.to_le_bytes());
+        page_raw.extend_from_slice(&77i64.to_le_bytes());
+        page_raw.extend_from_slice(&99i64.to_le_bytes());
+        page_raw.extend_from_slice(&17u16.to_le_bytes());
+        page_raw.extend_from_slice(&len_bytes(&[5, 6, 7]));
+        let mut input = page_raw.as_slice();
+        let page = RepSyncPage::read(&mut input).unwrap();
+        assert_eq!(page.header.uid, uid);
+        assert_eq!(page.request_uid, 0x2122_2324_2526_2728);
+        assert_eq!(page.last_rec_id, 77);
+        assert_eq!(page.max_rec_id, 99);
+        assert_eq!(page.row_count, 17);
+        assert_eq!(page.blob, [5, 6, 7]);
+        assert!(input.is_empty());
+
+        let check_raw = build_check_rows_request(uid, &[7, 8, 9]);
+        let mut input = check_raw.as_slice();
+        let check = RepCheckRowsRequest::read(&mut input).unwrap();
+        assert_eq!(check.header.uid, uid);
+        assert_eq!(check.rec_ids, [7, 8, 9]);
         assert!(input.is_empty());
 
         let schema_request_raw = build_schema_request(uid);
@@ -276,18 +308,19 @@ mod tests {
     }
 
     #[test]
-    fn sync_done_reads_global_cursor_fields() {
-        let mut raw = header(CMD_SYNC_DONE, 9);
+    fn sync_page_reads_global_cursor_fields() {
+        let mut raw = header(CMD_SYNC_PAGE, 9);
         raw.extend_from_slice(&55u64.to_le_bytes());
-        raw.extend_from_slice(&3u16.to_le_bytes());
-        raw.extend_from_slice(&120i32.to_le_bytes());
+        raw.extend_from_slice(&998i64.to_le_bytes());
         raw.extend_from_slice(&999i64.to_le_bytes());
+        raw.extend_from_slice(&0u16.to_le_bytes());
+        raw.extend_from_slice(&0u32.to_le_bytes());
         let mut slice = raw.as_slice();
-        let done = RepSyncDone::read(&mut slice).unwrap();
-        assert_eq!(done.header.uid, 9);
-        assert_eq!(done.request_uid, 55);
-        assert_eq!(done.batch_count, 3);
-        assert_eq!(done.total_rows, 120);
-        assert_eq!(done.max_rec_id, 999);
+        let page = RepSyncPage::read(&mut slice).unwrap();
+        assert_eq!(page.header.uid, 9);
+        assert_eq!(page.request_uid, 55);
+        assert_eq!(page.last_rec_id, 998);
+        assert_eq!(page.max_rec_id, 999);
+        assert_eq!(page.row_count, 0);
     }
 }

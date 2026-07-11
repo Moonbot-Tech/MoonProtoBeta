@@ -2985,19 +2985,33 @@ fn record_event(
                     format!("Report RowDelete rec_id={rec_id}")
                 }
                 ReportEvent::SyncStarted { ticket, request } => format!(
-                    "Report SyncStarted uid={} from={} depth={}",
-                    ticket.request_uid, request.from_rec_id, request.history_depth
+                    "Report SyncStarted sync_id={} from={} depth={}",
+                    ticket.sync_id, request.from_rec_id, request.history_depth
+                ),
+                ReportEvent::SyncPage(page) => format!(
+                    "Report SyncPage sync_id={} request_uid={} from={} last={} max={} rows={} recreated={}",
+                    page.ticket.sync_id,
+                    page.request_uid,
+                    page.from_rec_id,
+                    page.last_rec_id,
+                    page.max_rec_id,
+                    page.row_count(),
+                    page.database_recreated
                 ),
                 ReportEvent::SyncComplete(done) => format!(
-                    "Report SyncComplete uid={} from={} batches={} rows={} max_rec_id={} keep={} recreated={}",
-                    done.request_uid,
-                    done.from_rec_id,
-                    done.batch_count,
+                    "Report SyncComplete sync_id={} pages={} rows={} max_rec_id={} next={}",
+                    done.ticket.sync_id,
+                    done.page_count,
                     done.total_rows,
                     done.max_rec_id,
-                    done.keep_rec_ids.len(),
-                    done.database_recreated
+                    done.next_from_rec_id
                 ),
+                ReportEvent::OpenRowsCheckStarted { rec_ids } => {
+                    format!("Report OpenRowsCheckStarted count={}", rec_ids.len())
+                }
+                ReportEvent::OpenRowsCheckComplete { rec_ids } => {
+                    format!("Report OpenRowsCheckComplete count={}", rec_ids.len())
+                }
                 ReportEvent::SchemaRejected { reason } => {
                     format!("Report SchemaRejected reason={reason}")
                 }
@@ -5711,11 +5725,18 @@ where
         let mut completed = None;
         for event in session.take_report_events() {
             on_event(&event);
-            match event {
-                ReportEvent::SyncComplete(done) if done.request_uid == ticket.request_uid => {
-                    completed = Some(done);
+            match &event {
+                ReportEvent::SyncPage(page) if page.ticket == ticket => {
+                    session
+                        .client
+                        .reports()
+                        .page_applied(page)
+                        .expect("MoonReports::page_applied must queue after DB commit");
                 }
-                ReportEvent::SchemaRejected { ref reason } => {
+                ReportEvent::SyncComplete(done) if done.ticket == ticket => {
+                    completed = Some(done.clone());
+                }
+                ReportEvent::SchemaRejected { reason } => {
                     panic!("report schema rejected during sync: {reason}")
                 }
                 _ => {}
@@ -5723,21 +5744,21 @@ where
         }
         if let Some(done) = completed {
             println!(
-                "OK: report sync uid={} from={} batches={} rows={} max_rec_id={} recreated={} elapsed={:.2}s",
-                done.request_uid,
-                done.from_rec_id,
-                done.batch_count,
+                "OK: report sync sync_id={} from={} pages={} rows={} max_rec_id={} next={} elapsed={:.2}s",
+                done.ticket.sync_id,
+                request.from_rec_id,
+                done.page_count,
                 done.total_rows,
                 done.max_rec_id,
-                done.database_recreated,
+                done.next_from_rec_id,
                 started.elapsed().as_secs_f64()
             );
             return done;
         }
     }
     panic!(
-        "report sync uid={} from={} did not complete within {:?}",
-        ticket.request_uid, request.from_rec_id, timeout
+        "report sync sync_id={} from={} did not complete within {:?}",
+        ticket.sync_id, request.from_rec_id, timeout
     )
 }
 
@@ -5825,46 +5846,23 @@ fn apply_report_event_to_db(
                     panic!("FireTest report DB: delete rec_id={rec_id} failed: {err}")
                 });
         }
-        _ => {}
-    }
-}
-
-fn reconcile_report_db(connection: &rusqlite::Connection, complete: &ReportSyncComplete) {
-    let keep = complete
-        .keep_rec_ids
-        .iter()
-        .copied()
-        .collect::<HashSet<_>>();
-    let sql = format!(
-        "SELECT {} FROM {} WHERE {}>=?",
-        quote_sqlite_identifier("newRecID"),
-        quote_sqlite_identifier(FIRETEST_REPORT_TABLE),
-        quote_sqlite_identifier("newRecID")
-    );
-    let mut statement = connection
-        .prepare(&sql)
-        .unwrap_or_else(|err| panic!("FireTest report DB: reconcile select failed: {err}"));
-    let existing = statement
-        .query_map([complete.from_rec_id], |row| row.get::<_, i64>(0))
-        .unwrap_or_else(|err| panic!("FireTest report DB: reconcile query failed: {err}"))
-        .map(|row| row.expect("FireTest report DB: reconcile rec_id must decode"))
-        .collect::<Vec<_>>();
-    drop(statement);
-    for rec_id in existing {
-        if !keep.contains(&rec_id) {
-            connection
-                .execute(
-                    &format!(
-                        "DELETE FROM {} WHERE {}=?",
-                        quote_sqlite_identifier(FIRETEST_REPORT_TABLE),
-                        quote_sqlite_identifier("newRecID")
-                    ),
-                    [rec_id],
-                )
-                .unwrap_or_else(|err| {
-                    panic!("FireTest report DB: reconcile delete rec_id={rec_id} failed: {err}")
-                });
+        ReportEvent::SyncPage(page) => {
+            assert!(
+                !page.database_recreated,
+                "FireTest report DB unexpectedly moved behind cursor {} (server max={})",
+                page.from_rec_id, page.max_rec_id
+            );
+            let transaction = connection
+                .unchecked_transaction()
+                .expect("FireTest report DB: page transaction must start");
+            for row in page.rows.iter() {
+                apply_report_row_to_db(&transaction, schema, row);
+            }
+            transaction
+                .commit()
+                .expect("FireTest report DB: page transaction must commit before page_applied");
         }
+        _ => {}
     }
 }
 
@@ -5888,11 +5886,7 @@ fn run_report_database_gate(cfg: &FireConfig, keys: ImportedKeys, pump_peer: &mu
         FIRETEST_REPORT_SYNC_TIMEOUT,
         |_| {},
     );
-    assert!(
-        !baseline.database_recreated,
-        "fresh report sync cannot report a recreated database"
-    );
-    let offline_from_rec_id = baseline.max_rec_id.saturating_add(1).max(1);
+    let offline_from_rec_id = baseline.next_from_rec_id.max(1);
     report_a.take_report_events();
 
     let restore_emu_mode = ensure_server_emulator_mode(cfg, &mut report_a, pump_peer);
@@ -5996,11 +5990,7 @@ fn run_report_database_gate(cfg: &FireConfig, keys: ImportedKeys, pump_peer: &mu
             apply_report_event_to_db(&connection, &b_schema, event);
         },
     );
-    assert!(
-        !complete.database_recreated,
-        "server report DB unexpectedly moved behind the committed FireTest cursor"
-    );
-    reconcile_report_db(&connection, &complete);
+    assert!(complete.next_from_rec_id >= offline_from_rec_id);
 
     let sql = format!(
         "SELECT {}, {}, {}, {}, {} FROM {} WHERE {}=?",
@@ -6033,8 +6023,42 @@ fn run_report_database_gate(cfg: &FireConfig, keys: ImportedKeys, pump_peer: &mu
         (stored.3 - order_probe.buy_price).abs() <= order_probe.buy_price.abs().max(1.0) * 1e-9
     );
     assert!((stored.4 - order_probe.bought_q).abs() <= order_probe.bought_q.abs().max(1.0) * 1e-9);
+
+    report_b.take_report_events();
+    report_b
+        .client
+        .reports()
+        .check_open_rows(&[closed_row.rec_id])
+        .expect("MoonReports::check_open_rows must queue");
+    let check_started = Instant::now();
+    let mut check_row_seen = false;
+    let mut check_complete = false;
+    while check_started.elapsed() < FIRETEST_REPORT_SYNC_TIMEOUT {
+        report_b.pump(PUMP_SLICE);
+        for event in report_b.take_report_events() {
+            match event {
+                ReportEvent::RowUpsert(row) if row.rec_id == closed_row.rec_id => {
+                    check_row_seen = true;
+                    apply_report_row_to_db(&connection, &b_schema, &row);
+                }
+                ReportEvent::OpenRowsCheckComplete { rec_ids }
+                    if rec_ids.as_ref() == [closed_row.rec_id] =>
+                {
+                    check_complete = true;
+                }
+                _ => {}
+            }
+        }
+        if check_row_seen && check_complete {
+            break;
+        }
+    }
+    assert!(
+        check_row_seen && check_complete,
+        "ReportDB-B open-row check did not return an authoritative row and completion"
+    );
     println!(
-        "OK: ReportDB-B offline catch-up persisted report_task_id={} rec_id={} from_cursor={} path={}",
+        "OK: ReportDB-B paged offline catch-up + row check persisted report_task_id={} rec_id={} from_cursor={} path={}",
         report_task_id,
         closed_row.rec_id,
         offline_from_rec_id,

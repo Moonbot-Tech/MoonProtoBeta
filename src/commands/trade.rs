@@ -641,7 +641,7 @@ impl DoSellOrderCommand {
 //  CmdId=20: TOrderStopsUpdate
 // ============================================================================
 
-/// `TOrderStopsUpdate` (TradeStruct.pas:193-200). UKey=UK_OrderMove.
+/// `TOrderStopsUpdate` (CmdId=20). UKey=`UK_StopMove`.
 #[derive(Debug, Clone)]
 pub struct OrderStopsUpdate {
     pub epoch_header: TradeEpochHeader,
@@ -750,7 +750,7 @@ impl MoveAllBuysCommand {
 //  CmdId=29: TVStopUpdate
 // ============================================================================
 
-/// `TVStopUpdate` (TradeStruct.pas:286-296). UKey=UK_OrderMove.
+/// `TVStopUpdate` (CmdId=29). UKey=`UK_VStopMove`.
 #[derive(Debug, Clone)]
 pub struct VStopUpdate {
     pub epoch_header: TradeEpochHeader,

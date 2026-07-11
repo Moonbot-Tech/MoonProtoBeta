@@ -1,7 +1,7 @@
 use super::SlicedAck;
 pub(crate) use crate::commands::registry::{
     find_descriptor, CommandDescriptor, CommandPriority, UKeyRule, UK_IMMUNE_CLICKS, UK_NONE,
-    UK_ORDER_MOVE, UK_STRAT_SELL_PRICE_UPDATE,
+    UK_ORDER_MOVE, UK_STOP_MOVE, UK_STRAT_SELL_PRICE_UPDATE, UK_VSTOP_MOVE,
 };
 #[cfg(test)]
 pub(crate) use crate::commands::registry::{
@@ -56,10 +56,24 @@ impl UniqueKey {
     pub(crate) fn is_none(&self) -> bool {
         self.kind == UK_NONE
     }
-    /// UKey for order move/cancel/stops/panic/vstop commands keyed by task id.
+    /// UKey for order move/cancel/panic commands keyed by task id.
     pub(crate) fn order_move(task_id: u64) -> Self {
         Self {
             kind: UK_ORDER_MOVE,
+            uid: task_id,
+        }
+    }
+    /// UKey for stop-settings commands keyed by task id.
+    pub(crate) fn stop_move(task_id: u64) -> Self {
+        Self {
+            kind: UK_STOP_MOVE,
+            uid: task_id,
+        }
+    }
+    /// UKey for VStop commands keyed by task id.
+    pub(crate) fn vstop_move(task_id: u64) -> Self {
+        Self {
+            kind: UK_VSTOP_MOVE,
             uid: task_id,
         }
     }

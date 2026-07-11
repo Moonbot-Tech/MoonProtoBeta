@@ -71,6 +71,7 @@ pub(crate) struct SubscriptionRegistry {
     pub candle_subs: HashSet<String>,
     pub candle_tf: Option<DeepHistoryKind>,
     pub report_sync: Option<crate::state::ReportSyncRequest>,
+    pub report_open_rows: Arc<[i64]>,
 }
 
 impl SubscriptionRegistry {
@@ -276,17 +277,25 @@ pub(crate) struct ReconnectRestore {
     /// `subscribed_book_server_token`.
     pub(crate) pending_orderbook_resubscribe_uid: Option<u64>,
 
-    /// ServerToken for which a complete report catch-up was verified.
+    /// ServerToken for which a report page response verified the subscription.
     pub(crate) subscribed_report_server_token: AtomicU64,
+    /// ServerToken for which the append-only report schema was validated.
+    pub(crate) report_schema_server_token: AtomicU64,
     /// Last report schema request send time.
     pub(crate) last_report_schema_request_ms: AtomicI64,
     /// Last report catch-up request send time.
     pub(crate) last_report_sync_request_ms: AtomicI64,
-    /// Current report request UID; completion advances the token watermark only
-    /// when this UID matches.
+    /// Current report page request UID; only its matching page may open the
+    /// application apply barrier.
     pub(crate) pending_report_sync_uid: AtomicU64,
     /// ServerToken under which `pending_report_sync_uid` was sent.
     pub(crate) pending_report_server_token: AtomicU64,
+    /// Request UID of the page currently owned by the application DB writer.
+    pub(crate) report_page_waiting_apply_uid: AtomicU64,
+    /// Last open-row check send time and hard-session watermark.
+    pub(crate) last_report_check_request_ms: AtomicI64,
+    pub(crate) pending_report_check_server_token: AtomicU64,
+    pub(crate) subscribed_report_check_server_token: AtomicU64,
 
     /// Delayed `DoSubscribeAllTrades(false)` after Delphi `Sleep(100)` in
     /// `BMarketHistoryWorker.Execute` reconnect branch.
@@ -324,10 +333,15 @@ impl ReconnectRestore {
             last_orderbook_subscribe_request_uid,
             pending_orderbook_resubscribe_uid: None,
             subscribed_report_server_token: AtomicU64::new(0),
+            report_schema_server_token: AtomicU64::new(0),
             last_report_schema_request_ms: AtomicI64::new(super::constants::NEVER_TIME_MS),
             last_report_sync_request_ms: AtomicI64::new(super::constants::NEVER_TIME_MS),
             pending_report_sync_uid: AtomicU64::new(0),
             pending_report_server_token: AtomicU64::new(0),
+            report_page_waiting_apply_uid: AtomicU64::new(0),
+            last_report_check_request_ms: AtomicI64::new(super::constants::NEVER_TIME_MS),
+            pending_report_check_server_token: AtomicU64::new(0),
+            subscribed_report_check_server_token: AtomicU64::new(0),
             pending_trades_unsubscribe: None,
             pending_trades_resubscribe_after_ms: None,
             last_trades_tick_ms: i64::MIN / 2,

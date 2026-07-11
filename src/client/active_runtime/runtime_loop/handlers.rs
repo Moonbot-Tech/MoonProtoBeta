@@ -227,13 +227,77 @@ pub(super) fn handle_command(
                 dispatcher.defer_report_sync_until_schema(ticket, request);
                 return false;
             }
-            if dispatcher.report_schema().is_some() {
-                dispatcher.begin_report_sync(ticket, request);
-                client.send_report_sync_at(ticket, request, client.now_ms());
+            if dispatcher.report_schema().is_some() && client.report_schema_is_current() {
+                let request_uid = dispatcher.begin_report_sync(ticket, request);
+                client.send_report_sync_at(request_uid, request, client.now_ms());
             } else {
                 dispatcher.defer_report_sync_until_schema(ticket, request);
                 client.request_report_schema_at(client.now_ms());
             }
+            false
+        }
+        RuntimeCommand::ReportPageApplied(page) => {
+            if !client.report_page_is_waiting_apply(page.request_uid) {
+                log::warn!(
+                    target: "moonproto::reports",
+                    "ignored report page acknowledgement outside the active apply barrier: sync={} request={}",
+                    page.ticket.sync_id,
+                    page.request_uid
+                );
+                return false;
+            }
+            match dispatcher.report_page_applied(&page) {
+                crate::state::ReportPageApplyAction::SendNext {
+                    request_uid,
+                    request,
+                } => {
+                    if client.finish_report_page_apply(page.request_uid, None) {
+                        client.set_report_sync_intent(request);
+                        if client.report_schema_is_current() {
+                            client.send_report_sync_at(request_uid, request, client.now_ms());
+                        } else {
+                            client.request_report_schema_at(client.now_ms());
+                        }
+                    }
+                }
+                crate::state::ReportPageApplyAction::Complete {
+                    received_request_uid,
+                    durable_request,
+                } => {
+                    client.finish_report_page_apply(received_request_uid, Some(durable_request));
+                }
+                crate::state::ReportPageApplyAction::Ignored => {
+                    log::warn!(
+                        target: "moonproto::reports",
+                        "ignored stale or mismatched report page acknowledgement: sync={} request={}",
+                        page.ticket.sync_id,
+                        page.request_uid
+                    );
+                }
+            }
+            false
+        }
+        RuntimeCommand::ReportCheckOpenRows(rec_ids) => {
+            client.set_report_open_rows_intent(Arc::clone(&rec_ids));
+            if rec_ids.is_empty() {
+                dispatcher.clear_report_open_rows_check();
+                return false;
+            }
+            let can_send = matches!(client.auth_status, crate::client::AuthStatus::AuthDone)
+                && client.subscriptions.domain_ready
+                && client.server_token != 0;
+            if !can_send
+                || dispatcher.report_schema().is_none()
+                || !client.report_schema_is_current()
+            {
+                dispatcher.defer_report_open_rows_check_until_schema(rec_ids);
+                if can_send {
+                    client.request_report_schema_at(client.now_ms());
+                }
+                return false;
+            }
+            dispatcher.begin_report_open_rows_check(Arc::clone(&rec_ids));
+            client.send_report_open_rows_check_at(&rec_ids, client.now_ms());
             false
         }
         #[cfg(any(test, feature = "diagnostics"))]

@@ -217,8 +217,7 @@ impl Client {
         self.request_order_status(order.trade_ctx(), &order.market_name)
     }
 
-    /// Delphi `SendStopsIfChanged` + `TOrderStopsUpdate` (CmdId=20,
-    /// UK_OrderMove).
+    /// `SendStopsIfChanged` + `TOrderStopsUpdate` (CmdId=20, `UK_StopMove`).
     ///
     /// Requires the local `Orders` read model: if the UID is unknown or the
     /// stop record did not change, Delphi would not put a packet on the wire.
@@ -236,7 +235,7 @@ impl Client {
             return false;
         };
         let raw = crate::commands::trade::build_order_stops_update(ctx, &market, 0, status, &stops);
-        self.send_trade_keyed(raw, UniqueKey::order_move(ctx.uid));
+        self.send_trade_keyed(raw, UniqueKey::stop_move(ctx.uid));
         true
     }
 
@@ -351,7 +350,7 @@ impl Client {
         true
     }
 
-    /// Delphi `SendVStopIfChanged` + `TVStopUpdate` (CmdId=29, `UK_OrderMove`).
+    /// `SendVStopIfChanged` + `TVStopUpdate` (CmdId=29, `UK_VStopMove`).
     ///
     /// Requires the local `Orders` read model: the wrapper derives the current
     /// worker status, mutates local VStop state, and queues nothing if the value
@@ -375,7 +374,7 @@ impl Client {
             return false;
         };
         let raw = crate::commands::trade::build_vstop_update(ctx, &market, 0, params);
-        self.send_trade_keyed(raw, UniqueKey::order_move(ctx.uid));
+        self.send_trade_keyed(raw, UniqueKey::vstop_move(ctx.uid));
         true
     }
 

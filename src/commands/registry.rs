@@ -17,10 +17,9 @@ pub(crate) const UK_NONE: u8 = 0;
 pub(crate) const UK_ORDER_STATUS: u8 = 1;
 /// `UK_OrderStatusShort`: low-level short order-status request key.
 pub(crate) const UK_ORDER_STATUS_SHORT: u8 = 2;
-/// `UK_OrderMove`: replace/cancel/stops/panic/VStop dedup by order task id.
+/// `UK_OrderMove`: replace/cancel/panic dedup by order task id.
 pub(crate) const UK_ORDER_MOVE: u8 = 3;
-/// `UK_StopMove`: legacy stop-move dedup ordinal.
-#[allow(dead_code)]
+/// `UK_StopMove`: stop-settings dedup by order task id.
 pub(crate) const UK_STOP_MOVE: u8 = 4;
 /// `UK_StratSnapshot`: singleton strategy snapshot dedup key.
 pub(crate) const UK_STRAT_SNAPSHOT: u8 = 5;
@@ -49,6 +48,8 @@ pub(crate) const UK_CHART_TEXT_SNAPSHOT: u8 = 15;
 pub(crate) const UK_CHART_TEXT_STATE: u8 = 16;
 /// `UK_CandleUpdate`: per-client, per-market, per-TF live candle update key.
 pub(crate) const UK_CANDLE_UPDATE: u8 = 17;
+/// `UK_VStopMove`: VStop dedup by order task id.
+pub(crate) const UK_VSTOP_MOVE: u8 = 18;
 
 /// Send priority as protocol metadata, independent from the concrete client
 /// queue implementation. Conversion to `SendPriority` happens at the send edge.
@@ -407,7 +408,7 @@ pub(crate) const ORDER_COMMANDS: &[CommandDescriptor] = &[
         "TOrderStopsUpdate",
         base = TradeEpoch,
         priority = High,
-        unique = UK_ORDER_MOVE,
+        unique = UK_STOP_MOVE,
         direction = Both
     ),
     cmd_desc!(
@@ -484,7 +485,7 @@ pub(crate) const ORDER_COMMANDS: &[CommandDescriptor] = &[
         "TVStopUpdate",
         base = TradeEpoch,
         priority = High,
-        unique = UK_ORDER_MOVE,
+        unique = UK_VSTOP_MOVE,
         direction = Both
     ),
     cmd_desc!(
@@ -530,22 +531,7 @@ pub(crate) const ORDER_COMMANDS: &[CommandDescriptor] = &[
         priority = High,
         direction = Outbound
     ),
-    cmd_desc!(
-        Command::Order,
-        35,
-        "TRepSyncBatch",
-        base = Base,
-        priority = Sliced,
-        direction = Inbound
-    ),
-    cmd_desc!(
-        Command::Order,
-        36,
-        "TRepSyncDone",
-        base = Base,
-        priority = High,
-        direction = Inbound
-    ),
+    // CmdId 35/36 are reserved after the retired waterfall report sync.
     cmd_desc!(
         Command::Order,
         37,
@@ -561,6 +547,22 @@ pub(crate) const ORDER_COMMANDS: &[CommandDescriptor] = &[
         base = Base,
         priority = Sliced,
         direction = Inbound
+    ),
+    cmd_desc!(
+        Command::Order,
+        39,
+        "TRepSyncPage",
+        base = Base,
+        priority = Sliced,
+        direction = Inbound
+    ),
+    cmd_desc!(
+        Command::Order,
+        40,
+        "TRepCheckRowsRequest",
+        base = Base,
+        priority = High,
+        direction = Outbound
     ),
 ];
 
@@ -1112,10 +1114,10 @@ mod tests {
             (32, CommandPriority::Sliced, CommandDirection::Inbound),
             (33, CommandPriority::High, CommandDirection::Inbound),
             (34, CommandPriority::High, CommandDirection::Outbound),
-            (35, CommandPriority::Sliced, CommandDirection::Inbound),
-            (36, CommandPriority::High, CommandDirection::Inbound),
             (37, CommandPriority::High, CommandDirection::Outbound),
             (38, CommandPriority::Sliced, CommandDirection::Inbound),
+            (39, CommandPriority::Sliced, CommandDirection::Inbound),
+            (40, CommandPriority::High, CommandDirection::Outbound),
         ];
         for (id, priority, direction) in expected {
             let descriptor = find_descriptor(Command::Order, id).unwrap();
@@ -1127,6 +1129,8 @@ mod tests {
             assert_eq!(descriptor.ukey, UKeyRule::None);
             assert_eq!(descriptor.direction, direction);
         }
+        assert!(find_descriptor(Command::Order, 35).is_none());
+        assert!(find_descriptor(Command::Order, 36).is_none());
     }
 
     #[test]
@@ -1142,6 +1146,24 @@ mod tests {
         let settings = find_descriptor(Command::UI, 1).unwrap();
         assert_eq!(settings.unique_kind, UK_BASE_UI_SETTINGS);
         assert_eq!(settings.ukey, UKeyRule::Singleton(1));
+    }
+
+    #[test]
+    fn order_move_stops_and_vstop_have_distinct_delphi_unique_kinds() {
+        let replace = find_descriptor(Command::Order, 6).unwrap();
+        let cancel = find_descriptor(Command::Order, 10).unwrap();
+        let stops = find_descriptor(Command::Order, 20).unwrap();
+        let panic_sell = find_descriptor(Command::Order, 21).unwrap();
+        let vstop = find_descriptor(Command::Order, 29).unwrap();
+
+        assert_eq!(replace.unique_kind, UK_ORDER_MOVE);
+        assert_eq!(cancel.unique_kind, UK_ORDER_MOVE);
+        assert_eq!(panic_sell.unique_kind, UK_ORDER_MOVE);
+        assert_eq!(stops.unique_kind, UK_STOP_MOVE);
+        assert_eq!(vstop.unique_kind, UK_VSTOP_MOVE);
+        assert_ne!(UK_ORDER_MOVE, UK_STOP_MOVE);
+        assert_ne!(UK_ORDER_MOVE, UK_VSTOP_MOVE);
+        assert_ne!(UK_STOP_MOVE, UK_VSTOP_MOVE);
     }
 
     #[test]

@@ -55,17 +55,26 @@ impl Client {
                 crate::events::ActiveAction::TradesResend { payload } => {
                     self.send_api_request(&payload);
                 }
-                crate::events::ActiveAction::ReportSync { ticket, request } => {
-                    self.send_report_sync_at(ticket, request, self.now_ms());
+                crate::events::ActiveAction::ReportSync {
+                    request_uid,
+                    request,
+                } => {
+                    self.send_report_sync_at(request_uid, request, self.now_ms());
                 }
-                crate::events::ActiveAction::ReportSyncCompleted {
+                crate::events::ActiveAction::ReportPageReceived {
                     request_uid,
                     server_token,
                 } => {
-                    self.complete_report_sync(request_uid, server_token);
+                    self.record_report_page_received(request_uid, server_token);
                 }
-                crate::events::ActiveAction::ReportSyncProgress { request_uid } => {
-                    self.record_report_sync_progress(request_uid, self.now_ms());
+                crate::events::ActiveAction::ReportOpenRowsCheck { rec_ids } => {
+                    self.send_report_open_rows_check_at(&rec_ids, self.now_ms());
+                }
+                crate::events::ActiveAction::ReportSchemaReceived { server_token } => {
+                    self.record_report_schema_received(server_token);
+                }
+                crate::events::ActiveAction::ReportOpenRowsCheckCompleted { server_token } => {
+                    self.complete_report_open_rows_check(server_token);
                 }
             }
         }

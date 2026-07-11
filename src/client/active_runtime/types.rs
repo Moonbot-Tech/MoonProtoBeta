@@ -448,6 +448,8 @@ pub enum MoonClientError {
     TooManyEmuTradePoints(usize),
     /// Report replication request has a negative cursor or an invalid depth.
     InvalidReportSyncRequest,
+    /// Open report-row checks accept only positive `newRecID` values.
+    InvalidReportOpenRows,
     /// The runtime thread stopped, panicked, or its command channel is closed.
     RuntimeStopped,
 }
@@ -471,6 +473,9 @@ impl std::fmt::Display for MoonClientError {
                 f,
                 "MoonProto report sync request has an invalid cursor or history depth"
             ),
+            Self::InvalidReportOpenRows => {
+                write!(f, "MoonProto open report-row ids must be positive")
+            }
             Self::RuntimeStopped => write!(f, "MoonProto runtime is stopped"),
         }
     }
@@ -486,7 +491,8 @@ impl std::error::Error for MoonClientError {
             | Self::StateUnavailable(_)
             | Self::UnknownMarket(_)
             | Self::TooManyEmuTradePoints(_)
-            | Self::InvalidReportSyncRequest => None,
+            | Self::InvalidReportSyncRequest
+            | Self::InvalidReportOpenRows => None,
             Self::RuntimeStopped => None,
         }
     }

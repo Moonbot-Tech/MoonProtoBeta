@@ -286,7 +286,7 @@ impl ClientSender {
             return false;
         };
         let raw = crate::commands::trade::build_order_stops_update(ctx, &market, 0, status, &stops);
-        self.send_trade_keyed(raw, UniqueKey::order_move(ctx.uid));
+        self.send_trade_keyed(raw, UniqueKey::stop_move(ctx.uid));
         true
     }
 
@@ -428,7 +428,7 @@ impl ClientSender {
             return false;
         };
         let raw = crate::commands::trade::build_vstop_update(ctx, &market, 0, params);
-        self.send_trade_keyed(raw, UniqueKey::order_move(ctx.uid));
+        self.send_trade_keyed(raw, UniqueKey::vstop_move(ctx.uid));
         true
     }
 

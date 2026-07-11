@@ -1,4 +1,4 @@
-﻿//! Active-library action routing.
+//! Active-library action routing.
 //!
 //! This is the Rust counterpart of Delphi receive-side domain effects that
 //! immediately schedule follow-up protocol commands: full orderbook refresh,
@@ -81,15 +81,21 @@ pub(crate) enum ActiveAction {
         payload: Vec<u8>,
     },
     ReportSync {
-        ticket: crate::state::ReportSyncTicket,
+        request_uid: u64,
         request: crate::state::ReportSyncRequest,
     },
-    ReportSyncCompleted {
+    ReportPageReceived {
         request_uid: u64,
         server_token: u64,
     },
-    ReportSyncProgress {
-        request_uid: u64,
+    ReportOpenRowsCheck {
+        rec_ids: std::sync::Arc<[i64]>,
+    },
+    ReportSchemaReceived {
+        server_token: u64,
+    },
+    ReportOpenRowsCheckCompleted {
+        server_token: u64,
     },
 }
 
@@ -213,17 +219,33 @@ impl EventDispatcher {
         self.sync_market_history_storage();
         for control in self.report_controls.drain(..) {
             match control {
-                crate::state::ReportControl::SendSync { ticket, request } => {
-                    actions.push(ActiveAction::ReportSync { ticket, request });
+                crate::state::ReportControl::SendSync {
+                    request_uid,
+                    request,
+                } => {
+                    actions.push(ActiveAction::ReportSync {
+                        request_uid,
+                        request,
+                    });
                 }
-                crate::state::ReportControl::SyncCompleted { request_uid } => {
-                    actions.push(ActiveAction::ReportSyncCompleted {
+                crate::state::ReportControl::PageReceived { request_uid } => {
+                    actions.push(ActiveAction::ReportPageReceived {
                         request_uid,
                         server_token: ctx.server_token,
                     });
                 }
-                crate::state::ReportControl::SyncProgress { request_uid } => {
-                    actions.push(ActiveAction::ReportSyncProgress { request_uid });
+                crate::state::ReportControl::SendOpenRowsCheck { rec_ids } => {
+                    actions.push(ActiveAction::ReportOpenRowsCheck { rec_ids });
+                }
+                crate::state::ReportControl::SchemaReceived => {
+                    actions.push(ActiveAction::ReportSchemaReceived {
+                        server_token: ctx.server_token,
+                    });
+                }
+                crate::state::ReportControl::OpenRowsCheckCompleted => {
+                    actions.push(ActiveAction::ReportOpenRowsCheckCompleted {
+                        server_token: ctx.server_token,
+                    });
                 }
             }
         }

@@ -232,7 +232,8 @@ pub use state::{
 };
 pub use state::{
     ReportEvent, ReportFieldKind, ReportFieldValue, ReportHistoryDepth, ReportRow, ReportSchema,
-    ReportSchemaField, ReportSyncComplete, ReportSyncRequest, ReportSyncTicket, ReportValue,
+    ReportSchemaField, ReportSyncComplete, ReportSyncPage, ReportSyncRequest, ReportSyncTicket,
+    ReportValue,
 };
 #[cfg(any(test, feature = "diagnostics"))]
 #[doc(hidden)]

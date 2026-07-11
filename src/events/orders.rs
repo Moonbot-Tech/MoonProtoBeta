@@ -26,10 +26,12 @@ impl EventDispatcher {
             }
             Some(TradeCommand::ReportRowUpsert(report)) => {
                 let mut events = Vec::new();
-                if self
-                    .reports
-                    .apply_live_upsert(report.rec_id, &report.row, &mut events)
-                {
+                if self.reports.apply_live_upsert(
+                    report.rec_id,
+                    &report.row,
+                    &mut events,
+                    &mut self.report_controls,
+                ) {
                     out.extend(events.into_iter().map(Event::Report));
                 } else {
                     Self::push_parse_failed(out, Command::Order, payload);
@@ -37,28 +39,21 @@ impl EventDispatcher {
             }
             Some(TradeCommand::ReportRowDelete(report)) => {
                 let mut events = Vec::new();
-                if self.reports.apply_live_delete(report.rec_id, &mut events) {
+                if self.reports.apply_live_delete(
+                    report.rec_id,
+                    &mut events,
+                    &mut self.report_controls,
+                ) {
                     out.extend(events.into_iter().map(Event::Report));
                 } else {
                     Self::push_parse_failed(out, Command::Order, payload);
                 }
             }
-            Some(TradeCommand::ReportSyncBatch(report)) => {
+            Some(TradeCommand::ReportSyncPage(report)) => {
                 let mut events = Vec::new();
                 if self
                     .reports
-                    .apply_sync_batch(report, &mut events, &mut self.report_controls)
-                {
-                    out.extend(events.into_iter().map(Event::Report));
-                } else {
-                    Self::push_parse_failed(out, Command::Order, payload);
-                }
-            }
-            Some(TradeCommand::ReportSyncDone(report)) => {
-                let mut events = Vec::new();
-                if self
-                    .reports
-                    .apply_sync_done(report, &mut events, &mut self.report_controls)
+                    .apply_sync_page(report, &mut events, &mut self.report_controls)
                 {
                     out.extend(events.into_iter().map(Event::Report));
                 } else {
@@ -109,7 +104,9 @@ impl EventDispatcher {
         // Multi-client safe ServerTimeDelta source is linked by the active path.
         let server_time_delta = self.current_server_time_delta();
         self.orders.set_server_time_delta(server_time_delta);
-        let (apply_result, ev) = self.orders.apply_at(tc, now_ms);
+        let (apply_result, ev) =
+            self.orders
+                .apply_at_with_server_token(tc, now_ms, self.last_known_server_token);
         if apply_result == ApplyResult::Applied {
             let Some(ev) = ev else {
                 return;

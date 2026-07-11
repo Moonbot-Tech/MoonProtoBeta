@@ -1,4 +1,5 @@
 use super::*;
+use crate::commands::registry::{UK_STOP_MOVE, UK_VSTOP_MOVE};
 
 fn item(kind: u8, uid: u64, marker: u8) -> SendItem {
     SendItem {
@@ -69,5 +70,22 @@ fn send_cmd_int_queue_does_not_dedup_low_priority() {
             .collect::<Vec<_>>(),
         vec![1, 2],
         "Delphi SendCmdInt UKey removal is only for Sliced and High"
+    );
+}
+
+#[test]
+fn move_stops_and_vstop_for_one_order_do_not_evict_each_other() {
+    let mut queues = SendQueues::default();
+    queues.push_send_cmd_int(item(UK_ORDER_MOVE, 7, 1));
+    queues.push_send_cmd_int(item(UK_STOP_MOVE, 7, 2));
+    queues.push_send_cmd_int(item(UK_VSTOP_MOVE, 7, 3));
+
+    assert_eq!(
+        queues
+            .high
+            .iter()
+            .map(|item| (item.u_key.kind, item.data[0]))
+            .collect::<Vec<_>>(),
+        vec![(UK_ORDER_MOVE, 1), (UK_STOP_MOVE, 2), (UK_VSTOP_MOVE, 3)]
     );
 }

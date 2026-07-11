@@ -8,8 +8,9 @@
 //! the retained order cache and cleanup/status-recovery behavior internally.
 //!
 //! Supported behavior:
-//! - Epoch protection (per-status `server_latest_epoch`).
-//! - Phase rollback protection.
+//! - One server-worker epoch watermark with full-status baselining.
+//! - Full-status-only phase transitions and phase-gated delta updates.
+//! - Independent replace-state and replace-ack epoch judges.
 //! - Snapshot flag mechanism (`current_snapshot_flag` is incremented on
 //!   `TAllStatuses`; orders without the fresh flag are returned by
 //!   `missing_after_snapshot()`).
@@ -32,6 +33,8 @@ mod maintenance;
 mod model;
 mod types;
 
+use self::apply_helpers::ServerEpochCommandKind;
+
 pub use self::model::Order;
 #[cfg(any(test, feature = "diagnostics"))]
 #[doc(hidden)]
@@ -50,39 +53,7 @@ const PENDING_CANCEL_REPEAT_MS: i64 = 32;
 const ORDER_TRACE_LINE_SHRINK_TO: usize = 800;
 const ORDER_TRACE_LINE_SHRINK_INTERVAL_MS: i64 = 30_000;
 
-/// Wrapping-safe epoch comparison.
-/// Matches MoonProtoFunc.pas:188-203 `EpochIsOK`:
-///   if LastEpoch = NewEpoch then Result := false;   // duplicate
-///   backDist := LastEpoch - NewEpoch;               // Word wrapping subtraction
-///   if backDist <= 100 then Result := false         // stale, up to 100 behind
-///   else Result := true;                            // ACCEPT
-///
-/// Returns `true` when `new` is actually new: not duplicate and not stale.
-/// Used by `AcceptServerCommand` in `BOrderWorker` (TaskWorkers.pas:1440).
-// `epoch_is_ok` is shared through `state::epoch::epoch_is_ok`
-// (audit_rust_quality #1). The stale window is 100, from Delphi
-// `MoonProtoFunc.pas:188-203`.
 use super::epoch::epoch_is_ok;
-
-/// Mapping from worker status to phase number.
-/// Matches TaskWorkers.pas:546-555 `StatusPhase`:
-///   OS_BuySet              → 1
-///   OS_BuyDone             → 2
-///   OS_SellSet             → 3
-///   OS_SelLAlmostDone / OS_SelLDone (`SellAlmostDone` / `SellDone`) → 4
-///   all other statuses (None, BuyFail, BuyCancel, SellFail, SellCancel) -> 0
-///
-/// Phase rollback is checked only when both `new_phase > 0` and
-/// `cur_phase > 0`; terminal phase-0 statuses are not checked.
-fn status_phase(s: OrderWorkerStatus) -> u8 {
-    match s {
-        OrderWorkerStatus::BuySet => 1,
-        OrderWorkerStatus::BuyDone => 2,
-        OrderWorkerStatus::SellSet => 3,
-        OrderWorkerStatus::SellAlmostDone | OrderWorkerStatus::SellDone => 4,
-        _ => 0,
-    }
-}
 
 fn order_type_uses_buy_side(order_type: OrderType) -> bool {
     order_type == OrderType::Buy
@@ -204,8 +175,8 @@ impl Orders {
     /// Apply one inbound `MPC_Order` command and return the resulting event.
     ///
     /// This is the main state-transition entry point:
-    /// 1. epoch check;
-    /// 2. phase rollback check;
+    /// 1. hard-session epoch reset and shared watermark check;
+    /// 2. full-status-only phase transition gate;
     /// 3. update or create `Order`;
     /// 4. `ServerTimeDelta` correction for `TDateTime` fields;
     /// 5. deferred removal on terminal status / `TOrderNotFound`;
@@ -229,10 +200,20 @@ impl Orders {
         )
     }
 
+    #[cfg(any(test, feature = "diagnostics"))]
     pub(crate) fn apply_at(
         &mut self,
         cmd: TradeCommand,
         now_ms: i64,
+    ) -> (ApplyResult, Option<OrderEvent>) {
+        self.apply_at_with_server_token(cmd, now_ms, 0)
+    }
+
+    pub(crate) fn apply_at_with_server_token(
+        &mut self,
+        cmd: TradeCommand,
+        now_ms: i64,
+        server_token: u64,
     ) -> (ApplyResult, Option<OrderEvent>) {
         let uid = cmd.uid();
         let current_snapshot_flag = self.current_snapshot_flag;
@@ -257,17 +238,18 @@ impl Orders {
                     }
                     let entry = self.order_mut(uid).expect("order inserted or existed");
 
-                    // Delphi new-order path goes ProcessCommandOrder ->
-                    // OnMServerOrder -> HandleServerCommand(Cmd), bypassing
-                    // AcceptServerCommand and therefore not touching
-                    // FServerLatestEpoch for the first full status.
-                    if !new_order {
-                        if let Err(reason) = Self::accept_epoch_and_phase(entry, &st.epoch_header) {
-                            return ignored_order_event(uid, reason);
-                        }
+                    if let Err(reason) = Self::accept_server_epoch(
+                        entry,
+                        &st.epoch_header,
+                        ServerEpochCommandKind::FullStatus,
+                        server_token,
+                    ) {
+                        return ignored_order_event(uid, reason);
                     }
 
                     Self::apply_status_inner(entry, &st, server_time_delta, new_order, eps_m);
+                    entry.replace_epoch_buy = st.epoch_header.epoch;
+                    entry.replace_epoch_sell = st.epoch_header.epoch;
                     entry.snapshot_flag = current_snapshot_flag;
                     entry.job_is_done
                 };
@@ -284,14 +266,17 @@ impl Orders {
 
             // --- Delta-update ---
             TradeCommand::OrderStatusUpdate(up) => {
-                let status = up.epoch_header.status;
-                let is_terminal = status.is_terminal();
                 {
                     let Some(entry) = self.order_mut(uid) else {
                         return ignored_order_event(uid, ApplyResult::OrderNotFound);
                     };
 
-                    if let Err(reason) = Self::accept_epoch_and_phase(entry, &up.epoch_header) {
+                    if let Err(reason) = Self::accept_server_epoch(
+                        entry,
+                        &up.epoch_header,
+                        ServerEpochCommandKind::Other,
+                        server_token,
+                    ) {
                         return ignored_order_event(uid, reason);
                     }
 
@@ -299,29 +284,12 @@ impl Orders {
                         up.epoch_header.status,
                         OrderWorkerStatus::BuySet | OrderWorkerStatus::SellSet
                     ) {
-                        // Apply delta-update. Delphi applies UpdateData only
-                        // for OS_BuySet and OS_SellSet; terminal statuses only
-                        // move Status/SellReason and do not overwrite order
-                        // compact fields.
-                        let mut data = up.update_data;
-                        data.adjust_time(server_time_delta);
-
                         let target = if up.epoch_header.status == OrderWorkerStatus::SellSet {
                             &mut entry.sell_order
                         } else {
                             &mut entry.buy_order
                         };
-
-                        target.int_id = data.int_id;
-                        target.actual_price = data.actual_price;
-                        target.open_time = data.open_time;
-                        target.quantity = data.quantity;
-                        target.quantity_remaining = data.quantity_remaining;
-                        target.actual_q = data.actual_q;
-                        target.total_btc = data.total_btc;
-                        target.mean_price = data.mean_price;
-                        target.partial_done = data.partial_done;
-                        target.stop_flag = data.stop_flag;
+                        Self::apply_update_data(target, up.update_data, server_time_delta);
                     }
 
                     if up.epoch_header.status == OrderWorkerStatus::None {
@@ -331,27 +299,11 @@ impl Orders {
                         if entry.pending_buy_cond_price.is_some() {
                             entry.pending_buy_cond_price = Some(up.update_data.mean_price);
                         }
-                    } else {
-                        entry.pending_buy_cond_price = None;
-                        entry.pending_cancel = false;
                     }
-                    entry.status = up.epoch_header.status;
                     let sell_reason = SellReason::from_byte(up.sell_reason_code);
                     if up.sell_reason_code != 0 && sell_reason != entry.sell_reason {
                         entry.sell_reason = sell_reason;
                     }
-
-                    if is_terminal {
-                        entry.job_is_done = true;
-                    }
-                    if status == OrderWorkerStatus::SellDone {
-                        Self::apply_sell_done_flags(entry);
-                    }
-                }
-
-                if is_terminal {
-                    self.mark_pending_removal(uid, now_ms, terminal_removal_delay_ms(status));
-                    return (ApplyResult::Applied, self.updated_event(uid));
                 }
 
                 (ApplyResult::Applied, self.updated_event(uid))
@@ -364,40 +316,54 @@ impl Orders {
                     return ignored_order_event(uid, ApplyResult::OrderNotFound);
                 };
 
-                if let Err(reason) = Self::accept_epoch_and_phase(entry, &rr.epoch_header) {
-                    return ignored_order_event(uid, reason);
-                }
-
-                let mut data = rr.update_data;
-                data.adjust_time(server_time_delta);
-
-                let target = if order_type_uses_buy_side(rr.order_type) {
-                    &mut entry.buy_order
-                } else {
-                    &mut entry.sell_order
+                let fresh_epoch = match Self::accept_server_epoch(
+                    entry,
+                    &rr.epoch_header,
+                    ServerEpochCommandKind::ReplaceResponse,
+                    server_token,
+                ) {
+                    Ok(fresh) => fresh,
+                    Err(reason) => return ignored_order_event(uid, reason),
                 };
 
-                target.int_id = data.int_id;
-                target.actual_price = data.actual_price;
-                target.open_time = data.open_time;
-                target.quantity = data.quantity;
-                target.quantity_remaining = data.quantity_remaining;
-                target.actual_q = data.actual_q;
-                target.total_btc = data.total_btc;
-                target.mean_price = data.mean_price;
-                target.partial_done = data.partial_done;
-                target.stop_flag = data.stop_flag;
-                if rr.quantity_base > 0.0 {
-                    target.quantity_base = rr.quantity_base;
-                }
-
-                // Clear the bulk_replace flag for this side: replace is acknowledged.
                 if order_type_uses_buy_side(rr.order_type) {
-                    entry.buy_price = rr.price;
-                    entry.bulk_replace_buy = false;
+                    if fresh_epoch {
+                        Self::apply_update_data(
+                            &mut entry.buy_order,
+                            rr.update_data,
+                            server_time_delta,
+                        );
+                    }
+                    if epoch_is_ok(entry.replace_epoch_buy, rr.epoch_header.epoch) {
+                        entry.replace_epoch_buy = rr.epoch_header.epoch;
+                        entry.buy_price = rr.price;
+                        if rr.quantity_base > 0.0 {
+                            entry.buy_order.quantity_base = rr.quantity_base;
+                        }
+                    }
+                    if epoch_is_ok(entry.ack_epoch_buy, rr.epoch_header.epoch) {
+                        entry.ack_epoch_buy = rr.epoch_header.epoch;
+                        entry.bulk_replace_buy = false;
+                    }
                 } else {
-                    entry.sell_price = rr.price;
-                    entry.bulk_replace_sell = false;
+                    if fresh_epoch {
+                        Self::apply_update_data(
+                            &mut entry.sell_order,
+                            rr.update_data,
+                            server_time_delta,
+                        );
+                    }
+                    if epoch_is_ok(entry.replace_epoch_sell, rr.epoch_header.epoch) {
+                        entry.replace_epoch_sell = rr.epoch_header.epoch;
+                        entry.sell_price = rr.price;
+                        if rr.quantity_base > 0.0 {
+                            entry.sell_order.quantity_base = rr.quantity_base;
+                        }
+                    }
+                    if epoch_is_ok(entry.ack_epoch_sell, rr.epoch_header.epoch) {
+                        entry.ack_epoch_sell = rr.epoch_header.epoch;
+                        entry.bulk_replace_sell = false;
+                    }
                 }
 
                 (ApplyResult::Applied, self.updated_event(uid))
@@ -408,7 +374,12 @@ impl Orders {
                 let Some(entry) = self.order_mut(uid) else {
                     return ignored_order_event(uid, ApplyResult::OrderNotFound);
                 };
-                if let Err(reason) = Self::accept_epoch_and_phase(entry, &su.epoch_header) {
+                if let Err(reason) = Self::accept_server_epoch(
+                    entry,
+                    &su.epoch_header,
+                    ServerEpochCommandKind::Other,
+                    server_token,
+                ) {
                     return ignored_order_event(uid, reason);
                 }
                 entry.stops = su.stops;
@@ -420,7 +391,12 @@ impl Orders {
                 let Some(entry) = self.order_mut(uid) else {
                     return ignored_order_event(uid, ApplyResult::OrderNotFound);
                 };
-                if let Err(reason) = Self::accept_epoch_and_phase(entry, &vs.epoch_header) {
+                if let Err(reason) = Self::accept_server_epoch(
+                    entry,
+                    &vs.epoch_header,
+                    ServerEpochCommandKind::VStop,
+                    server_token,
+                ) {
                     return ignored_order_event(uid, reason);
                 }
                 entry.vstop_on = vs.vstop_on;
@@ -501,17 +477,27 @@ impl Orders {
             | TradeCommand::ReportRowUpsert(_)
             | TradeCommand::ReportRowDelete(_)
             | TradeCommand::ReportSyncRequest(_)
-            | TradeCommand::ReportSyncBatch(_)
-            | TradeCommand::ReportSyncDone(_)
             | TradeCommand::ReportSchemaRequest(_)
-            | TradeCommand::ReportSchema(_) => ignored_order_event(uid, ApplyResult::NotApplicable),
+            | TradeCommand::ReportSchema(_)
+            | TradeCommand::ReportSyncPage(_)
+            | TradeCommand::ReportCheckRowsRequest(_) => {
+                ignored_order_event(uid, ApplyResult::NotApplicable)
+            }
 
             // --- Client-originated outgoing commands: ignored by state ---
-            TradeCommand::OrderReplace(c) => self.apply_noop_trade_epoch(uid, &c.epoch_header),
-            TradeCommand::OrderCancel(c) => self.apply_noop_trade_epoch(uid, &c.epoch_header),
-            TradeCommand::OrderStatusRequest(h) => self.apply_noop_trade_epoch(uid, &h),
-            TradeCommand::TurnPanicSell(c) => self.apply_noop_trade_epoch(uid, &c.epoch_header),
-            TradeCommand::TradeEpoch(h) => self.apply_noop_trade_epoch(uid, &h),
+            TradeCommand::OrderReplace(c) => {
+                self.apply_noop_trade_epoch(uid, &c.epoch_header, server_token)
+            }
+            TradeCommand::OrderCancel(c) => {
+                self.apply_noop_trade_epoch(uid, &c.epoch_header, server_token)
+            }
+            TradeCommand::OrderStatusRequest(h) => {
+                self.apply_noop_trade_epoch(uid, &h, server_token)
+            }
+            TradeCommand::TurnPanicSell(c) => {
+                self.apply_noop_trade_epoch(uid, &c.epoch_header, server_token)
+            }
+            TradeCommand::TradeEpoch(h) => self.apply_noop_trade_epoch(uid, &h, server_token),
 
             TradeCommand::AllStatusesRequest(_)
             | TradeCommand::JoinOrders(_)
@@ -541,12 +527,15 @@ impl Orders {
         &mut self,
         uid: u64,
         header: &TradeEpochHeader,
+        server_token: u64,
     ) -> (ApplyResult, Option<OrderEvent>) {
         let Some(entry) = self.order_mut(uid) else {
             return ignored_order_event(uid, ApplyResult::OrderNotFound);
         };
 
-        if let Err(reason) = Self::accept_epoch_and_phase(entry, header) {
+        if let Err(reason) =
+            Self::accept_server_epoch(entry, header, ServerEpochCommandKind::Other, server_token)
+        {
             return ignored_order_event(uid, reason);
         }
 

@@ -4,26 +4,73 @@ use super::*;
 use crate::commands::market::{BaseCurrency, ExchangeCode};
 use crate::commands::trade::DelphiBool;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ServerEpochCommandKind {
+    FullStatus,
+    ReplaceResponse,
+    VStop,
+    Other,
+}
+
 impl Orders {
-    pub(super) fn accept_epoch_and_phase(
+    /// Mirror `BOrderWorker.HandleServerCommand`'s common epoch gate.
+    ///
+    /// Returns whether the command advanced the shared server watermark. A
+    /// stale replace response may still pass with `false`, because its replace
+    /// state and acknowledgement payloads have independent watermarks.
+    pub(super) fn accept_server_epoch(
         entry: &mut Order,
         header: &TradeEpochHeader,
-    ) -> Result<(), ApplyResult> {
-        let phase_idx = header.status.to_byte() as usize;
-        if phase_idx < entry.server_latest_epoch.len() {
-            if !epoch_is_ok(entry.server_latest_epoch[phase_idx], header.epoch) {
-                return Err(ApplyResult::OutOfOrder);
+        kind: ServerEpochCommandKind,
+        server_token: u64,
+    ) -> Result<bool, ApplyResult> {
+        if server_token != 0 && server_token != entry.server_session_token {
+            entry.reset_server_epochs();
+            entry.server_session_token = server_token;
+        }
+
+        let is_full = kind == ServerEpochCommandKind::FullStatus;
+        if !is_full && header.status != entry.status {
+            return Err(ApplyResult::PhaseMismatch);
+        }
+
+        if epoch_is_ok(entry.server_watermark, header.epoch) || (is_full && !entry.server_baselined)
+        {
+            entry.server_watermark = header.epoch;
+            if is_full {
+                entry.server_baselined = true;
             }
-            entry.server_latest_epoch[phase_idx] = header.epoch;
+            return Ok(true);
         }
 
-        let new_phase = status_phase(header.status);
-        let cur_phase = status_phase(entry.status);
-        if new_phase > 0 && cur_phase > 0 && new_phase < cur_phase {
-            return Err(ApplyResult::PhaseRollback);
+        let equal_epoch = header.epoch == entry.server_watermark;
+        if kind == ServerEpochCommandKind::ReplaceResponse
+            || (equal_epoch
+                && ((is_full && header.status == entry.status)
+                    || kind == ServerEpochCommandKind::VStop))
+        {
+            return Ok(false);
         }
 
-        Ok(())
+        Err(ApplyResult::OutOfOrder)
+    }
+
+    pub(super) fn apply_update_data(
+        target: &mut ExchangeOrder,
+        mut data: OrderUpdateData,
+        server_time_delta: f64,
+    ) {
+        data.adjust_time(server_time_delta);
+        target.int_id = data.int_id;
+        target.actual_price = data.actual_price;
+        target.open_time = data.open_time;
+        target.quantity = data.quantity;
+        target.quantity_remaining = data.quantity_remaining;
+        target.actual_q = data.actual_q;
+        target.total_btc = data.total_btc;
+        target.mean_price = data.mean_price;
+        target.partial_done = data.partial_done;
+        target.stop_flag = data.stop_flag;
     }
 
     pub(super) fn apply_status_inner(

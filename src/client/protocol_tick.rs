@@ -223,9 +223,11 @@ impl ProtocolCore<'_> {
         {
             return;
         }
-        let Some(request) = self.client.report_sync_intent() else {
+        let sync_intent = self.client.report_sync_intent();
+        let open_rows_intent = self.client.report_open_rows_intent();
+        if sync_intent.is_none() && open_rows_intent.is_empty() {
             return;
-        };
+        }
 
         if mode.dispatcher.report_schema().is_none() {
             if cur_tm.saturating_sub(
@@ -237,49 +239,118 @@ impl ProtocolCore<'_> {
             {
                 return;
             }
-            let ticket = Client::next_report_sync_ticket();
-            mode.dispatcher
-                .defer_report_sync_until_schema(ticket, request);
+            if let Some(request) = sync_intent {
+                let ticket = Client::next_report_sync_ticket();
+                mode.dispatcher
+                    .defer_report_sync_until_schema(ticket, request);
+            }
+            if !open_rows_intent.is_empty() {
+                mode.dispatcher
+                    .defer_report_open_rows_check_until_schema(open_rows_intent);
+            }
             self.client.request_report_schema_at(cur_tm);
             return;
         }
-
-        let pending_uid = self
-            .client
-            .reconnect
-            .pending_report_sync_uid
-            .load(Ordering::Relaxed);
-        let pending_for_current_token = pending_uid != 0
-            && self
-                .client
-                .reconnect
-                .pending_report_server_token
-                .load(Ordering::Relaxed)
-                == self.client.server_token;
-        if pending_for_current_token
-            && cur_tm.saturating_sub(
+        if !self.client.report_schema_is_current() {
+            if cur_tm.saturating_sub(
                 self.client
                     .reconnect
-                    .last_report_sync_request_ms
+                    .last_report_schema_request_ms
                     .load(Ordering::Relaxed),
-            ) < crate::client::domain_report::REPORT_RESPONSE_TIMEOUT_MS
-        {
-            return;
-        }
-        if pending_uid == 0
-            && self
-                .client
-                .reconnect
-                .subscribed_report_server_token
-                .load(Ordering::Relaxed)
-                == self.client.server_token
-        {
+            ) >= crate::client::domain_report::REPORT_RESPONSE_TIMEOUT_MS
+            {
+                self.client.request_report_schema_at(cur_tm);
+            }
             return;
         }
 
-        let ticket = Client::next_report_sync_ticket();
-        mode.dispatcher.begin_report_sync(ticket, request);
-        self.client.send_report_sync_at(ticket, request, cur_tm);
+        if let Some(request) = sync_intent {
+            let waiting_for_apply = mode.dispatcher.report_waiting_for_page_apply()
+                || self
+                    .client
+                    .reconnect
+                    .report_page_waiting_apply_uid
+                    .load(Ordering::Relaxed)
+                    != 0;
+            if !waiting_for_apply {
+                let pending_uid = self
+                    .client
+                    .reconnect
+                    .pending_report_sync_uid
+                    .load(Ordering::Relaxed);
+                let pending_for_current_token = pending_uid != 0
+                    && self
+                        .client
+                        .reconnect
+                        .pending_report_server_token
+                        .load(Ordering::Relaxed)
+                        == self.client.server_token;
+                let response_wait_active = pending_for_current_token
+                    && cur_tm.saturating_sub(
+                        self.client
+                            .reconnect
+                            .last_report_sync_request_ms
+                            .load(Ordering::Relaxed),
+                    ) < crate::client::domain_report::REPORT_RESPONSE_TIMEOUT_MS;
+                if !response_wait_active {
+                    let request_uid = Client::next_report_request_uid();
+                    if let Some(active_request) =
+                        mode.dispatcher.retry_active_report_page(request_uid)
+                    {
+                        self.client.set_report_sync_intent(active_request);
+                        self.client
+                            .send_report_sync_at(request_uid, active_request, cur_tm);
+                    } else if self
+                        .client
+                        .reconnect
+                        .subscribed_report_server_token
+                        .load(Ordering::Relaxed)
+                        != self.client.server_token
+                    {
+                        let ticket = Client::next_report_sync_ticket();
+                        let request_uid = mode.dispatcher.begin_report_sync(ticket, request);
+                        self.client
+                            .send_report_sync_at(request_uid, request, cur_tm);
+                    }
+                }
+            }
+        }
+
+        if open_rows_intent.is_empty() {
+            return;
+        }
+        let check_token = self
+            .client
+            .reconnect
+            .subscribed_report_check_server_token
+            .load(Ordering::Relaxed);
+        let sent_token = self
+            .client
+            .reconnect
+            .pending_report_check_server_token
+            .load(Ordering::Relaxed);
+        let check_timed_out = cur_tm.saturating_sub(
+            self.client
+                .reconnect
+                .last_report_check_request_ms
+                .load(Ordering::Relaxed),
+        ) >= crate::client::domain_report::REPORT_RESPONSE_TIMEOUT_MS;
+
+        if sent_token != self.client.server_token {
+            mode.dispatcher
+                .begin_report_open_rows_check(Arc::clone(&open_rows_intent));
+            self.client
+                .send_report_open_rows_check_at(&open_rows_intent, cur_tm);
+        } else if let Some(pending) = mode.dispatcher.pending_report_open_row_ids() {
+            if check_timed_out {
+                self.client.send_report_open_rows_check_at(&pending, cur_tm);
+            }
+        } else if check_token != self.client.server_token {
+            mode.dispatcher
+                .begin_report_open_rows_check(Arc::clone(&open_rows_intent));
+            self.client
+                .send_report_open_rows_check_at(&open_rows_intent, cur_tm);
+        }
     }
 
     pub(crate) fn periodic_orders_tick(&mut self, cur_tm: i64, mode: &mut RunMode<'_>) {

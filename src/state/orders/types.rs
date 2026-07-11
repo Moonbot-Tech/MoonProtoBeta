@@ -291,8 +291,8 @@ pub enum ApplyResult {
     Applied,
     /// Command is stale for this status epoch.
     OutOfOrder,
-    /// Command would roll the worker phase back.
-    PhaseRollback,
+    /// A non-full command belongs to a different worker phase.
+    PhaseMismatch,
     /// Order was not found in state.
     OrderNotFound,
     /// Command is not applicable to order state.

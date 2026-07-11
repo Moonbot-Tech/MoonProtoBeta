@@ -75,8 +75,18 @@ pub struct Order {
     pub sell_reason: SellReason,
 
     // --- Internal sync state ---
-    /// Per-status monotonic epoch used for anti out-of-order checks.
-    pub(super) server_latest_epoch: [u16; 10],
+    /// Hard-session token under which the server epoch watermarks were seen.
+    pub(super) server_session_token: u64,
+    /// Highest accepted epoch in the server worker command stream.
+    pub(super) server_watermark: u16,
+    /// Whether a full status has seeded `server_watermark` in this session.
+    pub(super) server_baselined: bool,
+    /// Per-side watermark for replace state (`Price` / `QuantityBase`).
+    pub(super) replace_epoch_buy: u16,
+    pub(super) replace_epoch_sell: u16,
+    /// Per-side watermark for replace acknowledgements.
+    pub(super) ack_epoch_buy: u16,
+    pub(super) ack_epoch_sell: u16,
     /// Latest full order-status snapshot marker.
     pub(crate) snapshot_flag: u8,
     pub(super) replace_sent_time_ms: i64,
@@ -139,7 +149,13 @@ impl Order {
             cancel_request: false,
             server_forced_remove: false,
             sell_reason: SellReason::Unknown,
-            server_latest_epoch: [0; 10],
+            server_session_token: 0,
+            server_watermark: 0,
+            server_baselined: false,
+            replace_epoch_buy: 0,
+            replace_epoch_sell: 0,
+            ack_epoch_buy: 0,
+            ack_epoch_sell: 0,
             snapshot_flag: 0,
             replace_sent_time_ms: 0,
             pending_cancel_sent_ms: 0,
@@ -147,6 +163,15 @@ impl Order {
             last_buy_actual_price: 0.0,
             last_sell_actual_price: 0.0,
         }
+    }
+
+    pub(super) fn reset_server_epochs(&mut self) {
+        self.server_watermark = 0;
+        self.server_baselined = false;
+        self.replace_epoch_buy = 0;
+        self.replace_epoch_sell = 0;
+        self.ack_epoch_buy = 0;
+        self.ack_epoch_sell = 0;
     }
 }
 

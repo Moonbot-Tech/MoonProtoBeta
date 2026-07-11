@@ -1065,17 +1065,9 @@ fn dispatcher_keeps_sell_done_order_for_delphi_final_trace_grace() {
         1000,
         &mut out,
     );
-    d.process_command_order(
-        TradeCommand::OrderStatus(Box::new(order_status_for_test(
-            uid,
-            "BTCUSDT",
-            7,
-            9,
-            OrderWorkerStatus::SellDone,
-        ))),
-        1001,
-        &mut out,
-    );
+    let mut done = order_status_for_test(uid, "BTCUSDT", 7, 9, OrderWorkerStatus::SellDone);
+    done.epoch_header.epoch = 2;
+    d.process_command_order(TradeCommand::OrderStatus(Box::new(done)), 1001, &mut out);
     d.process_command_order(
         TradeCommand::OrderTracePoint(OrderTracePoint {
             market: MarketCommandHeader {

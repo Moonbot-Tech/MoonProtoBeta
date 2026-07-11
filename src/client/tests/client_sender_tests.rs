@@ -518,6 +518,28 @@ fn sender_replace_order_uses_client_wrapper_wire_defaults() {
 }
 
 #[test]
+fn sender_stops_and_vstop_use_independent_delphi_queue_keys() {
+    use crate::commands::trade::{DelphiBool, OrderWorkerStatus, StopSettings};
+
+    let uid = 42;
+    let (sender, _, send_q, _, _, _) = make_sender();
+    let mut orders = tracked_orders_for_sender(uid, 17, 9, "BTCUSDT", OrderWorkerStatus::SellSet);
+
+    let stops = StopSettings {
+        stop_loss_on: DelphiBool::TRUE,
+        sl_level: 10.0,
+        ..Default::default()
+    };
+    assert!(sender.update_order_stops(&mut orders, uid, &stops));
+    assert!(sender.update_vstop(&mut orders, uid, true, false, 9.0, 1.0));
+
+    let sent = take_send_items(&send_q);
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0].u_key, UniqueKey::stop_move(uid));
+    assert_eq!(sent[1].u_key, UniqueKey::vstop_move(uid));
+}
+
+#[test]
 fn sender_ui_switches_mark_server_update_sent_and_keep_delphi_u_key_uid() {
     let (sender, _, send_q, _, server_update_sent, _) = make_sender();
 

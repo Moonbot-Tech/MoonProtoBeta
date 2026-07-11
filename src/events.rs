@@ -356,11 +356,53 @@ impl EventDispatcher {
         &mut self,
         ticket: ReportSyncTicket,
         request: ReportSyncRequest,
-    ) {
+    ) -> u64 {
         let mut events = Vec::with_capacity(1);
-        self.reports.begin_sync(ticket, request, &mut events);
+        let request_uid = self.reports.begin_sync(ticket, request, &mut events);
         self.queued_events
             .extend(events.into_iter().map(Event::Report));
+        request_uid
+    }
+
+    pub(crate) fn retry_active_report_page(
+        &mut self,
+        request_uid: u64,
+    ) -> Option<ReportSyncRequest> {
+        self.reports.retry_active_page(request_uid)
+    }
+
+    pub(crate) fn report_waiting_for_page_apply(&self) -> bool {
+        self.reports.waiting_for_page_apply()
+    }
+
+    pub(crate) fn report_page_applied(
+        &mut self,
+        page: &crate::state::ReportSyncPage,
+    ) -> crate::state::ReportPageApplyAction {
+        let mut events = Vec::with_capacity(1);
+        let action = self.reports.page_applied(page, &mut events);
+        self.queued_events
+            .extend(events.into_iter().map(Event::Report));
+        action
+    }
+
+    pub(crate) fn defer_report_open_rows_check_until_schema(&mut self, rec_ids: Arc<[i64]>) {
+        self.reports.defer_open_rows_check_until_schema(rec_ids);
+    }
+
+    pub(crate) fn begin_report_open_rows_check(&mut self, rec_ids: Arc<[i64]>) {
+        let mut events = Vec::with_capacity(1);
+        self.reports.begin_open_rows_check(rec_ids, &mut events);
+        self.queued_events
+            .extend(events.into_iter().map(Event::Report));
+    }
+
+    pub(crate) fn clear_report_open_rows_check(&mut self) {
+        self.reports.clear_open_rows_check();
+    }
+
+    pub(crate) fn pending_report_open_row_ids(&self) -> Option<Arc<[i64]>> {
+        self.reports.pending_open_row_ids()
     }
 
     /// Mutable order state for local Delphi-equivalent UI side effects.

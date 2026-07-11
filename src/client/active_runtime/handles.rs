@@ -49,8 +49,8 @@ pub struct MoonOrders {
 
 /// Report database replication handle.
 ///
-/// The handle only submits non-blocking intent. Typed schema/row/completion
-/// results arrive through [`crate::Event::Report`].
+/// The handle only submits non-blocking intent. Typed schema/page/row results
+/// arrive through [`crate::Event::Report`].
 #[derive(Clone)]
 pub struct MoonReports {
     pub(super) tx: mpsc::Sender<RuntimeCommand>,
@@ -66,9 +66,8 @@ impl MoonReports {
 
     /// Start or replace report catch-up intent and return immediately.
     ///
-    /// The same committed cursor is replayed automatically after a hard
-    /// reconnect. Call this again only after the application has durably
-    /// advanced its local cursor.
+    /// Each page must be committed by the application and acknowledged with
+    /// [`Self::page_applied`] before Active Lib requests the next page.
     pub fn sync(
         &self,
         request: crate::state::ReportSyncRequest,
@@ -77,12 +76,41 @@ impl MoonReports {
             return Err(MoonClientError::InvalidReportSyncRequest);
         }
         let ticket = crate::state::ReportSyncTicket {
-            request_uid: random_nonzero_u64(),
+            sync_id: random_nonzero_u64(),
         };
         self.tx
             .send(RuntimeCommand::ReportSync { ticket, request })
             .map_err(|_| MoonClientError::RuntimeStopped)?;
         Ok(ticket)
+    }
+
+    /// Confirm that one report page was durably applied to the local database.
+    ///
+    /// This is the catch-up backpressure boundary. The runtime sends no next
+    /// page request until this non-blocking intent reaches the runtime thread.
+    pub fn page_applied(&self, page: &crate::state::ReportSyncPage) -> Result<(), MoonClientError> {
+        self.tx
+            .send(RuntimeCommand::ReportPageApplied(page.clone()))
+            .map_err(|_| MoonClientError::RuntimeStopped)
+    }
+
+    /// Reconcile the newest open report rows and retain the set for hard-reconnect recovery.
+    ///
+    /// IDs are sorted, deduplicated, and capped to the newest 100 `newRecID`
+    /// values. Passing an empty slice clears the retained check intent.
+    pub fn check_open_rows(&self, rec_ids: &[i64]) -> Result<(), MoonClientError> {
+        if rec_ids.iter().any(|rec_id| *rec_id <= 0) {
+            return Err(MoonClientError::InvalidReportOpenRows);
+        }
+        let mut rec_ids = rec_ids.to_vec();
+        rec_ids.sort_unstable();
+        rec_ids.dedup();
+        if rec_ids.len() > crate::commands::report::MAX_CHECK_ROW_IDS {
+            rec_ids.drain(..rec_ids.len() - crate::commands::report::MAX_CHECK_ROW_IDS);
+        }
+        self.tx
+            .send(RuntimeCommand::ReportCheckOpenRows(rec_ids.into()))
+            .map_err(|_| MoonClientError::RuntimeStopped)
     }
 }
 

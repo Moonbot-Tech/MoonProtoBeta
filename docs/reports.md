@@ -1,74 +1,119 @@
 # Report Database Replication
 
-MoonProto can maintain an application-owned replica of the core's `Orders`
-report database. The library owns transport, schema decoding, hard-reconnect
-resubscription, catch-up ordering, and typed row parsing. The application owns
-the SQLite connection, transactions, retention policy, and durable cursor.
+MoonProto can maintain an application-owned replica of the core's historical
+`Orders` report database. Active Lib owns transport, schema decoding, retries,
+hard-reconnect recovery, and typed row parsing. The application owns its
+SQLite connection, migrations, transactions, retention policy, and durable
+data.
 
-This domain is separate from `snapshot().orders()`. Retained orders are the
-live trading model; report rows are the historical database model.
+This domain is separate from `snapshot().orders()`. The snapshot is the live
+trading model used for tables, charts, and order actions. Report replication is
+the durable historical database model.
 
-## Recommended API
+## Recommended Flow
 
-Use `MoonClient::reports()` and `Event::Report` for every new report database
-integration. This is the maintained path for creating a local report database,
-catching up rows written while the application was offline, and keeping that
-database current during the live session.
-
-The deprecated `Event::ClosedSellOrderReport` stream remains available for
-existing consumers that execute the core's expanded SQL. It reports only the
-legacy closed-sell SQL flow and does not provide schema negotiation, initial
-history, offline catch-up, delete reconciliation, or reconnect recovery. Do not
-build a new replica on that event.
-
-This deprecation does not apply to `snapshot().orders()` or `Event::Order`.
-Those remain the normal live order model for tables, charts, and order actions;
-report replication is the durable historical database model.
-
-## Start Replication
+Start from the cursor already committed in the local replica:
 
 ```rust
 use moonproto::{ReportHistoryDepth, ReportSyncRequest};
 
-let ticket = client.reports().sync(ReportSyncRequest::fresh(
-    ReportHistoryDepth::ServerDefault,
-))?;
+let ticket = if local_db_is_empty() {
+    client.reports().sync(ReportSyncRequest::fresh(
+        ReportHistoryDepth::ServerDefault,
+    ))?
+} else {
+    client.reports().sync(ReportSyncRequest::resume(
+        local_max_rec_id + 1,
+    ))?
+};
 ```
 
 The call returns immediately. If the schema is not known yet, Active Lib asks
-for it first and starts catch-up only after the schema has been validated.
-Results arrive through `Event::Report`:
+for it first. Catch-up then advances one page at a time:
 
 ```rust
 match event {
     moonproto::Event::Report(moonproto::ReportEvent::Schema(schema)) => {
         migrate_local_table(&schema)?;
     }
+    moonproto::Event::Report(moonproto::ReportEvent::SyncPage(page)) => {
+        let tx = db.transaction()?;
+        upsert_page_with_one_prepared_statement(&tx, &page.rows)?;
+        tx.commit()?;
+
+        // This is the flow-control boundary. No next page is requested before it.
+        client.reports().page_applied(&page)?;
+    }
     moonproto::Event::Report(moonproto::ReportEvent::RowUpsert(row)) => {
-        upsert_local_row(row)?;
+        upsert_live_row(row)?;
     }
     moonproto::Event::Report(moonproto::ReportEvent::RowDelete { rec_id }) => {
         delete_local_row(rec_id)?;
     }
     moonproto::Event::Report(moonproto::ReportEvent::SyncComplete(done)) => {
-        commit_sync(done)?;
+        persist_cursor(done.next_from_rec_id)?;
     }
     _ => {}
 }
 ```
 
-`ReportSyncTicket` identifies the first network attempt. A retry after timeout
-or hard reconnect can use a new request id and emits a new `SyncStarted` event;
-the durable operation is identified by its `ReportSyncRequest` and completed by
-`SyncComplete`, not by waiting synchronously for the original ticket.
+One request produces one page. Active Lib never requests the next page until
+the application acknowledges the current one after its database transaction.
+This keeps at most one catch-up page in flight per core and makes the database
+writer the natural backpressure boundary.
+
+`SyncComplete` is emitted only after the final page has been acknowledged. It
+therefore describes durably applied catch-up, not merely parsed network data.
+
+## Page Contract
+
+`ReportSyncPage` contains:
+
+- `rows`: the complete typed page;
+- `from_rec_id`: the cursor used for this page;
+- `last_rec_id`: the last row in this page, or zero for an empty page;
+- `max_rec_id`: the core database's global maximum at response time;
+- `database_recreated`: the core database is behind the local cursor;
+- `is_complete()`: no further page is needed for this catch-up pass.
+
+Pages are idempotent by `newRecID`. If the application cannot commit a page,
+it must not call `page_applied`; the next page will not be requested.
+
+A live upsert/delete can overtake a sliced page on UDP. Active Lib tracks live
+IDs only for the current in-flight page and removes their older page copies, so
+the application always applies the live value last without retaining a
+whole-sync reconciliation set.
+
+When `database_recreated` is true, discard the stale local replica and then
+call `page_applied`. Active Lib restarts the same operation from a fresh cursor.
+
+Missing page responses are retried automatically. A retry repeats only the
+current page, not the complete history.
+
+## Open Rows After Reconnect
+
+Report rows are not fully append-only. An open deal can close or be deleted
+while the client is offline, even though its `newRecID` is below the committed
+cursor. Keep the current open-row IDs registered with Active Lib:
+
+```rust
+client.reports().check_open_rows(&open_rec_ids)?;
+```
+
+The library sorts and deduplicates the IDs, keeps the newest 100, sends an
+addressed check, and retains that set for hard-reconnect recovery. Results use
+the normal `RowUpsert` and `RowDelete` events. `OpenRowsCheckComplete` means one
+authoritative result was received for every retained ID.
+
+Call `check_open_rows` again when the local set changes. Passing an empty slice
+clears the retained check intent. Closed rows are not rechecked: they are
+stable apart from accepted cosmetic edits.
 
 ## Schema And SQLite
 
 `ReportSchema` is append-only: existing field indices, names, kinds, and SQLite
-declarations are stable; new fields are appended. Applications should create
-missing columns, never rebuild row decoding around column order guessed locally.
-
-The schema exposes SQLite helpers:
+declarations are stable; new fields extend the tail. Create missing columns,
+never infer wire indices from a locally guessed column order.
 
 ```rust
 let create = schema.sqlite_create_table_sql("Orders");
@@ -76,88 +121,35 @@ let add = schema.sqlite_add_column_sql("Orders", field);
 let index = schema.sqlite_unique_index_sql("Orders");
 ```
 
-`newRecID` is the stable replication key. It is different from an active order
-UID, an exchange order id, and the legacy report `db_id`.
-The report column named `TaskID` is also a core-local worker number; it is not
-the public MoonProto order UID.
+`newRecID` is the immutable replication key. It is different from an active
+order UID, exchange order id, and the legacy report `db_id`. The current schema
+is also available from `snapshot().report_schema()`.
 
-The current validated schema is also available from
-`snapshot().report_schema()`.
+For each page, use one SQLite transaction and reuse one prepared upsert
+statement. Preparing SQL for every row can turn the local writer into the
+bottleneck that page-level flow control is designed to avoid.
 
-## Migrating From The Legacy SQL Event
+## Reconnect And Cursor
 
-Do not apply `Event::ClosedSellOrderReport` and `Event::Report` to the same
-replica. During migration:
+Report subscription belongs to the hard server session. Active Lib tracks the
+server session token. After a hard reconnect it resumes from the last page that
+the application acknowledged and repeats the retained open-row check. A soft
+network rebind keeps the server session and does not cause a false resync.
+The append-only schema is revalidated once per new hard session before page or
+check traffic resumes, so newly appended fields are migrated before their rows
+are applied.
 
-1. Create a separate typed replica from `ReportEvent::Schema`.
-2. Start it with `ReportSyncRequest::fresh(...)`. Use
-   `ReportHistoryDepth::All` when the replacement must preserve all history, or
-   choose an explicit retained depth for a deliberately bounded database.
-3. Apply typed row events idempotently by `newRecID` and commit the cursor only
-   after `SyncComplete`.
-4. After the first complete sync and reconciliation, atomically switch readers
-   to the typed replica and stop executing the deprecated SQL stream.
-5. Remove the legacy replica only after the replacement has been verified.
+The durable cursor is always `max(newRecID) + 1`. Never move it merely because
+a page event arrived; the page must first be committed and acknowledged.
 
-Do not resume from `max(newRecID) + 1` taken from a legacy SQL replica. The old
-stream had no offline catch-up, so missing rows may exist below that maximum.
-Even when its SQL happens to contain `newRecID`, completeness is not proven.
-`db_id` and `newRecID` are also different identities and must not be converted
-by assumption.
+For an empty replica, `ReportHistoryDepth::ServerDefault` uses the core's
+default retained depth, `Days(n)` requests an explicit depth, and `All`
+requests all retained history. History depth applies only to a fresh cursor.
 
-The core may emit both compatibility and typed events during the transition.
-Receiving both does not mean both should be written to the database.
+## Legacy SQL Event
 
-## Cursor Selection
-
-Choose the next request from the local durable database:
-
-- if open rows exist, use the smallest `newRecID` among them;
-- otherwise use `max(newRecID) + 1`;
-- for an empty database use `from_rec_id = 0` and select a history depth;
-- `ReportHistoryDepth::All` requests all retained history;
-- when `from_rec_id > 0`, history depth is intentionally ignored.
-
-```rust
-client.reports().sync(ReportSyncRequest::resume(next_rec_id))?;
-```
-
-Do not advance the durable cursor merely because row events arrived. Commit it
-only after the matching `SyncComplete` has been applied successfully.
-
-## Catch-Up And Live Ordering
-
-The catch-up request also enables live report delivery for the current hard
-session. Active Lib merges live changes with in-flight batches:
-
-- a live upsert wins over an older copy of the same row in a late batch;
-- a live delete prevents a late batch from recreating that row;
-- duplicate batches are ignored;
-- completion is emitted only after every declared batch and row is present,
-  even when the completion packet arrived first.
-
-`SyncComplete::keep_rec_ids` is the authoritative keep-set for the requested
-range after batch/live merging. After applying all preceding row events, remove
-local rows with `newRecID >= from_rec_id` that are absent from this set. Perform
-that reconciliation only on `SyncComplete`; a partial response must never
-delete local history.
-
-If `database_recreated` is true, the core's global maximum is behind the local
-cursor. Discard the stale replica and start a fresh sync instead of reconciling
-the two unrelated databases.
-
-## Reconnect And Retry
-
-Report subscription belongs to the core session. A soft network rebind keeps
-it. A hard session change loses it. Active Lib compares the current server
-session token with the token under which report sync completed and resends the
-same committed request when they differ. That single request both restores the
-subscription and catches up the offline gap.
-
-Missing progress is retried automatically. The application should keep event
-handling non-blocking and make row application idempotent by `newRecID`.
-
-Retention cleanup is reconciled by the next complete sync rather than emitted
-as a storm of live deletes. An old closed row changed below an incremental
-cursor is outside that cursor's range; periodically widen the cursor if the
-application needs to refresh such historical edits.
+`Event::ClosedSellOrderReport` remains only for compatibility with existing
+consumers of the expanded SQL stream. It has no schema negotiation, initial
+history, offline catch-up, or reconnect recovery. New report databases should
+use `Event::Report` only, and the two streams must not write into the same
+replica.

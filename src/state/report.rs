@@ -1,7 +1,7 @@
 //! Typed report-DB replication state.
 
 use crate::commands::registry::decode_utf8_delphi;
-use crate::commands::report::{RepSchema as WireSchema, RepSyncBatch, RepSyncDone};
+use crate::commands::report::{RepSchema as WireSchema, RepSyncPage as WireSyncPage};
 use crate::compression::synlz_decompress;
 use std::collections::HashSet;
 use std::fmt;
@@ -351,18 +351,49 @@ impl ReportSyncRequest {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ReportSyncTicket {
+    pub sync_id: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReportSyncPage {
+    pub ticket: ReportSyncTicket,
     pub request_uid: u64,
+    pub from_rec_id: i64,
+    pub last_rec_id: i64,
+    pub max_rec_id: i64,
+    pub rows: Arc<[ReportRow]>,
+    pub database_recreated: bool,
+    wire_row_count: u16,
+}
+
+impl ReportSyncPage {
+    pub fn row_count(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub fn is_complete(&self) -> bool {
+        !self.database_recreated
+            && (self.wire_row_count == 0 || self.last_rec_id >= self.max_rec_id)
+    }
+
+    /// Number of rows declared by the server before live-wins filtering.
+    pub fn source_row_count(&self) -> u16 {
+        self.wire_row_count
+    }
+
+    pub fn next_from_rec_id(&self) -> Option<i64> {
+        (!self.database_recreated && !self.is_complete())
+            .then(|| self.last_rec_id.saturating_add(1))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReportSyncComplete {
-    pub request_uid: u64,
-    pub from_rec_id: i64,
-    pub batch_count: u16,
+    pub ticket: ReportSyncTicket,
+    pub page_count: u32,
     pub total_rows: u32,
     pub max_rec_id: i64,
-    pub keep_rec_ids: Arc<[i64]>,
-    pub database_recreated: bool,
+    pub next_from_rec_id: i64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -376,63 +407,97 @@ pub enum ReportEvent {
         ticket: ReportSyncTicket,
         request: ReportSyncRequest,
     },
+    SyncPage(Arc<ReportSyncPage>),
     SyncComplete(ReportSyncComplete),
+    OpenRowsCheckStarted {
+        rec_ids: Arc<[i64]>,
+    },
+    OpenRowsCheckComplete {
+        rec_ids: Arc<[i64]>,
+    },
     SchemaRejected {
         reason: String,
     },
 }
 
-#[derive(Debug, Clone, Copy)]
-struct SyncDoneState {
-    batch_count: u16,
-    total_rows: u32,
-    max_rec_id: i64,
-}
-
 #[derive(Debug)]
 struct ActiveSync {
     ticket: ReportSyncTicket,
-    request: ReportSyncRequest,
-    received_batches: HashSet<u16>,
-    parsed_rows: u32,
-    keep_rec_ids: HashSet<i64>,
+    initial_history_depth: ReportHistoryDepth,
+    current_request: ReportSyncRequest,
+    current_request_uid: u64,
+    page_count: u32,
+    total_rows: u32,
+    awaiting_apply: Option<Arc<ReportSyncPage>>,
     live_touched: HashSet<i64>,
-    done: Option<SyncDoneState>,
 }
 
 impl ActiveSync {
-    fn new(ticket: ReportSyncTicket, request: ReportSyncRequest) -> Self {
+    fn new(ticket: ReportSyncTicket, request: ReportSyncRequest, request_uid: u64) -> Self {
         Self {
             ticket,
-            request,
-            received_batches: HashSet::new(),
-            parsed_rows: 0,
-            keep_rec_ids: HashSet::new(),
+            initial_history_depth: request.history_depth,
+            current_request: request,
+            current_request_uid: request_uid,
+            page_count: 0,
+            total_rows: 0,
+            awaiting_apply: None,
             live_touched: HashSet::new(),
-            done: None,
         }
     }
 }
 
 #[derive(Debug)]
-pub(crate) enum ReportControl {
-    SendSync {
-        ticket: ReportSyncTicket,
+struct ActiveOpenRowsCheck {
+    rec_ids: Arc<[i64]>,
+    pending: HashSet<i64>,
+}
+
+impl ActiveOpenRowsCheck {
+    fn new(rec_ids: Arc<[i64]>) -> Self {
+        Self {
+            pending: rec_ids.iter().copied().collect(),
+            rec_ids,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum ReportPageApplyAction {
+    SendNext {
+        request_uid: u64,
         request: ReportSyncRequest,
     },
-    SyncCompleted {
+    Complete {
+        received_request_uid: u64,
+        durable_request: ReportSyncRequest,
+    },
+    Ignored,
+}
+
+#[derive(Debug)]
+pub(crate) enum ReportControl {
+    SendSync {
+        request_uid: u64,
+        request: ReportSyncRequest,
+    },
+    PageReceived {
         request_uid: u64,
     },
-    SyncProgress {
-        request_uid: u64,
+    SendOpenRowsCheck {
+        rec_ids: Arc<[i64]>,
     },
+    SchemaReceived,
+    OpenRowsCheckCompleted,
 }
 
 #[derive(Default)]
 pub(crate) struct ReportReplicationState {
     schema: Option<Arc<ReportSchema>>,
     pending_after_schema: Option<(ReportSyncTicket, ReportSyncRequest)>,
+    pending_check_after_schema: Option<Arc<[i64]>>,
     active: Option<ActiveSync>,
+    active_check: Option<ActiveOpenRowsCheck>,
 }
 
 impl ReportReplicationState {
@@ -454,10 +519,54 @@ impl ReportReplicationState {
         ticket: ReportSyncTicket,
         request: ReportSyncRequest,
         out: &mut Vec<ReportEvent>,
-    ) {
+    ) -> u64 {
+        let request_uid = random_nonzero_u64();
         self.pending_after_schema = None;
-        self.active = Some(ActiveSync::new(ticket, request));
+        self.active = Some(ActiveSync::new(ticket, request, request_uid));
         out.push(ReportEvent::SyncStarted { ticket, request });
+        request_uid
+    }
+
+    pub(crate) fn waiting_for_page_apply(&self) -> bool {
+        self.active
+            .as_ref()
+            .is_some_and(|active| active.awaiting_apply.is_some())
+    }
+
+    pub(crate) fn retry_active_page(&mut self, request_uid: u64) -> Option<ReportSyncRequest> {
+        let active = self.active.as_mut()?;
+        if active.awaiting_apply.is_some() {
+            return None;
+        }
+        active.current_request_uid = request_uid;
+        Some(active.current_request)
+    }
+
+    pub(crate) fn defer_open_rows_check_until_schema(&mut self, rec_ids: Arc<[i64]>) {
+        self.pending_check_after_schema = Some(rec_ids);
+        self.active_check = None;
+    }
+
+    pub(crate) fn begin_open_rows_check(
+        &mut self,
+        rec_ids: Arc<[i64]>,
+        out: &mut Vec<ReportEvent>,
+    ) {
+        self.pending_check_after_schema = None;
+        self.active_check = Some(ActiveOpenRowsCheck::new(Arc::clone(&rec_ids)));
+        out.push(ReportEvent::OpenRowsCheckStarted { rec_ids });
+    }
+
+    pub(crate) fn clear_open_rows_check(&mut self) {
+        self.pending_check_after_schema = None;
+        self.active_check = None;
+    }
+
+    pub(crate) fn pending_open_row_ids(&self) -> Option<Arc<[i64]>> {
+        let check = self.active_check.as_ref()?;
+        let mut ids = check.pending.iter().copied().collect::<Vec<_>>();
+        ids.sort_unstable();
+        Some(ids.into())
     }
 
     pub(crate) fn apply_schema(
@@ -481,9 +590,17 @@ impl ReportReplicationState {
         let schema = Arc::new(schema);
         self.schema = Some(Arc::clone(&schema));
         out.push(ReportEvent::Schema(schema));
+        controls.push(ReportControl::SchemaReceived);
         if let Some((ticket, request)) = self.pending_after_schema.take() {
-            self.begin_sync(ticket, request, out);
-            controls.push(ReportControl::SendSync { ticket, request });
+            let request_uid = self.begin_sync(ticket, request, out);
+            controls.push(ReportControl::SendSync {
+                request_uid,
+                request,
+            });
+        }
+        if let Some(rec_ids) = self.pending_check_after_schema.take() {
+            self.begin_open_rows_check(Arc::clone(&rec_ids), out);
+            controls.push(ReportControl::SendOpenRowsCheck { rec_ids });
         }
         true
     }
@@ -493,6 +610,7 @@ impl ReportReplicationState {
         rec_id: i64,
         raw: &[u8],
         out: &mut Vec<ReportEvent>,
+        controls: &mut Vec<ReportControl>,
     ) -> bool {
         let Some(schema) = self.schema.as_deref() else {
             // Asking for the schema also enables live delivery on the server.
@@ -506,13 +624,18 @@ impl ReportReplicationState {
         };
         if let Some(active) = self.active.as_mut() {
             active.live_touched.insert(rec_id);
-            active.keep_rec_ids.insert(rec_id);
         }
         out.push(ReportEvent::RowUpsert(row));
+        self.resolve_open_row_check(rec_id, out, controls);
         true
     }
 
-    pub(crate) fn apply_live_delete(&mut self, rec_id: i64, out: &mut Vec<ReportEvent>) -> bool {
+    pub(crate) fn apply_live_delete(
+        &mut self,
+        rec_id: i64,
+        out: &mut Vec<ReportEvent>,
+        controls: &mut Vec<ReportControl>,
+    ) -> bool {
         if rec_id <= 0 {
             return false;
         }
@@ -521,15 +644,15 @@ impl ReportReplicationState {
         }
         if let Some(active) = self.active.as_mut() {
             active.live_touched.insert(rec_id);
-            active.keep_rec_ids.remove(&rec_id);
         }
         out.push(ReportEvent::RowDelete { rec_id });
+        self.resolve_open_row_check(rec_id, out, controls);
         true
     }
 
-    pub(crate) fn apply_sync_batch(
+    pub(crate) fn apply_sync_page(
         &mut self,
-        wire: RepSyncBatch,
+        wire: WireSyncPage,
         out: &mut Vec<ReportEvent>,
         controls: &mut Vec<ReportControl>,
     ) -> bool {
@@ -539,93 +662,164 @@ impl ReportReplicationState {
         let Some(active) = self.active.as_mut() else {
             return true;
         };
-        if wire.request_uid != active.ticket.request_uid {
+        if wire.request_uid != active.current_request_uid {
             return true;
         }
-        if active.received_batches.contains(&wire.batch_num) {
+        if active.awaiting_apply.is_some() {
             return true;
         }
-        let Some(decoded) = synlz_decompress(&wire.blob) else {
-            return false;
-        };
-        let Some(rows) = ReportRow::parse_many(&decoded, wire.row_count, schema.rec_id_field_index)
-        else {
-            return false;
-        };
-        active.received_batches.insert(wire.batch_num);
-        active.parsed_rows = active
-            .parsed_rows
-            .checked_add(u32::from(wire.row_count))
-            .unwrap_or(u32::MAX);
-        for row in rows {
-            if active.live_touched.contains(&row.rec_id) {
-                continue;
+        let mut rows = if wire.row_count == 0 {
+            if wire.last_rec_id != 0 || !wire.blob.is_empty() {
+                return false;
             }
-            active.keep_rec_ids.insert(row.rec_id);
-            out.push(ReportEvent::RowUpsert(row));
+            Vec::new()
+        } else {
+            let Some(decoded) = synlz_decompress(&wire.blob) else {
+                return false;
+            };
+            let Some(rows) =
+                ReportRow::parse_many(&decoded, wire.row_count, schema.rec_id_field_index)
+            else {
+                return false;
+            };
+            rows
+        };
+        if wire.max_rec_id < 0
+            || rows.windows(2).any(|pair| pair[0].rec_id >= pair[1].rec_id)
+            || rows
+                .last()
+                .is_some_and(|row| row.rec_id != wire.last_rec_id)
+            || (active.current_request.from_rec_id > 0
+                && rows
+                    .first()
+                    .is_some_and(|row| row.rec_id < active.current_request.from_rec_id))
+        {
+            return false;
         }
-        controls.push(ReportControl::SyncProgress {
+        let database_recreated = active.current_request.from_rec_id > 0
+            && wire.max_rec_id < active.current_request.from_rec_id.saturating_sub(1);
+        if database_recreated && !rows.is_empty() {
+            return false;
+        }
+        if !database_recreated && wire.last_rec_id > wire.max_rec_id {
+            return false;
+        }
+        rows.retain(|row| !active.live_touched.contains(&row.rec_id));
+        let page = Arc::new(ReportSyncPage {
+            ticket: active.ticket,
+            request_uid: wire.request_uid,
+            from_rec_id: active.current_request.from_rec_id,
+            last_rec_id: wire.last_rec_id,
+            max_rec_id: wire.max_rec_id,
+            rows: rows.into(),
+            database_recreated,
+            wire_row_count: wire.row_count,
+        });
+        active.awaiting_apply = Some(Arc::clone(&page));
+        out.push(ReportEvent::SyncPage(page));
+        controls.push(ReportControl::PageReceived {
             request_uid: wire.request_uid,
         });
-        self.try_complete(out, controls);
         true
     }
 
-    pub(crate) fn apply_sync_done(
+    pub(crate) fn page_applied(
         &mut self,
-        wire: RepSyncDone,
+        page: &ReportSyncPage,
+        out: &mut Vec<ReportEvent>,
+    ) -> ReportPageApplyAction {
+        let Some(active) = self.active.as_mut() else {
+            return ReportPageApplyAction::Ignored;
+        };
+        let Some(awaiting) = active.awaiting_apply.as_ref() else {
+            return ReportPageApplyAction::Ignored;
+        };
+        if awaiting.ticket != page.ticket
+            || awaiting.request_uid != page.request_uid
+            || awaiting.from_rec_id != page.from_rec_id
+            || awaiting.last_rec_id != page.last_rec_id
+            || awaiting.max_rec_id != page.max_rec_id
+            || awaiting.database_recreated != page.database_recreated
+            || awaiting.wire_row_count != page.wire_row_count
+            || !Arc::ptr_eq(&awaiting.rows, &page.rows)
+        {
+            return ReportPageApplyAction::Ignored;
+        }
+        let applied = active.awaiting_apply.take().expect("page checked above");
+        active.page_count = active.page_count.saturating_add(1);
+        active.total_rows = active
+            .total_rows
+            .saturating_add(u32::try_from(applied.rows.len()).unwrap_or(u32::MAX));
+
+        if applied.database_recreated {
+            let request = ReportSyncRequest::fresh(active.initial_history_depth);
+            let request_uid = random_nonzero_u64();
+            active.current_request = request;
+            active.current_request_uid = request_uid;
+            active.live_touched.clear();
+            return ReportPageApplyAction::SendNext {
+                request_uid,
+                request,
+            };
+        }
+
+        if applied.is_complete() {
+            let active = self.active.take().expect("active sync checked above");
+            let next_from_rec_id = applied.max_rec_id.saturating_add(1);
+            let durable_request = ReportSyncRequest::resume(next_from_rec_id);
+            out.push(ReportEvent::SyncComplete(ReportSyncComplete {
+                ticket: active.ticket,
+                page_count: active.page_count,
+                total_rows: active.total_rows,
+                max_rec_id: applied.max_rec_id,
+                next_from_rec_id,
+            }));
+            return ReportPageApplyAction::Complete {
+                received_request_uid: applied.request_uid,
+                durable_request,
+            };
+        }
+
+        let request = ReportSyncRequest::resume(applied.last_rec_id.saturating_add(1));
+        let request_uid = random_nonzero_u64();
+        active.current_request = request;
+        active.current_request_uid = request_uid;
+        active.live_touched.clear();
+        ReportPageApplyAction::SendNext {
+            request_uid,
+            request,
+        }
+    }
+
+    fn resolve_open_row_check(
+        &mut self,
+        rec_id: i64,
         out: &mut Vec<ReportEvent>,
         controls: &mut Vec<ReportControl>,
-    ) -> bool {
-        let Some(active) = self.active.as_mut() else {
-            return true;
+    ) {
+        let Some(check) = self.active_check.as_mut() else {
+            return;
         };
-        if wire.request_uid != active.ticket.request_uid {
-            return true;
+        if !check.pending.remove(&rec_id) || !check.pending.is_empty() {
+            return;
         }
-        let Ok(total_rows) = u32::try_from(wire.total_rows) else {
-            return false;
-        };
-        active.done = Some(SyncDoneState {
-            batch_count: wire.batch_count,
-            total_rows,
-            max_rec_id: wire.max_rec_id,
+        let check = self
+            .active_check
+            .take()
+            .expect("open-row check just completed");
+        out.push(ReportEvent::OpenRowsCheckComplete {
+            rec_ids: check.rec_ids,
         });
-        controls.push(ReportControl::SyncProgress {
-            request_uid: wire.request_uid,
-        });
-        self.try_complete(out, controls);
-        true
+        controls.push(ReportControl::OpenRowsCheckCompleted);
     }
+}
 
-    fn try_complete(&mut self, out: &mut Vec<ReportEvent>, controls: &mut Vec<ReportControl>) {
-        let Some(active) = self.active.as_ref() else {
-            return;
-        };
-        let Some(done) = active.done else {
-            return;
-        };
-        if active.parsed_rows != done.total_rows
-            || active.received_batches.len() != usize::from(done.batch_count)
-            || !(0..done.batch_count).all(|batch| active.received_batches.contains(&batch))
-        {
-            return;
+fn random_nonzero_u64() -> u64 {
+    loop {
+        let value = rand::random();
+        if value != 0 {
+            return value;
         }
-
-        let active = self.active.take().expect("active sync just checked");
-        let database_recreated = active.request.from_rec_id > 0
-            && done.max_rec_id < active.request.from_rec_id.saturating_sub(1);
-        let request_uid = active.ticket.request_uid;
-        out.push(ReportEvent::SyncComplete(ReportSyncComplete {
-            request_uid,
-            from_rec_id: active.request.from_rec_id,
-            batch_count: done.batch_count,
-            total_rows: done.total_rows,
-            max_rec_id: done.max_rec_id,
-            keep_rec_ids: active.keep_rec_ids.into_iter().collect::<Vec<_>>().into(),
-            database_recreated,
-        }));
-        controls.push(ReportControl::SyncCompleted { request_uid });
     }
 }
 
@@ -681,7 +875,7 @@ impl fmt::Display for ReportHistoryDepth {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::report::{RepSyncBatch, RepSyncDone};
+    use crate::commands::report::RepSyncPage as WireSyncPage;
     use crate::commands::trade::BaseCommandHeader;
     use crate::compression::synlz_compress;
 
@@ -783,157 +977,154 @@ mod tests {
     fn live_upsert_before_schema_waits_for_the_deferred_catch_up() {
         let mut state = ReportReplicationState::default();
         let mut out = Vec::new();
-        assert!(state.apply_live_upsert(7, &row(99, 1), &mut out));
+        let mut controls = Vec::new();
+        assert!(state.apply_live_upsert(7, &row(99, 1), &mut out, &mut controls));
         assert!(out.is_empty());
-        assert!(state.apply_live_delete(7, &mut out));
+        assert!(state.apply_live_delete(7, &mut out, &mut controls));
         assert!(out.is_empty());
     }
 
     #[test]
-    fn done_before_batch_completes_only_after_batch_arrives() {
+    fn page_is_published_once_and_next_request_waits_for_application_ack() {
         let mut state = ready_state();
-        let ticket = ReportSyncTicket { request_uid: 55 };
+        let ticket = ReportSyncTicket { sync_id: 55 };
         let request = ReportSyncRequest::fresh(ReportHistoryDepth::ServerDefault);
         let mut out = Vec::new();
         let mut controls = Vec::new();
-        state.begin_sync(ticket, request, &mut out);
+        let request_uid = state.begin_sync(ticket, request, &mut out);
         out.clear();
 
-        assert!(state.apply_sync_done(
-            RepSyncDone {
-                header: header(36),
-                request_uid: 55,
-                batch_count: 1,
-                total_rows: 1,
-                max_rec_id: 7,
-            },
-            &mut out,
-            &mut controls,
+        let page = WireSyncPage {
+            header: header(39),
+            request_uid,
+            last_rec_id: 7,
+            max_rec_id: 9,
+            row_count: 1,
+            blob: synlz_compress(&row(7, 1)),
+        };
+        assert!(state.apply_sync_page(page.clone(), &mut out, &mut controls,));
+        let ReportEvent::SyncPage(page_event) = &out[0] else {
+            panic!("expected page")
+        };
+        let page_event = Arc::clone(page_event);
+        assert_eq!(page_event.rows.len(), 1);
+        assert!(matches!(
+            controls.as_slice(),
+            [ReportControl::PageReceived { .. }]
         ));
-        assert!(out.is_empty());
 
-        assert!(state.apply_sync_batch(
-            RepSyncBatch {
-                header: header(35),
-                request_uid: 55,
-                batch_num: 0,
+        out.clear();
+        controls.clear();
+        assert!(state.apply_sync_page(page, &mut out, &mut controls,));
+        assert!(out.is_empty(), "duplicate page must not be published twice");
+
+        let action = state.page_applied(&page_event, &mut out);
+        let ReportPageApplyAction::SendNext { request, .. } = action else {
+            panic!("expected next page request")
+        };
+        assert_eq!(request, ReportSyncRequest::resume(8));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn final_page_completes_only_after_application_ack() {
+        let mut state = ready_state();
+        let ticket = ReportSyncTicket { sync_id: 41 };
+        let request = ReportSyncRequest::resume(7);
+        let mut out = Vec::new();
+        let mut controls = Vec::new();
+        let request_uid = state.begin_sync(ticket, request, &mut out);
+        out.clear();
+
+        assert!(state.apply_sync_page(
+            WireSyncPage {
+                header: header(39),
+                request_uid,
+                last_rec_id: 7,
+                max_rec_id: 7,
                 row_count: 1,
                 blob: synlz_compress(&row(7, 1)),
             },
             &mut out,
             &mut controls,
         ));
-        assert!(matches!(out[0], ReportEvent::RowUpsert(_)));
-        assert!(matches!(out[1], ReportEvent::SyncComplete(_)));
-    }
+        let ReportEvent::SyncPage(page) = out.pop().unwrap() else {
+            panic!("expected page")
+        };
+        assert!(page.is_complete());
+        assert!(out.is_empty());
 
-    #[test]
-    fn live_delete_wins_over_late_batch_and_reconcile_set() {
-        let mut state = ready_state();
-        let ticket = ReportSyncTicket { request_uid: 99 };
-        let request = ReportSyncRequest::resume(5);
-        let mut out = Vec::new();
-        let mut controls = Vec::new();
-        state.begin_sync(ticket, request, &mut out);
-        out.clear();
-
-        assert!(state.apply_live_delete(7, &mut out));
-        out.clear();
-        assert!(state.apply_sync_batch(
-            RepSyncBatch {
-                header: header(35),
-                request_uid: 99,
-                batch_num: 0,
-                row_count: 1,
-                blob: synlz_compress(&row(7, 0)),
-            },
-            &mut out,
-            &mut controls,
-        ));
-        assert!(out.is_empty(), "stale batch row must not be emitted");
-        assert!(state.apply_sync_done(
-            RepSyncDone {
-                header: header(36),
-                request_uid: 99,
-                batch_count: 1,
-                total_rows: 1,
-                max_rec_id: 7,
-            },
-            &mut out,
-            &mut controls,
-        ));
-        let ReportEvent::SyncComplete(done) = &out[0] else {
+        let action = state.page_applied(&page, &mut out);
+        let ReportPageApplyAction::Complete {
+            durable_request, ..
+        } = action
+        else {
             panic!("expected completion")
         };
-        assert!(done.keep_rec_ids.is_empty());
-    }
-
-    #[test]
-    fn duplicate_batch_and_wrong_uid_do_not_advance_sync() {
-        let mut state = ready_state();
-        let ticket = ReportSyncTicket { request_uid: 41 };
-        let request = ReportSyncRequest::fresh(ReportHistoryDepth::ServerDefault);
-        let mut out = Vec::new();
-        let mut controls = Vec::new();
-        state.begin_sync(ticket, request, &mut out);
-        out.clear();
-
-        let batch = RepSyncBatch {
-            header: header(35),
-            request_uid: 41,
-            batch_num: 0,
-            row_count: 1,
-            blob: synlz_compress(&row(7, 0)),
+        assert_eq!(durable_request, ReportSyncRequest::resume(8));
+        let ReportEvent::SyncComplete(done) = &out[0] else {
+            panic!("expected completion event")
         };
-        assert!(state.apply_sync_batch(batch.clone(), &mut out, &mut controls));
-        assert!(matches!(out.as_slice(), [ReportEvent::RowUpsert(_)]));
-        out.clear();
-        assert!(state.apply_sync_batch(batch, &mut out, &mut controls));
-        assert!(out.is_empty(), "duplicate batch must be idempotent");
-
-        assert!(state.apply_sync_done(
-            RepSyncDone {
-                header: header(36),
-                request_uid: 42,
-                batch_count: 1,
-                total_rows: 1,
-                max_rec_id: 7,
-            },
-            &mut out,
-            &mut controls,
-        ));
-        assert!(out.is_empty(), "wrong request UID must be ignored");
+        assert_eq!(done.ticket, ticket);
+        assert_eq!(done.page_count, 1);
+        assert_eq!(done.total_rows, 1);
+        assert_eq!(done.next_from_rec_id, 8);
     }
 
     #[test]
-    fn missing_declared_batch_never_emits_completion() {
+    fn live_update_wins_over_an_older_copy_in_the_current_page() {
         let mut state = ready_state();
-        let ticket = ReportSyncTicket { request_uid: 51 };
-        let request = ReportSyncRequest::fresh(ReportHistoryDepth::ServerDefault);
+        let ticket = ReportSyncTicket { sync_id: 45 };
         let mut out = Vec::new();
         let mut controls = Vec::new();
-        state.begin_sync(ticket, request, &mut out);
+        let request_uid = state.begin_sync(ticket, ReportSyncRequest::resume(5), &mut out);
         out.clear();
 
-        assert!(state.apply_sync_batch(
-            RepSyncBatch {
-                header: header(35),
-                request_uid: 51,
-                batch_num: 0,
-                row_count: 1,
-                blob: synlz_compress(&row(7, 0)),
+        assert!(state.apply_live_upsert(7, &row(7, 1), &mut out, &mut controls));
+        out.clear();
+        controls.clear();
+        let mut raw = row(7, 0);
+        raw.extend_from_slice(&row(8, 0));
+        assert!(state.apply_sync_page(
+            WireSyncPage {
+                header: header(39),
+                request_uid,
+                last_rec_id: 8,
+                max_rec_id: 9,
+                row_count: 2,
+                blob: synlz_compress(&raw),
             },
             &mut out,
             &mut controls,
         ));
+        let ReportEvent::SyncPage(page) = &out[0] else {
+            panic!("expected page")
+        };
+        assert_eq!(page.source_row_count(), 2);
+        assert_eq!(
+            page.rows.iter().map(|row| row.rec_id).collect::<Vec<_>>(),
+            [8]
+        );
+        assert!(!page.is_complete());
+    }
+
+    #[test]
+    fn wrong_request_uid_is_ignored() {
+        let mut state = ready_state();
+        let ticket = ReportSyncTicket { sync_id: 51 };
+        let mut out = Vec::new();
+        let mut controls = Vec::new();
+        let request_uid = state.begin_sync(ticket, ReportSyncRequest::resume(5), &mut out);
         out.clear();
-        assert!(state.apply_sync_done(
-            RepSyncDone {
-                header: header(36),
-                request_uid: 51,
-                batch_count: 2,
-                total_rows: 2,
-                max_rec_id: 8,
+
+        assert!(state.apply_sync_page(
+            WireSyncPage {
+                header: header(39),
+                request_uid: request_uid.wrapping_add(1),
+                last_rec_id: 7,
+                max_rec_id: 7,
+                row_count: 1,
+                blob: synlz_compress(&row(7, 1)),
             },
             &mut out,
             &mut controls,
@@ -942,75 +1133,66 @@ mod tests {
     }
 
     #[test]
-    fn live_upsert_wins_over_late_batch_copy() {
+    fn database_recreation_waits_for_clear_ack_then_restarts_from_zero() {
         let mut state = ready_state();
-        let ticket = ReportSyncTicket { request_uid: 61 };
-        let request = ReportSyncRequest::resume(5);
-        let mut out = Vec::new();
-        let mut controls = Vec::new();
-        state.begin_sync(ticket, request, &mut out);
-        out.clear();
-
-        assert!(state.apply_live_upsert(7, &row(7, 1), &mut out));
-        assert!(matches!(out.as_slice(), [ReportEvent::RowUpsert(_)]));
-        out.clear();
-        assert!(state.apply_sync_batch(
-            RepSyncBatch {
-                header: header(35),
-                request_uid: 61,
-                batch_num: 0,
-                row_count: 1,
-                blob: synlz_compress(&row(7, 0)),
-            },
-            &mut out,
-            &mut controls,
-        ));
-        assert!(
-            out.is_empty(),
-            "late batch copy must not overwrite live row"
-        );
-        assert!(state.apply_sync_done(
-            RepSyncDone {
-                header: header(36),
-                request_uid: 61,
-                batch_count: 1,
-                total_rows: 1,
-                max_rec_id: 7,
-            },
-            &mut out,
-            &mut controls,
-        ));
-        let ReportEvent::SyncComplete(done) = &out[0] else {
-            panic!("expected completion")
-        };
-        assert_eq!(done.keep_rec_ids.as_ref(), &[7]);
-    }
-
-    #[test]
-    fn cursor_ahead_of_global_max_reports_database_recreation() {
-        let mut state = ready_state();
-        let ticket = ReportSyncTicket { request_uid: 71 };
+        let ticket = ReportSyncTicket { sync_id: 61 };
         let request = ReportSyncRequest::resume(100);
         let mut out = Vec::new();
         let mut controls = Vec::new();
-        state.begin_sync(ticket, request, &mut out);
+        let request_uid = state.begin_sync(ticket, request, &mut out);
         out.clear();
 
-        assert!(state.apply_sync_done(
-            RepSyncDone {
-                header: header(36),
-                request_uid: 71,
-                batch_count: 0,
-                total_rows: 0,
+        assert!(state.apply_sync_page(
+            WireSyncPage {
+                header: header(39),
+                request_uid,
+                last_rec_id: 0,
                 max_rec_id: 50,
+                row_count: 0,
+                blob: Vec::new(),
             },
             &mut out,
             &mut controls,
         ));
-        let ReportEvent::SyncComplete(done) = &out[0] else {
-            panic!("expected completion")
+        let ReportEvent::SyncPage(page) = out.pop().unwrap() else {
+            panic!("expected recreate page")
         };
-        assert!(done.database_recreated);
+        assert!(page.database_recreated);
+        let ReportPageApplyAction::SendNext { request, .. } = state.page_applied(&page, &mut out)
+        else {
+            panic!("expected fresh restart")
+        };
+        assert_eq!(
+            request,
+            ReportSyncRequest::fresh(ReportHistoryDepth::ServerDefault)
+        );
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn open_rows_check_completes_after_one_authoritative_result_per_id() {
+        let mut state = ready_state();
+        let ids: Arc<[i64]> = vec![7, 8].into();
+        let mut out = Vec::new();
+        let mut controls = Vec::new();
+        state.begin_open_rows_check(Arc::clone(&ids), &mut out);
+        out.clear();
+
+        assert!(state.apply_live_upsert(7, &row(7, 1), &mut out, &mut controls));
+        assert!(matches!(out.as_slice(), [ReportEvent::RowUpsert(_)]));
+        out.clear();
+        assert!(state.apply_live_delete(8, &mut out, &mut controls));
+        assert!(matches!(
+            out.as_slice(),
+            [
+                ReportEvent::RowDelete { rec_id: 8 },
+                ReportEvent::OpenRowsCheckComplete { .. }
+            ]
+        ));
+        assert!(matches!(
+            controls.as_slice(),
+            [ReportControl::OpenRowsCheckCompleted]
+        ));
     }
 
     #[test]

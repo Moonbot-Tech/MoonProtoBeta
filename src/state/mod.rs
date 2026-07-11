@@ -75,10 +75,11 @@ pub use orders::{
     MarketPositionProtection, Order, OrderEvent, OrderTraceChartPoint, OrderTraceLine, Orders,
     PositionProtectionSide, SellReason,
 };
-pub(crate) use report::{ReportControl, ReportReplicationState};
+pub(crate) use report::{ReportControl, ReportPageApplyAction, ReportReplicationState};
 pub use report::{
     ReportEvent, ReportFieldKind, ReportFieldValue, ReportHistoryDepth, ReportRow, ReportSchema,
-    ReportSchemaField, ReportSyncComplete, ReportSyncRequest, ReportSyncTicket, ReportValue,
+    ReportSchemaField, ReportSyncComplete, ReportSyncPage, ReportSyncRequest, ReportSyncTicket,
+    ReportValue,
 };
 #[cfg(test)]
 pub(crate) use seq_ring::SeqRingWriter;

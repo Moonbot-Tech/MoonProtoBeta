@@ -719,7 +719,7 @@ fn client_update_order_stops_uses_delphi_send_if_changed_gate() {
 
     let (_, high, _) = client.take_send_queues_for_test();
     assert_eq!(high.len(), 1);
-    assert_eq!(high[0].u_key, UniqueKey::order_move(uid));
+    assert_eq!(high[0].u_key, UniqueKey::stop_move(uid));
     match TradeCommand::parse(&high[0].data).expect("valid stops update") {
         TradeCommand::OrderStopsUpdate(cmd) => {
             assert_eq!(cmd.epoch_header.market.base.uid, uid);
@@ -772,7 +772,7 @@ fn client_update_vstop_uses_delphi_send_if_changed_gate() {
 
     let (_, high, _) = client.take_send_queues_for_test();
     assert_eq!(high.len(), 1);
-    assert_eq!(high[0].u_key, UniqueKey::order_move(uid));
+    assert_eq!(high[0].u_key, UniqueKey::vstop_move(uid));
     match TradeCommand::parse(&high[0].data).expect("valid VStop update") {
         TradeCommand::VStopUpdate(cmd) => {
             assert_eq!(cmd.epoch_header.market.base.uid, uid);
