@@ -4,171 +4,92 @@
   </a>
 </p>
 
-# MoonProto
+<h1 align="center">MoonProto</h1>
 
-MoonProto is the client-side Rust runtime SDK for building MoonBot-compatible
-terminals, dashboards, and control tools over a running MoonBot core.
+<p align="center">
+  <b>Client-side Rust runtime SDK for building MoonBot-compatible terminals, dashboards, and control tools</b><br>
+  over a running MoonBot core
+</p>
 
-A running MoonBot core remains the execution engine: it connects to exchanges,
-owns orders, strategies, risk logic, balances, and authoritative trading state.
-MoonProto keeps your terminal or tool connected to that core: transport,
-authorization, reconnect, subscriptions, retained state, events, and typed user
-intents.
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-4C6EF5" alt="License: Apache-2.0"></a>
+  <img src="https://img.shields.io/badge/built%20with-Rust-DEA584?logo=rust&logoColor=white" alt="Built with Rust">
+  <img src="https://img.shields.io/badge/transport-UDP%20%C2%B7%20V0%20%C2%B7%20V1%20%C2%B7%20V2-8B5CF6" alt="Transport: UDP V0/V1/V2">
+  <img src="https://img.shields.io/badge/status-beta-F59E0B" alt="Status: beta">
+</p>
 
-Your application provides the UI and product logic. MoonProto provides the live
-client-side bridge to the MoonBot core:
+<p align="center">
+  <a href="#overview">Overview</a> ·
+  <a href="#what-the-library-provides">What it provides</a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#examples">Examples</a> ·
+  <a href="#documentation">Docs</a> ·
+  <a href="#build--test">Build</a> ·
+  <a href="#license">License</a>
+</p>
 
-```text
-your trading UI / dashboard / control tool
-        |
-        v
-MoonProto Rust library
-        |
-        v
-MoonBot core with MoonProto enabled
-        |
-        v
-exchange accounts, orders, strategies, balances
-```
+MoonProto is the live client-side bridge to a MoonBot core. The core remains the execution engine — it connects to exchanges and owns orders, strategies, risk logic, balances, and authoritative trading state. MoonProto keeps your terminal or tool connected to that core: transport, authorization, reconnect, subscriptions, retained state, events, and typed user intents.
 
-This is not a thin REST-style wrapper around a dozen commands. A trading
-terminal needs continuously maintained state: markets, balances, orders,
-orderbooks, trades, candles, settings, strategies, reconnect recovery, and
-delivery guarantees. MoonProto keeps that live client-side model for you, so the
-application can focus on UI and product logic.
+<p align="center">
+  <img src="assets/architecture.svg" width="820" alt="Your trading UI / dashboard / control tool talks to the MoonProto Rust library, which talks to a MoonBot core (MoonProto enabled), which owns exchange accounts, orders, strategies, and balances.">
+</p>
 
-## Mental Model
+This is not a thin REST-style wrapper around a dozen commands. A trading terminal needs continuously maintained state — markets, balances, orders, orderbooks, trades, candles, settings, strategies, reconnect recovery, and delivery guarantees. MoonProto keeps that live client-side model for you, so your application can focus on UI and product logic.
 
-Your application does not talk to exchanges directly through this crate. It
-talks to a MoonBot core that is already running with MoonProto enabled.
+## Overview
 
-MoonProto owns the live client runtime:
+Your application does not talk to exchanges directly through this crate. It talks to a MoonBot core that is already running with MoonProto enabled.
 
-- connects and authorizes;
-- restores after reconnect;
-- subscribes to streams;
-- applies incoming packets into retained state;
-- publishes snapshots and events;
-- sends typed user intents back to the core.
+**MoonProto owns the live client runtime** — it connects and authorizes, restores after reconnect, subscribes to streams, applies incoming packets into retained state, publishes snapshots and events, and sends typed user intents back to the core.
 
-Because MoonProto already owns that runtime, a terminal normally does not create
-its own polling "feed thread" on top of the library. Integrate events with your
-UI framework through `MoonEventSink`, and read snapshots from the UI's normal
-update/render path. The `drain_events() + sleep(...)` style used by small
-examples is a CLI/demo loop, not the recommended architecture for a real-time
-terminal.
+**Your application owns** the UI, the product workflow, local persistence and preferences, and the presentation of markets, orders, charts, alerts, and settings.
 
-Your application owns:
-
-- UI;
-- product workflow;
-- local persistence and preferences;
-- presentation of markets, orders, charts, alerts, and settings.
+Because MoonProto already owns the runtime, a terminal normally does **not** create its own polling "feed thread" on top of the library. Integrate events with your UI framework through `MoonEventSink`, and read snapshots from the UI's normal update/render path. The `drain_events() + sleep(...)` style used by small examples is a CLI/demo loop, not the recommended architecture for a real-time terminal.
 
 ## What The Library Provides
 
 Application code usually works with:
 
-- `MoonClient` as the connection/runtime owner;
-- snapshots and events for current markets, balances, orders, trades,
-  orderbooks, candles, strategies, settings, and UI/chart facts;
-- typed intents such as subscribe, place/cancel/move order, refresh assets, and
-  update settings.
+- **`MoonClient`** — the connection/runtime owner.
+- **Snapshots and events** — current markets, balances, orders, trades, orderbooks, candles, strategies, settings, and UI/chart facts.
+- **Typed intents** — subscribe, place / cancel / move order, refresh assets, update settings.
 
-Internally, the crate contains:
+Internally, the crate contains the transport modes V0/V1/V2, handshake / authorization / reconnect / liveness handling, reliable sliced datagrams with ACK/retry over UDP, typed binary command parsers and builders, the retained read-model state, and the owned runtime session API.
 
-- built-in transport modes V0/V1/V2;
-- handshake, authorization, reconnect, and liveness handling;
-- reliable sliced datagrams and ACK/retry mechanics over UDP;
-- typed binary command parsers/builders;
-- retained read-model state for the terminal;
-- the owned runtime session API.
+### Transport modes
 
-MoonProto supports built-in transport modes V0, V1, and V2. The selected mode
-must match the server-side connection setting. Unsupported mode values normalize
-to V0.
+MoonProto has built-in transport modes **V0**, **V1**, and **V2**. The selected client mode must match the server-side connection setting; unsupported mode values normalize to `V0`.
 
-## Credentials
+## Quick Start
 
-Do not commit live keys or server addresses.
+### Credentials
 
-For examples, pass credentials on the command line:
+**Do not commit live keys or server addresses.** For examples, pass credentials on the command line:
 
 ```powershell
 cargo run --release --example trading_flow -- "<exported MoonBot key>" "HOST:PORT"
 ```
 
-`<exported MoonBot key>` is the base64 key string exported by MoonBot and parsed
-by `moonproto::import_key`. Current MoonBot exports can also include suggested
-UDP endpoint and transport mode; UI code can read those suggestions with
-`moonproto::parse_key_info`, then still let the user edit host, port, and mode
-before connecting.
+`<exported MoonBot key>` is the base64 key string exported by MoonBot and parsed by `moonproto::import_key`. Current MoonBot exports can also include a suggested UDP endpoint and transport mode; UI code can read those with `moonproto::parse_key_info`, then still let the user edit host, port, and mode before connecting.
 
-For live tests, put the config outside this crate repo. By default FireTest reads
-`../moonproto.firetest.conf` relative to the `moonproto/` directory. You can
-override the path with `MOONPROTO_FIRETEST_CONFIG`.
-Keep this file next to the checkout, not inside the public crate, so live
-credentials never become part of commits or packages.
+For live tests, keep the config **outside** this crate repo (so credentials never enter commits or packages). FireTest reads `../moonproto.firetest.conf` by default, overridable with `MOONPROTO_FIRETEST_CONFIG`:
 
 ```text
 server = HOST:PORT
 key = <exported MoonBot key>
 ```
 
-This config is only for live tests. A normal application can read the same
-MoonBot key string from env/config/UI and pass it to `moonproto::import_key`.
-The quick FireTest profile is the usual fast health gate during development.
-The full FireTest is destructive/stress-oriented and requires
-`allow_mutation = true`; optional FireTest knobs such as target market,
-strategy field, and timeout overrides are documented in `tests/fire_test.rs`.
-
-For the smaller live smoke test, use environment variables:
-
-```powershell
-$env:MOONPROTO_LIVE_SERVER = "HOST:PORT"
-$env:MOONPROTO_KEY = "<exported MoonBot key>"
-cargo test --test integration_smoke -- --ignored --nocapture
-```
-
-## Build
-
-```powershell
-cargo build
-cargo build --release
-cargo test --lib
-cargo check --examples
-```
-
-Packaging sanity check:
-
-```powershell
-cargo package --allow-dirty
-```
-
-The package contains only crate files. Keep credentials in local config files
-outside the crate tree.
-
-## Quick Run
-
-The most useful manual examples:
-
-```powershell
-cargo run --release --example trading_flow -- "<key>" "HOST:PORT"
-cargo run --release --example list_markets -- "<key>" "HOST:PORT" 20
-cargo run --release --example order_book_top -- "<key>" "HOST:PORT" BTCUSDT 30
-cargo run --release --example trades_stream -- "<key>" "HOST:PORT" all 30
-cargo run --release --example history_bars -- "<key>" "HOST:PORT" BTCUSDT 1h
-```
-
-Basic application shape:
+### Application shape
 
 ```rust
 use moonproto::{
     parse_key_info, ClientConfig, ConnectConfig, InitConfig, InitialStrategies,
-    MoonClient, NewOrderParams, OrderSide, TradesStreamMode, TransportMode,
+    MoonClient, MoonEventSink, TradesStreamMode, TransportMode,
 };
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn start_moonproto(
+    ui_sink: MoonEventSink,
+) -> Result<MoonClient, Box<dyn std::error::Error>> {
     let key_b64 = std::env::var("MOONPROTO_KEY")?;
     let info = parse_key_info(&key_b64).expect("invalid MoonBot key");
     let suggested_network = info.network;
@@ -189,167 +110,114 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cfg = ClientConfig::new(host, port, info.keys.master_key, info.keys.mac_key)
         .with_transport_mode(transport_mode);
 
-    let client = MoonClient::connect(
+    let client = MoonClient::connect_with_sink(
         cfg,
         ConnectConfig::new(InitConfig {
-            initial_strategies: Some(InitialStrategies::new(
-                0,
-                Vec::new(), // pass the current local strategy list if the app has one
-            )),
+            // An empty list explicitly means that this application has no
+            // local strategies. Otherwise pass their current epoch and rows.
+            initial_strategies: Some(InitialStrategies::new(0, Vec::new())),
             subscribe_trades: Some(TradesStreamMode::TradesOnly),
             // Use TradesAndMarketMakers when the terminal needs MoonBot-style
             // heat-map rows with HyperLiquid taker wallet addresses.
             subscribe_orderbooks: vec!["BTCUSDT".to_string()],
             ..Default::default()
         }),
+        ui_sink,
     )?;
 
-    // GUI apps do this from their normal update/event callback.
-    for lifecycle in client.drain_lifecycle_events() {
-        if matches!(lifecycle, moonproto::LifecycleEvent::Ready) {
-            println!("MoonProto ready");
-        }
-    }
-
-    client.streams().subscribe_orderbook("ETHUSDT")?;
-    // After the user chooses a market/order side:
-    // if let Some(market) = client.snapshot().and_then(|s| s.markets().find("BTC")) {
-    //     client.trade().new_order(NewOrderParams::for_market(&market, OrderSide::Long, 50100.0, 0.001))?;
-    // }
-    // After an order appears in events/snapshots:
-    // client.orders().move_order(&visible_order, 50100.0)?;
-
-    for lifecycle in client.drain_lifecycle_events() {
-        println!("lifecycle: {lifecycle:?}");
-    }
-
-    if let Some(snapshot) = client.snapshot() {
-        println!("orders={}", snapshot.orders().len());
-    }
-
-    client.disconnect()?;
-    client.wait_finished()?;
-
-    Ok(())
+    // Keep this handle in application state. The sink delivers Ready and
+    // domain events into the framework's own event loop.
+    Ok(client)
 }
 ```
 
-`MoonClient` owns the runtime thread and `connect` returns immediately. Init is
-one-time per session; readiness arrives as `LifecycleEvent::Ready`. After Init,
-reconnect restore, market refresh, saved subscriptions, orderbook full resync,
-trades gap recovery, and pending Engine API dispatch are owned by the library
-until `disconnect()` or drop.
-See `docs/active_lib.md` for the maintained-state contract.
+Create `ui_sink` with `MoonEventSink::callback` for callback/event-loop frameworks, or `MoonEventSink::queue_with_waker` for immediate-mode frameworks. Store the returned `MoonClient` in application state. When the sink delivers `LifecycleEvent::Ready`, the UI can read `client.snapshot()` and issue intents such as `client.streams().subscribe_orderbook(...)`, `client.trade().new_order(...)`, or `client.orders().move_order(...)`.
 
-Engine API helpers that mutate server/exchange state also run through the owned
-runtime and return immediately after queuing the intent. Completion arrives as
-`Event::EngineAction`, while retained state is updated through the matching
-domain snapshots/events. Examples:
-`client.account().set_leverage(...)`, `client.account().set_hedge_mode(...)`,
-`client.account().cancel_all_orders(...)`, `client.account().confirm_risk_limit(...)`,
-and `client.balances().transfer_asset(...)`.
+`MoonClient` owns the runtime thread and `connect_with_sink` returns immediately. Init is one-time per session; readiness arrives through the sink as `LifecycleEvent::Ready`. After Init, reconnect restore, market refresh, saved subscriptions, orderbook full resync, trades gap recovery, and pending Engine API dispatch are owned by the library until `disconnect()` or drop. See [`docs/active_lib.md`](docs/active_lib.md) for the maintained-state contract. CLI tools and one-shot scripts may use `MoonClient::connect_blocking`; UI code should not block its event loop on network readiness.
 
-## Tests
+Engine API helpers that mutate server/exchange state also run through the owned runtime and return immediately after queuing the intent; completion arrives as `Event::EngineAction`. Examples: `client.account().set_leverage(...)`, `client.account().set_hedge_mode(...)`, `client.account().cancel_all_orders(...)`, `client.account().confirm_risk_limit(...)`, `client.balances().transfer_asset(...)`.
 
-See `tests/README.md` for the test-layer map: public live pipeline tests,
-internal protocol/state guards, and platform polling.
+## Examples
 
-Deterministic tests:
+Runnable live/manual examples live in [`examples/`](examples). Run them with a key and `HOST:PORT`; some take extra positional args:
+
+```powershell
+cargo run --release --example trading_flow   -- "<key>" "HOST:PORT"
+cargo run --release --example list_markets   -- "<key>" "HOST:PORT" 20
+cargo run --release --example order_book_top -- "<key>" "HOST:PORT" BTCUSDT 30
+cargo run --release --example trades_stream  -- "<key>" "HOST:PORT" all 30
+cargo run --release --example history_bars   -- "<key>" "HOST:PORT" BTCUSDT 1h
+```
+
+| Example | What it shows |
+|---|---|
+| [`trading_flow`](examples/trading_flow.rs) | Compact `MoonClient` application flow. |
+| [`list_markets`](examples/list_markets.rs) | Market catalog from `MoonClient::snapshot`. |
+| [`market_refresh`](examples/market_refresh.rs) | Background market-refresh events/snapshots. |
+| [`trades_stream`](examples/trades_stream.rs) | Trades subscription and retained market tail. |
+| [`order_book_stream`](examples/order_book_stream.rs) · [`order_book_top`](examples/order_book_top.rs) | Orderbook stream / read model. |
+| [`history_bars`](examples/history_bars.rs) | Retained candle/history read path. |
+| [`order_snapshot`](examples/order_snapshot.rs) | Fresh order snapshot through `MoonClient`. |
+| [`cancel_open_order`](examples/cancel_open_order.rs) | Tracked cancel intent through `client.orders()`. |
+| [`multi_client_test`](examples/multi_client_test.rs) | Two independent `MoonClient` runtimes. |
+
+## Documentation
+
+Public API notes live in [`docs/`](docs). Start here:
+
+| Doc | Topic |
+|---|---|
+| [overview](docs/overview.md) | The big picture. |
+| [client](docs/client.md) | `MoonClient` and the owned runtime. |
+| [events](docs/events.md) · [lifecycle](docs/lifecycle.md) | Events, snapshots, and session lifecycle. |
+| [markets](docs/markets.md) · [trades](docs/trades.md) · [order_books](docs/order_books.md) | Market data read-models. |
+| [orders](docs/orders.md) · [candles](docs/candles.md) · [reports](docs/reports.md) | Orders, candle history, reports. |
+| [engine_api](docs/engine_api.md) · [strats](docs/strats.md) | Server/exchange mutations and strategies. |
+| [time](docs/time.md) · [multi_server](docs/multi_server.md) | Clock handling and multi-server setups. |
+
+Additional topics: [`active_lib`](docs/active_lib.md), [`arb`](docs/arb.md), [`balances`](docs/balances.md), [`trade_actions`](docs/trade_actions.md), [`ui`](docs/ui.md).
+
+## Build & Test
+
+```powershell
+cargo build
+cargo build --release
+cargo test --lib
+cargo check --examples
+```
+
+Packaging sanity check (the package contains only crate files — keep credentials in local config outside the tree):
+
+```powershell
+cargo package --allow-dirty
+```
+
+**Deterministic tests:**
 
 ```powershell
 cargo test --lib
 cargo test --test udp_polling
 ```
 
-Live smoke:
+**Live smoke test** (needs a live server + key):
 
 ```powershell
+$env:MOONPROTO_LIVE_SERVER = "HOST:PORT"
+$env:MOONPROTO_KEY = "<exported MoonBot key>"
 cargo test --test integration_smoke -- --ignored --nocapture
 ```
 
-FireTest:
+**FireTest** — the main live health test for the active library (requires the `diagnostics` feature; regular applications do not need it):
 
 ```powershell
 $env:MOONPROTO_FIRETEST_PROFILE = "quick"
 cargo test --release --features diagnostics --test fire_test -- --ignored --nocapture
 ```
 
-For a baseline without client-side packet loss, set
-`MOONPROTO_FIRETEST_ERR_EMU=0`; the default is 10%.
+- **Quick profile** (< 30 s, one client) — connect / AuthDone / InitDone, base/auth checks, markets & server-index map, strategy schema apply, trades & orderbook subscriptions, retained trades/price/history, MarkPrice + funding/balance/order UI state, `ParseFailed == 0`, and a PMTU + CPU summary (`>5 ms` in protocol/apply sections is a hard red flag).
+- **Full profile** (destructive/stress, `allow_mutation = true`) — two live clients, `err_emu` packet loss (10% → 50%), chunked candles under loss, settings/strategy broadcast, an emulator order lifecycle, and a real SOLUSDT safety gate: place a $1000 long limit 5% below market, cancel it through the tracked ActiveLib order path, and verify that balance changes arrive without a manual balance request. It also exercises simple operations at 50% loss, forced reconnect and post-reconnect delivery, plus sliced/retry/parse/PMTU/CPU diagnostics; `>5 ms` in protocol/apply sections is a hard red flag.
 
-`tests/fire_test.rs` is the main live health test for the active library. It
-requires the `diagnostics` feature because it deliberately enables packet-loss
-emulation, protocol CPU counters, and test-only reconnect probes. Regular
-applications do not need this feature.
-
-Quick profile target is under 30 seconds and checks one client:
-
-- connect, AuthDone, InitDone;
-- BaseCheck, AuthCheck, markets/server-index map, market update;
-- strategy schema receive/apply;
-- trades and orderbook subscriptions;
-- retained trades/LastPrice/derived history state;
-- retained MarkPrice line and funding/balance/order UI state;
-- ParseFailed equals zero;
-- PMTU plus CPU summary for protocol/apply paths; `>5ms` in CPU-ish
-  protocol/apply sections is a hard FireTest red flag.
-
-Full profile runs the destructive/stress gate:
-
-- two live clients;
-- client-side `err_emu=10%` before connect;
-- full chunked candles snapshot under loss;
-- settings/strategy broadcast between clients;
-- emulator-mode order lifecycle plus real non-emulator SOLUSDT cancel gate:
-  place a $1000 long limit 5% below market, cancel it through the tracked
-  ActiveLib order path, and separately verify live balance events/state without
-  a manual balance request;
-- `err_emu=50%` simple-operation/reconnect gate;
-- forced reconnect and stream delivery after reconnect;
-- detailed server-message, sliced, retry, parse, PMTU, and CPU diagnostics,
-  including the same `>5ms` CPU hard gate.
-
-FireTest writes strategy diagnostics under `target/` by default:
-
-- `target/firetest_strategy_info_<profile>.txt`
-- `target/firetest_strategy_raw/`
-
-## Examples
-
-Examples live in `examples/`.
-
-Important ones:
-
-- `trading_flow.rs`: compact `MoonClient` application flow.
-- `list_markets.rs`: market catalog from `MoonClient::snapshot`.
-- `market_refresh.rs`: background market refresh events/snapshots.
-- `trades_stream.rs`: trades subscription and retained market tail.
-- `order_book_stream.rs` / `order_book_top.rs`: orderbook stream/read model.
-- `history_bars.rs`: retained candle/history read path.
-- `order_snapshot.rs`: fresh order snapshot through `MoonClient`.
-- `cancel_open_order.rs`: tracked cancel intent through `client.orders()`.
-- `multi_client_test.rs`: two independent `MoonClient` runtimes.
-
-## API Docs
-
-Public API notes live in `docs/`.
-
-Start here:
-
-- `docs/overview.md`
-- `docs/client.md`
-- `docs/events.md`
-- `docs/lifecycle.md`
-- `docs/time.md`
-- `docs/markets.md`
-- `docs/trades.md`
-- `docs/order_books.md`
-- `docs/orders.md`
-- `docs/reports.md`
-- `docs/candles.md`
-- `docs/engine_api.md`
-- `docs/strats.md`
-- `docs/multi_server.md`
+Set `MOONPROTO_FIRETEST_ERR_EMU=0` to disable the client-side packet-loss emulation (default 10%). FireTest writes strategy diagnostics under `target/` (`firetest_strategy_info_<profile>.txt`, `firetest_strategy_raw/`). See [`tests/README.md`](tests/README.md) for the full test-layer map and [`tests/fire_test.rs`](tests/fire_test.rs) for scenario-specific overrides.
 
 ## Repository Layout
 
@@ -364,24 +232,18 @@ examples/         runnable live/manual examples
 docs/             API documentation
 ```
 
-## License
-
-Licensed under the Apache License, Version 2.0. See `LICENSE`.
-
-Redistributions must preserve the attribution notice from `NOTICE` according to
-Apache-2.0 section 4(d).
-
 ## Development Notes
 
-- V0/V1/V2 transport modes are built in; selected client and server modes must match.
+- V0/V1/V2 transport modes are built in; the selected client and server modes must match.
 - Keep live credentials outside the public repo.
-- Run quick FireTest at important checkpoints; run full FireTest before calling
-  a protocol build stable.
+- Run the quick FireTest at important checkpoints; run the full FireTest before calling a protocol build stable.
+
+## License
+
+Licensed under the **Apache License, Version 2.0** — see [`LICENSE`](LICENSE). Redistributions must preserve the attribution notice from [`NOTICE`](NOTICE) per Apache-2.0 section 4(d).
 
 ---
 
 <p align="center">
-  <strong>Moonbot</strong><br>
-  Advanced terminal for cryptocurrency trading<br>
-  <a href="https://moonbot.pro">moonbot.pro</a>
+  <strong>Moonbot</strong> · the client SDK behind <a href="https://github.com/Moonbot-Tech/MoonTerminal">MoonTerminal</a> · <a href="https://moonbot.pro">moonbot.pro</a>
 </p>
