@@ -113,6 +113,10 @@ fn tracked_orders(
         from_cache: false,
         emulator_mode: false,
         immune_for_clicks,
+        vstop_on: false,
+        vstop_fixed: false,
+        vstop_level: 0.0,
+        vstop_vol: 0.0,
     };
     let _ = orders.apply(TradeCommand::OrderStatus(Box::new(status_cmd)));
     orders
@@ -317,7 +321,7 @@ fn client_cancel_pending_order_matches_delphi_replace_then_cancel_effect() {
 }
 
 #[test]
-fn client_replace_order_uses_delphi_local_gate() {
+fn client_replace_order_keeps_the_latest_delphi_ui_intent() {
     use crate::commands::trade::{OrderType, OrderWorkerStatus, TradeCommand};
 
     let uid = 0x2233;
@@ -336,28 +340,22 @@ fn client_replace_order_uses_delphi_local_gate() {
     assert_eq!(orders.get(uid).unwrap().sell_price, 50100.0);
     assert!(orders.get(uid).unwrap().bulk_replace_sell);
 
+    assert!(client.replace_order(&mut orders, uid, 50200.0));
+    assert_eq!(orders.get(uid).unwrap().sell_price, 50200.0);
     let (_, high, _) = client.take_send_queues_for_test();
     assert_eq!(high.len(), 1);
     assert_eq!(high[0].u_key, UniqueKey::order_move(uid));
-    match TradeCommand::parse(&high[0].data).expect("valid replace command") {
+    match TradeCommand::parse(&high[0].data).expect("valid latest replace command") {
         TradeCommand::OrderReplace(cmd) => {
             assert_eq!(cmd.epoch_header.market.base.uid, uid);
             assert_eq!(cmd.epoch_header.market.currency, 17);
             assert_eq!(cmd.epoch_header.market.platform, 9);
             assert_eq!(cmd.epoch_header.market.market_name, "DOGEUSDT");
             assert_eq!(cmd.order_type, OrderType::Sell);
-            assert_eq!(cmd.new_price, 50100.0);
+            assert_eq!(cmd.new_price, 50200.0);
         }
         other => panic!("unexpected trade command: {other:?}"),
     }
-
-    assert!(
-        !client.replace_order(&mut orders, uid, 50200.0),
-        "Delphi ReplaceSentTime gate suppresses a second replace while in flight"
-    );
-    assert_eq!(orders.get(uid).unwrap().sell_price, 50200.0);
-    let (_, high, _) = client.take_send_queues_for_test();
-    assert!(high.is_empty());
 }
 
 #[test]
@@ -405,6 +403,34 @@ fn client_turn_order_panic_sell_uses_delphi_local_gate() {
 }
 
 #[test]
+fn panic_sell_queued_after_replace_wins_the_shared_order_move_slot() {
+    use crate::commands::trade::{OrderWorkerStatus, TradeCommand};
+
+    let uid = 0x3345;
+    let mut orders = tracked_orders(
+        uid,
+        17,
+        9,
+        "DOGEUSDT",
+        OrderWorkerStatus::SellSet,
+        false,
+        false,
+    );
+    let client = ready_client();
+
+    assert!(client.replace_order(&mut orders, uid, 50100.0));
+    assert!(client.turn_order_panic_sell(&mut orders, uid, true));
+
+    let (_, high, _) = client.take_send_queues_for_test();
+    assert_eq!(high.len(), 1);
+    assert_eq!(high[0].u_key, UniqueKey::order_move(uid));
+    match TradeCommand::parse(&high[0].data).expect("valid final order-move command") {
+        TradeCommand::TurnPanicSell(cmd) => assert!(cmd.turn_on),
+        other => panic!("panic sell must remain the last intent, got {other:?}"),
+    }
+}
+
+#[test]
 fn client_switch_panic_sell_by_market_matches_delphi_button_semantics() {
     use crate::commands::trade::{OrderWorkerStatus, TradeCommand};
 
@@ -448,6 +474,10 @@ fn client_switch_panic_sell_by_market_matches_delphi_button_semantics() {
             from_cache: false,
             emulator_mode: false,
             immune_for_clicks: false,
+            vstop_on: false,
+            vstop_fixed: false,
+            vstop_level: 0.0,
+            vstop_vol: 0.0,
         }))
     };
     let _ = orders.apply(status_cmd);

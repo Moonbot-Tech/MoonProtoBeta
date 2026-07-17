@@ -54,6 +54,10 @@ are not the live order-worker state. The live state remains inside the runtime,
 where replace-in-flight, pending cancel, previous Stops/VStop, panic, and immune
 flags are checked exactly once before sending.
 
+`move_order` is safe to call again while an earlier move is still in flight.
+The runtime keeps the newest UI target, and the protocol send queue coalesces an
+older move that has not yet been copied by the writer.
+
 ## Market Trade Intents
 
 New orders and market-level actions use `client.trade()`. User code does not

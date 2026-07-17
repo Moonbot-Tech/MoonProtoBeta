@@ -94,6 +94,10 @@ fn tracked_orders_for_sender(
         from_cache: false,
         emulator_mode: false,
         immune_for_clicks: false,
+        vstop_on: false,
+        vstop_fixed: false,
+        vstop_level: 0.0,
+        vstop_vol: 0.0,
     };
     let _ = orders.apply(TradeCommand::OrderStatus(Box::new(status_cmd)));
     orders

@@ -266,14 +266,25 @@ When a sell trace carries a stop line, `OrderTraceLine::stop_price` and
 
 ## Lifecycle Notes
 
-On reconnect, the server sends a fresh order snapshot. MoonProto applies it to
-the retained order state and emits `OrderEvent::Snapshot` after per-order
-events. Missing tracked orders can trigger follow-up status requests
+On reconnect, the server sends a fresh order snapshot. MoonProto accepts full
+snapshots only in increasing generation order within the current hard session,
+then emits `OrderEvent::Snapshot` after per-order events. A large older sliced
+snapshot therefore cannot roll retained orders back after a newer snapshot has
+already arrived. Missing tracked orders can trigger follow-up status requests
 automatically.
+
+Stops and VStop are independently versioned settings, not order-lifecycle
+transitions. A full order snapshot can recover a lost settings update, while an
+older full snapshot cannot overwrite a newer stop/VStop echo. Likewise, a
+same-phase server full or replace acknowledgement does not overwrite the local
+replace target currently owned by the UI; a real lifecycle phase change seeds
+that target from the new exchange-side state.
 
 Terminal order updates are removed after the current receive batch. Sell-done
 orders keep a short grace window so immediately following visual trace packets
-can still attach to the order, matching the production client behavior.
+can still attach to the order. Recently completed UIDs are retained for the
+current hard session so a delayed sliced snapshot cannot resurrect a removed
+terminal order.
 
 ## Protocol Data
 

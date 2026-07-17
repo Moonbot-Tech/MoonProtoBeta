@@ -160,6 +160,11 @@ pub(crate) struct EventDispatcher {
     /// orderbook sequence counters from the previous server session can look
     /// like fresh gaps in the first seconds after reconnect.
     last_known_server_token: u64,
+    /// Strict `TAllStatuses.UID` generation within one hard session. Large
+    /// sliced snapshots may arrive out of order and must not roll retained
+    /// orders back after a newer snapshot was already applied.
+    orders_snapshot_session_token: u64,
+    last_orders_snapshot_generation: u64,
     /// Delphi `Bworks.pas LastAddedNewMarket` analogue for active-lib
     /// `NewMarketFound -> GetMarketsList` auto refresh.
     last_markets_list_refresh_ms: i64,
@@ -256,6 +261,8 @@ impl Default for EventDispatcher {
             session_auth_info: None,
             local_strategy_epoch: 0,
             last_known_server_token: 0,
+            orders_snapshot_session_token: 0,
+            last_orders_snapshot_generation: 0,
             last_markets_list_refresh_ms: 0,
             force_markets_list_refresh: false,
             trades_server_token: 0,

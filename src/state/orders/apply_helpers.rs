@@ -8,11 +8,17 @@ use crate::commands::trade::DelphiBool;
 pub(super) enum ServerEpochCommandKind {
     FullStatus,
     ReplaceResponse,
-    VStop,
     Other,
 }
 
 impl Orders {
+    pub(super) fn adopt_server_session(entry: &mut Order, server_token: u64) {
+        if server_token != 0 && server_token != entry.server_session_token {
+            entry.reset_server_epochs();
+            entry.server_session_token = server_token;
+        }
+    }
+
     /// Mirror `BOrderWorker.HandleServerCommand`'s common epoch gate.
     ///
     /// Returns whether the command advanced the shared server watermark. A
@@ -24,10 +30,7 @@ impl Orders {
         kind: ServerEpochCommandKind,
         server_token: u64,
     ) -> Result<bool, ApplyResult> {
-        if server_token != 0 && server_token != entry.server_session_token {
-            entry.reset_server_epochs();
-            entry.server_session_token = server_token;
-        }
+        Self::adopt_server_session(entry, server_token);
 
         let is_full = kind == ServerEpochCommandKind::FullStatus;
         if !is_full && header.status != entry.status {
@@ -45,9 +48,7 @@ impl Orders {
 
         let equal_epoch = header.epoch == entry.server_watermark;
         if kind == ServerEpochCommandKind::ReplaceResponse
-            || (equal_epoch
-                && ((is_full && header.status == entry.status)
-                    || kind == ServerEpochCommandKind::VStop))
+            || (equal_epoch && is_full && header.status == entry.status)
         {
             return Ok(false);
         }
@@ -78,7 +79,6 @@ impl Orders {
         st: &OrderStatus,
         server_time_delta: f64,
         new_order: bool,
-        price_eps: f64,
     ) {
         let mut buy = st.buy_order;
         let mut sell = st.sell_order;
@@ -100,7 +100,6 @@ impl Orders {
         }
         entry.buy_order = buy;
         entry.sell_order = sell;
-        entry.stops = st.stops;
         entry.immune_for_clicks = st.immune_for_clicks;
         entry.job_is_done = st.epoch_header.status.is_terminal();
         if st.epoch_header.status == OrderWorkerStatus::None {
@@ -117,22 +116,44 @@ impl Orders {
         if was_status_changed {
             entry.buy_price = entry.buy_order.actual_price;
             entry.sell_price = entry.sell_order.actual_price;
-            entry.last_buy_actual_price = entry.buy_order.actual_price;
-            entry.last_sell_actual_price = entry.sell_order.actual_price;
-        } else {
-            if (entry.buy_order.actual_price - entry.last_buy_actual_price).abs() > price_eps {
-                entry.buy_price = entry.buy_order.actual_price;
-                entry.last_buy_actual_price = entry.buy_order.actual_price;
-            }
-            if (entry.sell_order.actual_price - entry.last_sell_actual_price).abs() > price_eps {
-                entry.sell_price = entry.sell_order.actual_price;
-                entry.last_sell_actual_price = entry.sell_order.actual_price;
-            }
         }
 
         if st.epoch_header.status == OrderWorkerStatus::SellDone {
             Self::apply_sell_done_flags(entry);
         }
+    }
+
+    /// Apply the settings payload of a full status through the two independent
+    /// judges used by the core. This runs even when the lifecycle part of a
+    /// sliced full is stale: a newer/equal settings payload can still repair a
+    /// lost stops/VStop echo without rolling back order phase or fills.
+    pub(super) fn apply_full_stops_vstop(entry: &mut Order, st: &OrderStatus) -> bool {
+        let mut applied = false;
+
+        if !entry.stops_seeded
+            || epoch_is_ok(entry.stops_epoch, st.epoch_header.epoch)
+            || entry.stops_epoch == st.epoch_header.epoch
+        {
+            applied = true;
+            entry.stops_seeded = true;
+            entry.stops_epoch = st.epoch_header.epoch;
+            entry.stops = st.stops;
+        }
+
+        if !entry.vstop_seeded
+            || epoch_is_ok(entry.vstop_epoch, st.epoch_header.epoch)
+            || entry.vstop_epoch == st.epoch_header.epoch
+        {
+            applied = true;
+            entry.vstop_seeded = true;
+            entry.vstop_epoch = st.epoch_header.epoch;
+            entry.vstop_on = st.vstop_on;
+            entry.vstop_fixed = st.vstop_fixed;
+            entry.vstop_level = st.vstop_level;
+            entry.vstop_vol = st.vstop_vol;
+        }
+
+        applied
     }
 
     pub(super) fn apply_sell_done_flags(entry: &mut Order) {

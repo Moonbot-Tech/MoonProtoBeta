@@ -75,6 +75,10 @@ pub struct Order {
     pub sell_reason: SellReason,
 
     // --- Internal sync state ---
+    /// Stable identity of this retained worker instance. A delayed terminal
+    /// cleanup may remove only the instance that scheduled it, never a newer
+    /// worker which reused the same server UID.
+    pub(super) instance_id: u64,
     /// Hard-session token under which the server epoch watermarks were seen.
     pub(super) server_session_token: u64,
     /// Highest accepted epoch in the server worker command stream.
@@ -87,13 +91,19 @@ pub struct Order {
     /// Per-side watermark for replace acknowledgements.
     pub(super) ack_epoch_buy: u16,
     pub(super) ack_epoch_sell: u16,
+    pub(super) ack_seeded_buy: bool,
+    pub(super) ack_seeded_sell: bool,
+    /// Stops and VStop are independent monotonic streams. They intentionally
+    /// do not participate in the shared lifecycle watermark.
+    pub(super) stops_epoch: u16,
+    pub(super) stops_seeded: bool,
+    pub(super) vstop_epoch: u16,
+    pub(super) vstop_seeded: bool,
     /// Latest full order-status snapshot marker.
     pub(crate) snapshot_flag: u8,
     pub(super) replace_sent_time_ms: i64,
     pub(super) pending_cancel_sent_ms: i64,
     pub(super) prev_panic_sell: bool,
-    pub(super) last_buy_actual_price: f64,
-    pub(super) last_sell_actual_price: f64,
 }
 
 impl Order {
@@ -113,7 +123,7 @@ impl Order {
     }
 
     /// Create a new retained order from a full status row.
-    pub(super) fn from_status(status_cmd: &OrderStatus) -> Self {
+    pub(super) fn from_status(status_cmd: &OrderStatus, instance_id: u64) -> Self {
         Self {
             uid: status_cmd.epoch_header.market.base.uid,
             market_name: status_cmd.epoch_header.market.market_name.clone(),
@@ -124,7 +134,9 @@ impl Order {
             sell_order: status_cmd.sell_order,
             buy_price: 0.0,
             sell_price: 0.0,
-            stops: status_cmd.stops,
+            // Full stops/VStop are applied through their own epoch judges after
+            // the lifecycle full passes its independent gate.
+            stops: StopSettings::default(),
             vstop_on: false,
             vstop_fixed: false,
             vstop_level: 0.0,
@@ -149,6 +161,7 @@ impl Order {
             cancel_request: false,
             server_forced_remove: false,
             sell_reason: SellReason::Unknown,
+            instance_id,
             server_session_token: 0,
             server_watermark: 0,
             server_baselined: false,
@@ -156,12 +169,16 @@ impl Order {
             replace_epoch_sell: 0,
             ack_epoch_buy: 0,
             ack_epoch_sell: 0,
+            ack_seeded_buy: false,
+            ack_seeded_sell: false,
+            stops_epoch: 0,
+            stops_seeded: false,
+            vstop_epoch: 0,
+            vstop_seeded: false,
             snapshot_flag: 0,
             replace_sent_time_ms: 0,
             pending_cancel_sent_ms: 0,
             prev_panic_sell: false,
-            last_buy_actual_price: 0.0,
-            last_sell_actual_price: 0.0,
         }
     }
 
@@ -172,6 +189,12 @@ impl Order {
         self.replace_epoch_sell = 0;
         self.ack_epoch_buy = 0;
         self.ack_epoch_sell = 0;
+        self.ack_seeded_buy = false;
+        self.ack_seeded_sell = false;
+        self.stops_epoch = 0;
+        self.stops_seeded = false;
+        self.vstop_epoch = 0;
+        self.vstop_seeded = false;
     }
 }
 

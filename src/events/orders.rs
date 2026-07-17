@@ -78,9 +78,25 @@ impl EventDispatcher {
 
     /// Delphi equivalent: `ClientNewData(MPC_Order)` / `TAllStatuses` branch.
     fn process_all_statuses(&mut self, snap: AllStatuses, now_ms: i64, out: &mut Vec<Event>) {
+        let server_token = self.last_known_server_token;
+        if server_token != self.orders_snapshot_session_token {
+            self.orders_snapshot_session_token = server_token;
+            self.last_orders_snapshot_generation = 0;
+        }
+        if snap.header.uid <= self.last_orders_snapshot_generation {
+            log::debug!(
+                target: "moonproto::orders",
+                "drop stale orders snapshot generation {} <= {}",
+                snap.header.uid,
+                self.last_orders_snapshot_generation
+            );
+            return;
+        }
+        self.last_orders_snapshot_generation = snap.header.uid;
+
         self.orders.begin_snapshot();
-        for status in snap.orders {
-            self.process_command_order(TradeCommand::OrderStatus(Box::new(status)), now_ms, out);
+        for command in snap.orders {
+            self.process_command_order(command, now_ms, out);
         }
         out.push(Event::Order(OrderEvent::Snapshot));
     }

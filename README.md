@@ -30,6 +30,10 @@
 
 MoonProto is the live client-side bridge to a MoonBot core. The core remains the execution engine — it connects to exchanges and owns orders, strategies, risk logic, balances, and authoritative trading state. MoonProto keeps your terminal or tool connected to that core: transport, authorization, reconnect, subscriptions, retained state, events, and typed user intents.
 
+> **Core compatibility:** this SDK revision requires a MoonBot core build dated
+> **2026-07-16 or newer**. Earlier cores use the previous positional order-snapshot
+> wire format and are not compatible with this revision.
+
 <p align="center">
   <img src="assets/architecture.svg" width="820" alt="Your trading UI / dashboard / control tool talks to the MoonProto Rust library, which talks to a MoonBot core (MoonProto enabled), which owns exchange accounts, orders, strategies, and balances.">
 </p>

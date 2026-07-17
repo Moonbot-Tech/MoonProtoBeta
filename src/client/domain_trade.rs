@@ -28,8 +28,8 @@ impl Client {
     /// `UK_OrderMove`) with a new price.
     ///
     /// Requires the local `Orders` read model. The wrapper derives market route
-    /// and order type from the local order and repeats the Delphi
-    /// `ReplaceSentTime = 0` gate.
+    /// and order type from the local order. Every consumed UI intent queues its
+    /// latest target; `UK_OrderMove` coalesces older unsent move commands.
     #[doc(hidden)]
     pub(crate) fn replace_order(
         &self,

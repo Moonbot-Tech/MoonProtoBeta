@@ -52,6 +52,10 @@
 //! Live FireTest cases are serialized inside this binary: they share one live
 //! server and process-wide err_emu diagnostics, so parallel test-harness
 //! execution would mix scenarios instead of measuring one pipeline.
+//! The one-client public smoke keeps the init-time all-market retention path.
+//! Multi-client destructive sessions retain only the BTC/ETH/SOL markets used
+//! by their assertions, so four simultaneous clients do not each reserve an
+//! independent all-market `MarketHistorySizing::Auto` budget.
 //!
 //! This is a diagnostic/protocol health test, not application example code. The
 //! full profile uses the same public `MoonClient` path as regular applications,
@@ -758,9 +762,10 @@ impl Session {
             );
         }
 
+        let retained_markets = firetest_retained_markets(cfg);
         let init = InitConfig {
             mm_orders_subscribe: Some(true),
-            subscribe_trades: Some(TradesStreamMode::TradesOnly),
+            subscribe_trades: None,
             subscribe_orderbooks: vec![cfg.market.clone()],
             step_timeout: None,
             initial_strategies: Some(InitialStrategies::new(0, initial_strategies)),
@@ -780,6 +785,16 @@ impl Session {
         client
             .debug_reset_err_emu_diagnostics()
             .unwrap_or_else(|err| panic!("FIRETEST {label}: reset diagnostics failed: {err}"));
+        client
+            .streams()
+            .subscribe_trades_for(TradesStreamMode::TradesOnly, retained_markets.iter())
+            .unwrap_or_else(|err| {
+                panic!("FIRETEST {label}: scoped trades subscription failed: {err}")
+            });
+        println!(
+            "FIRETEST {label}: retained trades scope={}",
+            retained_markets.join(",")
+        );
 
         let mut session = Self {
             client,
@@ -1583,6 +1598,20 @@ impl Session {
             st.label
         );
     }
+}
+
+fn firetest_retained_markets(cfg: &FireConfig) -> Vec<String> {
+    let mut markets = Vec::with_capacity(3);
+    for market in [
+        cfg.market.as_str(),
+        FIRETEST_MOONSHOT_MARKET,
+        FIRETEST_REAL_BALANCE_ORDER_MARKET,
+    ] {
+        if !markets.iter().any(|known| known == market) {
+            markets.push(market.to_string());
+        }
+    }
+    markets
 }
 
 fn write_strategy_info_dump(

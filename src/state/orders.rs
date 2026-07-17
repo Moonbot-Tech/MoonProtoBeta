@@ -52,6 +52,7 @@ const SELL_DONE_REMOVAL_GRACE_MS: i64 = 400;
 const PENDING_CANCEL_REPEAT_MS: i64 = 32;
 const ORDER_TRACE_LINE_SHRINK_TO: usize = 800;
 const ORDER_TRACE_LINE_SHRINK_INTERVAL_MS: i64 = 30_000;
+const ORDER_TOMBSTONE_COUNT: usize = 128;
 
 use super::epoch::epoch_is_ok;
 
@@ -103,18 +104,27 @@ fn command_marks_existing_worker_snapshot_flag(cmd: &TradeCommand) -> bool {
 struct PendingRemoval {
     uid: u64,
     due_ms: i64,
+    instance_id: u64,
+    tombstone: bool,
+    server_session_token: u64,
 }
 
 /// Main retained orders collection.
 ///
 /// Single-owner state: modified only by the client runtime owner. Consumer code
 /// reads it through `iter()` / `get()` or through `MoonClient` snapshots.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Orders {
     map: HashMap<u64, Arc<Order>>,
     /// UID's already marked as finishing, but not removed from retained order
     /// state yet.
     pending_removals: Vec<PendingRemoval>,
+    /// Recently completed UID's in the current hard session. A delayed sliced
+    /// snapshot captured before the terminal full must not recreate them.
+    tombstones: [u64; ORDER_TOMBSTONE_COUNT],
+    tombstone_index: usize,
+    tombstone_session_token: u64,
+    next_instance_id: u64,
     /// Incremented on every `TAllStatuses`.
     current_snapshot_flag: u8,
     /// `ServerTimeDelta = InitialTime(server) - Now(client)`, applied to
@@ -125,11 +135,21 @@ pub struct Orders {
     last_order_line_shrink_ms: i64,
 }
 
+impl Default for Orders {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Orders {
     pub fn new() -> Self {
         Self {
             map: HashMap::new(),
             pending_removals: Vec::new(),
+            tombstones: [0; ORDER_TOMBSTONE_COUNT],
+            tombstone_index: 0,
+            tombstone_session_token: 0,
+            next_instance_id: 0,
             current_snapshot_flag: 0,
             server_time_delta: 0.0,
             eps_profile: EpsProfile::default(),
@@ -156,6 +176,34 @@ impl Orders {
 
     fn order_arc(&self, uid: u64) -> Option<Arc<Order>> {
         self.map.get(&uid).cloned()
+    }
+
+    fn allocate_instance_id(&mut self) -> u64 {
+        self.next_instance_id = self.next_instance_id.wrapping_add(1);
+        if self.next_instance_id == 0 {
+            self.next_instance_id = 1;
+        }
+        self.next_instance_id
+    }
+
+    fn sync_tombstone_session(&mut self, server_token: u64) {
+        if server_token != 0 && server_token != self.tombstone_session_token {
+            self.tombstones.fill(0);
+            self.tombstone_index = 0;
+            self.tombstone_session_token = server_token;
+        }
+    }
+
+    fn is_tombstoned(&self, uid: u64) -> bool {
+        uid != 0 && self.tombstones.contains(&uid)
+    }
+
+    fn record_tombstone(&mut self, uid: u64, server_session_token: u64) {
+        if uid == 0 || server_session_token != self.tombstone_session_token {
+            return;
+        }
+        self.tombstones[self.tombstone_index] = uid;
+        self.tombstone_index = (self.tombstone_index + 1) & (ORDER_TOMBSTONE_COUNT - 1);
     }
 
     fn created_event(&self, uid: u64) -> Option<OrderEvent> {
@@ -215,6 +263,7 @@ impl Orders {
         now_ms: i64,
         server_token: u64,
     ) -> (ApplyResult, Option<OrderEvent>) {
+        self.sync_tombstone_session(server_token);
         let uid = cmd.uid();
         let current_snapshot_flag = self.current_snapshot_flag;
         let server_time_delta = self.server_time_delta;
@@ -231,30 +280,52 @@ impl Orders {
                 if new_order && st.from_cache {
                     return ignored_order_event(uid, ApplyResult::OrderNotFound);
                 }
-                let eps_m = self.eps_profile.eps_m;
+                if new_order && self.is_tombstoned(uid) {
+                    return ignored_order_event(uid, ApplyResult::OutOfOrder);
+                }
+                let mut lifecycle_rejected = None;
+                let mut settings_applied = false;
                 let is_done = {
                     if new_order {
-                        self.map.insert(uid, Arc::new(Order::from_status(&st)));
+                        let instance_id = self.allocate_instance_id();
+                        self.map
+                            .insert(uid, Arc::new(Order::from_status(&st, instance_id)));
                     }
                     let entry = self.order_mut(uid).expect("order inserted or existed");
 
-                    if let Err(reason) = Self::accept_server_epoch(
+                    match Self::accept_server_epoch(
                         entry,
                         &st.epoch_header,
                         ServerEpochCommandKind::FullStatus,
                         server_token,
                     ) {
-                        return ignored_order_event(uid, reason);
+                        Ok(_) => {
+                            Self::apply_status_inner(entry, &st, server_time_delta, new_order);
+                            Self::apply_full_stops_vstop(entry, &st);
+                            entry.replace_epoch_buy = st.epoch_header.epoch;
+                            entry.replace_epoch_sell = st.epoch_header.epoch;
+                            entry.snapshot_flag = current_snapshot_flag;
+                        }
+                        Err(reason) => {
+                            // The full's lifecycle payload is stale, but its
+                            // independently judged settings may still repair a
+                            // lost stops/VStop echo.
+                            settings_applied = Self::apply_full_stops_vstop(entry, &st);
+                            lifecycle_rejected = Some(reason);
+                        }
                     }
-
-                    Self::apply_status_inner(entry, &st, server_time_delta, new_order, eps_m);
-                    entry.replace_epoch_buy = st.epoch_header.epoch;
-                    entry.replace_epoch_sell = st.epoch_header.epoch;
-                    entry.snapshot_flag = current_snapshot_flag;
                     entry.job_is_done
                 };
+                if let Some(reason) = lifecycle_rejected {
+                    if settings_applied {
+                        return (ApplyResult::Applied, self.updated_event(uid));
+                    }
+                    return ignored_order_event(uid, reason);
+                }
                 if is_done {
-                    self.mark_pending_removal(uid, now_ms, terminal_removal_delay_ms(status));
+                    self.mark_pending_removal(uid, now_ms, terminal_removal_delay_ms(status), true);
+                } else {
+                    self.cancel_terminal_removal(uid);
                 }
 
                 if new_order {
@@ -336,12 +407,14 @@ impl Orders {
                     }
                     if epoch_is_ok(entry.replace_epoch_buy, rr.epoch_header.epoch) {
                         entry.replace_epoch_buy = rr.epoch_header.epoch;
-                        entry.buy_price = rr.price;
                         if rr.quantity_base > 0.0 {
                             entry.buy_order.quantity_base = rr.quantity_base;
                         }
                     }
-                    if epoch_is_ok(entry.ack_epoch_buy, rr.epoch_header.epoch) {
+                    if !entry.ack_seeded_buy
+                        || epoch_is_ok(entry.ack_epoch_buy, rr.epoch_header.epoch)
+                    {
+                        entry.ack_seeded_buy = true;
                         entry.ack_epoch_buy = rr.epoch_header.epoch;
                         entry.bulk_replace_buy = false;
                     }
@@ -355,12 +428,14 @@ impl Orders {
                     }
                     if epoch_is_ok(entry.replace_epoch_sell, rr.epoch_header.epoch) {
                         entry.replace_epoch_sell = rr.epoch_header.epoch;
-                        entry.sell_price = rr.price;
                         if rr.quantity_base > 0.0 {
                             entry.sell_order.quantity_base = rr.quantity_base;
                         }
                     }
-                    if epoch_is_ok(entry.ack_epoch_sell, rr.epoch_header.epoch) {
+                    if !entry.ack_seeded_sell
+                        || epoch_is_ok(entry.ack_epoch_sell, rr.epoch_header.epoch)
+                    {
+                        entry.ack_seeded_sell = true;
                         entry.ack_epoch_sell = rr.epoch_header.epoch;
                         entry.bulk_replace_sell = false;
                     }
@@ -374,14 +449,12 @@ impl Orders {
                 let Some(entry) = self.order_mut(uid) else {
                     return ignored_order_event(uid, ApplyResult::OrderNotFound);
                 };
-                if let Err(reason) = Self::accept_server_epoch(
-                    entry,
-                    &su.epoch_header,
-                    ServerEpochCommandKind::Other,
-                    server_token,
-                ) {
-                    return ignored_order_event(uid, reason);
+                Self::adopt_server_session(entry, server_token);
+                if entry.stops_seeded && !epoch_is_ok(entry.stops_epoch, su.epoch_header.epoch) {
+                    return ignored_order_event(uid, ApplyResult::OutOfOrder);
                 }
+                entry.stops_seeded = true;
+                entry.stops_epoch = su.epoch_header.epoch;
                 entry.stops = su.stops;
                 (ApplyResult::Applied, Some(OrderEvent::StopsChanged(uid)))
             }
@@ -391,14 +464,12 @@ impl Orders {
                 let Some(entry) = self.order_mut(uid) else {
                     return ignored_order_event(uid, ApplyResult::OrderNotFound);
                 };
-                if let Err(reason) = Self::accept_server_epoch(
-                    entry,
-                    &vs.epoch_header,
-                    ServerEpochCommandKind::VStop,
-                    server_token,
-                ) {
-                    return ignored_order_event(uid, reason);
+                Self::adopt_server_session(entry, server_token);
+                if entry.vstop_seeded && !epoch_is_ok(entry.vstop_epoch, vs.epoch_header.epoch) {
+                    return ignored_order_event(uid, ApplyResult::OutOfOrder);
                 }
+                entry.vstop_seeded = true;
+                entry.vstop_epoch = vs.epoch_header.epoch;
                 entry.vstop_on = vs.vstop_on;
                 entry.vstop_fixed = vs.vstop_fixed;
                 entry.vstop_level = vs.vstop_level;
@@ -464,7 +535,7 @@ impl Orders {
                     false
                 };
                 if found {
-                    self.mark_pending_removal(uid, now_ms, 0);
+                    self.mark_pending_removal(uid, now_ms, 0, false);
                     (ApplyResult::Applied, self.updated_event(uid))
                 } else {
                     ignored_order_event(uid, ApplyResult::OrderNotFound)

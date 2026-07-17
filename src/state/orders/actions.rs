@@ -1,7 +1,7 @@
 //! Local outgoing order-worker actions.
 //!
 //! These methods keep the local Active Lib pre-send gates next to the retained
-//! order state: stop/VStop dedup, replace throttling, pending-cancel repeats,
+//! order state: stop/VStop dedup, replace intents, pending-cancel repeats,
 //! panic-sell toggles, and bulk-move candidate checks.
 
 use super::*;
@@ -174,12 +174,13 @@ impl Orders {
         ))
     }
 
-    /// Deduplicate and prepare one outgoing replace update.
+    /// Apply and prepare one outgoing replace intent.
     ///
-    /// This combines the local UI intent (`p*Order.Price` +
-    /// `p*Order.OrderReplace := true`) with the worker tick that sends only when
-    /// `ReplaceSentTime = 0`. If a replace is already in flight, the local
-    /// desired price is updated but no new packet is queued.
+    /// The active runtime command queue is the Rust equivalent of Delphi's
+    /// per-side `FClientReplacePending`: once an intent reaches the runtime
+    /// owner it must be sent even when an older replace is still in flight.
+    /// The `UK_OrderMove` send-queue key coalesces an older unsent packet, while
+    /// a packet already copied by the writer is followed by the newer target.
     pub(crate) fn send_replace_if_requested(
         &mut self,
         uid: u64,
@@ -199,27 +200,15 @@ impl Orders {
             }
             OrderWorkerStatus::BuySet => {
                 let order_type = order.buy_order.order_type;
-                if order.replace_sent_time_ms > 0 && !order.bulk_replace_buy {
-                    order.replace_sent_time_ms = 0;
-                }
                 order.buy_price = new_price;
                 order.bulk_replace_buy = true;
-                if order.replace_sent_time_ms > 0 {
-                    return None;
-                }
                 order.replace_sent_time_ms = now_ms.max(1);
                 order_type
             }
             OrderWorkerStatus::SellSet => {
                 let order_type = order.sell_order.order_type;
-                if order.replace_sent_time_ms > 0 && !order.bulk_replace_sell {
-                    order.replace_sent_time_ms = 0;
-                }
                 order.sell_price = new_price;
                 order.bulk_replace_sell = true;
-                if order.replace_sent_time_ms > 0 {
-                    return None;
-                }
                 order.replace_sent_time_ms = now_ms.max(1);
                 order_type
             }

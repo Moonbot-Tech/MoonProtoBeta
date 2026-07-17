@@ -102,6 +102,15 @@ impl TradeCommand {
     /// Version gate: `ver > 3` returns `Unknown` for forward-compatible skip.
     pub fn parse(payload: &[u8]) -> Option<Self> {
         let mut r = payload;
+        Self::read(&mut r)
+    }
+
+    /// Parse one self-described command and advance the shared stream cursor.
+    ///
+    /// `TAllStatuses` stores commands positionally, without item lengths, so
+    /// nested parsing must consume exactly the bytes owned by each concrete
+    /// command before the next `CmdId` is read.
+    pub(super) fn read(r: &mut &[u8]) -> Option<Self> {
         let peek_cmd_id = if !r.is_empty() {
             r[0]
         } else {
@@ -114,6 +123,7 @@ impl TradeCommand {
         let ver = u16::from_le_bytes([r[1], r[2]]);
         if ver > CURRENT_PROTO_CMD_VER {
             let uid = u64::from_le_bytes(r[3..11].try_into().unwrap());
+            *r = &[];
             return Some(TradeCommand::Unknown {
                 cmd_id: peek_cmd_id,
                 uid,
@@ -121,95 +131,74 @@ impl TradeCommand {
         }
 
         match peek_cmd_id {
-            1 => Some(TradeCommand::BaseMarket(MarketCommandHeader::read(&mut r)?)),
-            2 => Some(TradeCommand::TradeEpoch(TradeEpochHeader::read(&mut r)?)),
-            3 => Some(TradeCommand::NewOrder(NewOrderCommand::read(&mut r)?)),
-            4 => Some(TradeCommand::OrderStatus(Box::new(OrderStatus::read(
-                &mut r,
-            )?))),
-            5 => Some(TradeCommand::OrderStatusUpdate(OrderStatusUpdate::read(
-                &mut r,
-            )?)),
-            6 => Some(TradeCommand::OrderReplace(OrderReplaceCommand::read(
-                &mut r,
-            )?)),
+            1 => Some(TradeCommand::BaseMarket(MarketCommandHeader::read(r)?)),
+            2 => Some(TradeCommand::TradeEpoch(TradeEpochHeader::read(r)?)),
+            3 => Some(TradeCommand::NewOrder(NewOrderCommand::read(r)?)),
+            4 => Some(TradeCommand::OrderStatus(Box::new(OrderStatus::read(r)?))),
+            5 => Some(TradeCommand::OrderStatusUpdate(OrderStatusUpdate::read(r)?)),
+            6 => Some(TradeCommand::OrderReplace(OrderReplaceCommand::read(r)?)),
             7 => Some(TradeCommand::OrderReplaceResponse(Box::new(
-                OrderReplaceResponse::read(&mut r)?,
+                OrderReplaceResponse::read(r)?,
             ))),
-            8 => Some(TradeCommand::AllStatuses(AllStatuses::read(&mut r)?)),
+            8 => Some(TradeCommand::AllStatuses(AllStatuses::read(r)?)),
             9 => {
-                let h = BaseCommandHeader::read(&mut r)?;
+                let h = BaseCommandHeader::read(r)?;
                 Some(TradeCommand::AllStatusesRequest(h))
             }
-            10 => Some(TradeCommand::OrderCancel(OrderCancelCommand::read(&mut r)?)),
-            11 => Some(TradeCommand::JoinOrders(JoinOrdersCommand::read(&mut r)?)),
-            12 => Some(TradeCommand::SplitOrder(SplitOrderCommand::read(&mut r)?)),
-            13 => Some(TradeCommand::MoveAllSells(MoveAllSellsCommand::read(
-                &mut r,
-            )?)),
+            10 => Some(TradeCommand::OrderCancel(OrderCancelCommand::read(r)?)),
+            11 => Some(TradeCommand::JoinOrders(JoinOrdersCommand::read(r)?)),
+            12 => Some(TradeCommand::SplitOrder(SplitOrderCommand::read(r)?)),
+            13 => Some(TradeCommand::MoveAllSells(MoveAllSellsCommand::read(r)?)),
             14 => Some(TradeCommand::DoClosePosition(DoClosePositionCommand::read(
-                &mut r,
+                r,
             )?)),
             15 => Some(TradeCommand::DoLimitClosePosition(JoinOrdersCommand::read(
-                &mut r,
+                r,
             )?)),
-            16 => Some(TradeCommand::DoSplitPosition(JoinOrdersCommand::read(
-                &mut r,
-            )?)),
-            17 => Some(TradeCommand::DoSellOrder(DoSellOrderCommand::read(&mut r)?)),
-            18 => Some(TradeCommand::OrderStatusRequest(TradeEpochHeader::read(
-                &mut r,
-            )?)),
-            19 => Some(TradeCommand::OrderNotFound(TradeEpochHeader::read(&mut r)?)),
-            20 => Some(TradeCommand::OrderStopsUpdate(OrderStopsUpdate::read(
-                &mut r,
-            )?)),
-            21 => Some(TradeCommand::TurnPanicSell(TurnPanicSellCommand::read(
-                &mut r,
-            )?)),
-            22 => Some(TradeCommand::SetImmune(SetImmuneCommand::read(&mut r)?)),
-            23 => Some(TradeCommand::Penalty(MarketCommandHeader::read(&mut r)?)),
-            24 => Some(TradeCommand::TradeVisual(MarketCommandHeader::read(
-                &mut r,
-            )?)),
-            25 => Some(TradeCommand::OrderTracePoint(OrderTracePoint::read(
-                &mut r,
-            )?)),
-            26 => Some(TradeCommand::CorridorUpdate(CorridorUpdate::read(&mut r)?)),
-            27 => Some(TradeCommand::MoveAllBuys(MoveAllBuysCommand::read(&mut r)?)),
-            28 => Some(TradeCommand::BulkReplaceNotify(BulkReplaceNotify::read(
-                &mut r,
-            )?)),
-            29 => Some(TradeCommand::VStopUpdate(VStopUpdate::read(&mut r)?)),
+            16 => Some(TradeCommand::DoSplitPosition(JoinOrdersCommand::read(r)?)),
+            17 => Some(TradeCommand::DoSellOrder(DoSellOrderCommand::read(r)?)),
+            18 => Some(TradeCommand::OrderStatusRequest(TradeEpochHeader::read(r)?)),
+            19 => Some(TradeCommand::OrderNotFound(TradeEpochHeader::read(r)?)),
+            20 => Some(TradeCommand::OrderStopsUpdate(OrderStopsUpdate::read(r)?)),
+            21 => Some(TradeCommand::TurnPanicSell(TurnPanicSellCommand::read(r)?)),
+            22 => Some(TradeCommand::SetImmune(SetImmuneCommand::read(r)?)),
+            23 => Some(TradeCommand::Penalty(MarketCommandHeader::read(r)?)),
+            24 => Some(TradeCommand::TradeVisual(MarketCommandHeader::read(r)?)),
+            25 => Some(TradeCommand::OrderTracePoint(OrderTracePoint::read(r)?)),
+            26 => Some(TradeCommand::CorridorUpdate(CorridorUpdate::read(r)?)),
+            27 => Some(TradeCommand::MoveAllBuys(MoveAllBuysCommand::read(r)?)),
+            28 => Some(TradeCommand::BulkReplaceNotify(BulkReplaceNotify::read(r)?)),
+            29 => Some(TradeCommand::VStopUpdate(VStopUpdate::read(r)?)),
             30 => Some(TradeCommand::DoMarketSplitPosition(
-                JoinOrdersCommand::read(&mut r)?,
+                JoinOrdersCommand::read(r)?,
             )),
             31 => Some(TradeCommand::ClosedSellOrderReport(
-                ClosedSellOrderReport::read(&mut r)?,
+                ClosedSellOrderReport::read(r)?,
             )),
             CMD_ROW_UPSERT => Some(TradeCommand::ReportRowUpsert(
-                crate::commands::report::RepRowUpsert::read(&mut r)?,
+                crate::commands::report::RepRowUpsert::read(r)?,
             )),
             CMD_ROW_DELETE => Some(TradeCommand::ReportRowDelete(
-                crate::commands::report::RepRowDelete::read(&mut r)?,
+                crate::commands::report::RepRowDelete::read(r)?,
             )),
             CMD_SYNC_REQUEST => Some(TradeCommand::ReportSyncRequest(
-                crate::commands::report::RepSyncRequest::read(&mut r)?,
+                crate::commands::report::RepSyncRequest::read(r)?,
             )),
             CMD_SCHEMA_REQUEST => Some(TradeCommand::ReportSchemaRequest(BaseCommandHeader::read(
-                &mut r,
+                r,
             )?)),
             CMD_SCHEMA => Some(TradeCommand::ReportSchema(
-                crate::commands::report::RepSchema::read(&mut r)?,
+                crate::commands::report::RepSchema::read(r)?,
             )),
             CMD_SYNC_PAGE => Some(TradeCommand::ReportSyncPage(
-                crate::commands::report::RepSyncPage::read(&mut r)?,
+                crate::commands::report::RepSyncPage::read(r)?,
             )),
             CMD_CHECK_ROWS_REQUEST => Some(TradeCommand::ReportCheckRowsRequest(
-                crate::commands::report::RepCheckRowsRequest::read(&mut r)?,
+                crate::commands::report::RepCheckRowsRequest::read(r)?,
             )),
             _ => {
                 let uid = u64::from_le_bytes(r[3..11].try_into().unwrap());
+                *r = &[];
                 Some(TradeCommand::Unknown {
                     cmd_id: peek_cmd_id,
                     uid,

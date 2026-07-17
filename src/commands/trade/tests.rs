@@ -222,7 +222,43 @@ fn minimal_order_status_payload(cmd_id: u8, uid: u64) -> Vec<u8> {
     out.push(0);
     out.push(0);
     out.push(0);
+    // fe600fd TOrderStatus VStop flags byte (disabled, no Level/Vol tail).
+    out.push(0);
     out
+}
+
+#[test]
+// parity: MoonBot MoonProtoTradeStruct.pas:TOrderStatus VStop tail
+fn all_statuses_consumes_vstop_tail_before_next_order() {
+    let mut first = minimal_order_status_payload(4, 0x1111);
+    *first.last_mut().expect("vstop flags") = 1 | 2 | 4;
+    first.extend_from_slice(&12.5f64.to_le_bytes());
+    first.extend_from_slice(&3.25f64.to_le_bytes());
+    let second = minimal_order_status_payload(4, 0x2222);
+
+    let mut raw = Vec::new();
+    write_base_command_header(&mut raw, 8, 7);
+    raw.extend_from_slice(&2i32.to_le_bytes());
+    raw.extend_from_slice(&first);
+    raw.extend_from_slice(&second);
+
+    let TradeCommand::AllStatuses(snapshot) = TradeCommand::parse(&raw).expect("snapshot") else {
+        panic!("wrong command")
+    };
+    assert_eq!(snapshot.orders.len(), 2);
+    let TradeCommand::OrderStatus(first) = &snapshot.orders[0] else {
+        panic!("first nested command is not OrderStatus")
+    };
+    assert_eq!(first.epoch_header.market.base.uid, 0x1111);
+    assert!(first.vstop_on);
+    assert!(first.vstop_fixed);
+    assert_eq!(first.vstop_level, 12.5);
+    assert_eq!(first.vstop_vol, 3.25);
+    let TradeCommand::OrderStatus(second) = &snapshot.orders[1] else {
+        panic!("second nested command is not OrderStatus")
+    };
+    assert_eq!(second.epoch_header.market.base.uid, 0x2222);
+    assert!(!second.vstop_on);
 }
 
 fn minimal_market_payload(cmd_id: u8) -> Vec<u8> {
@@ -297,16 +333,19 @@ fn order_status_zero_tails_partial_order_record() {
 
 #[test]
 // parity: MoonBot MoonProtoTradeStruct.pas:TAllStatuses.CreateFromStream
-fn all_statuses_rejects_nested_non_order_status_cmd_id() {
+fn all_statuses_dispatches_nested_trade_command_by_cmd_id() {
     let mut raw = Vec::new();
     write_base_command_header(&mut raw, 8, 0xAA);
     raw.extend_from_slice(&1i32.to_le_bytes());
-    raw.extend_from_slice(&minimal_order_status_payload(5, 0xBB));
+    raw.extend_from_slice(&minimal_market_payload(29));
 
-    assert!(
-        TradeCommand::parse(&raw).is_none(),
-        "TAllStatuses must dispatch each nested TBaseTradeCommand and accept only CmdId=4"
-    );
+    let TradeCommand::AllStatuses(snapshot) = TradeCommand::parse(&raw).expect("snapshot") else {
+        panic!("wrong command")
+    };
+    assert!(matches!(
+        snapshot.orders.as_slice(),
+        [TradeCommand::VStopUpdate(_)]
+    ));
 }
 
 #[test]
@@ -342,7 +381,10 @@ fn all_statuses_keeps_present_items_when_count_overstates_remaining() {
     match TradeCommand::parse(&raw).unwrap() {
         TradeCommand::AllStatuses(snap) => {
             assert_eq!(snap.orders.len(), 1);
-            assert_eq!(snap.orders[0].epoch_header.market.base.uid, 0xBB);
+            let TradeCommand::OrderStatus(status) = &snap.orders[0] else {
+                panic!("wrong nested command")
+            };
+            assert_eq!(status.epoch_header.market.base.uid, 0xBB);
         }
         other => panic!("wrong variant: {other:?}"),
     }

@@ -292,6 +292,14 @@ pub struct OrderStatus {
     pub emulator_mode: bool,
     /// v3+
     pub immune_for_clicks: bool,
+    /// Authoritative VStop state carried by the full status.
+    ///
+    /// The wire tail starts with one flag byte. Level/volume follow only when
+    /// either value is non-zero on the server.
+    pub vstop_on: bool,
+    pub vstop_fixed: bool,
+    pub vstop_level: f64,
+    pub vstop_vol: f64,
 }
 
 impl OrderStatus {
@@ -316,6 +324,21 @@ impl OrderStatus {
             immune_for_clicks = read_u8_zero_tail(r) != 0;
         }
 
+        // fe600fd: the full order status owns the VStop snapshot. This byte is
+        // always written by the current core and must be consumed here because
+        // TAllStatuses concatenates rows without per-item lengths.
+        const VSTOP_ON: u8 = 1;
+        const VSTOP_FIXED: u8 = 2;
+        const VSTOP_HAS_DATA: u8 = 4;
+        let vstop_flags = read_u8_zero_tail(r);
+        let vstop_on = vstop_flags & VSTOP_ON != 0;
+        let vstop_fixed = vstop_flags & VSTOP_FIXED != 0;
+        let (vstop_level, vstop_vol) = if vstop_flags & VSTOP_HAS_DATA != 0 {
+            (read_f64_zero_tail(r), read_f64_zero_tail(r))
+        } else {
+            (0.0, 0.0)
+        };
+
         Some(Self {
             epoch_header,
             buy_order,
@@ -327,6 +350,10 @@ impl OrderStatus {
             from_cache,
             emulator_mode,
             immune_for_clicks,
+            vstop_on,
+            vstop_fixed,
+            vstop_level,
+            vstop_vol,
         })
     }
 }
@@ -425,12 +452,17 @@ impl OrderReplaceResponse {
 //  CmdId=8: TAllStatuses
 // ============================================================================
 
-/// `TAllStatuses` (TradeStruct.pas:104-114). Priority=Sliced.
+/// `TAllStatuses` (TradeStruct.pas). Priority=Sliced.
 /// Snapshot of all active orders, sent during reconnect/resync.
+///
+/// The current snapshot producer appends full `TOrderStatus` commands. The
+/// container itself remains polymorphic, matching `TList<TBaseTradeCommand>`;
+/// it is positional and has no per-item lengths, so every nested command must
+/// consume its exact tail before the next `CmdId` is read.
 #[derive(Debug, Clone)]
 pub struct AllStatuses {
     pub header: BaseCommandHeader,
-    pub orders: Vec<OrderStatus>,
+    pub orders: Vec<TradeCommand>,
 }
 
 impl AllStatuses {
@@ -460,20 +492,12 @@ impl AllStatuses {
             if r.is_empty() {
                 break;
             }
-            // Each order is written through `o.StoreToStream(Stream)`, so it
-            // includes its own CmdId/ver/UID header. Delphi reads it through
-            // `TBaseTradeCommand.FromStream(ms)` and then casts to
-            // `TOrderStatus`; a valid nested item must therefore be CmdId=4.
-            if r.first().copied() != Some(4) {
-                log::warn!(
-                    target: "moonproto::trade",
-                    "AllStatuses: nested command is not TOrderStatus (cmd_id={:?})",
-                    r.first().copied()
-                );
-                return None;
-            }
-            if let Some(order) = OrderStatus::read(r) {
-                orders.push(order);
+            // `TBaseTradeCommand.FromStream` dispatches each self-described
+            // element by CmdId. The current producer sends full statuses, but
+            // preserving the typed container keeps parser and apply semantics
+            // identical if another trade command is appended.
+            if let Some(command) = TradeCommand::read(r) {
+                orders.push(command);
             } else {
                 break;
             }

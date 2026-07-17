@@ -200,6 +200,21 @@ fn all_statuses_payload(uid: u64, orders: &[OrderStatus]) -> Vec<u8> {
         out.push(st.from_cache as u8);
         out.push(st.emulator_mode as u8);
         out.push(st.immune_for_clicks as u8);
+        let mut vstop_flags = 0u8;
+        if st.vstop_on {
+            vstop_flags |= 1;
+        }
+        if st.vstop_fixed {
+            vstop_flags |= 2;
+        }
+        if st.vstop_level != 0.0 || st.vstop_vol != 0.0 {
+            vstop_flags |= 4;
+        }
+        out.push(vstop_flags);
+        if vstop_flags & 4 != 0 {
+            out.extend_from_slice(&st.vstop_level.to_le_bytes());
+            out.extend_from_slice(&st.vstop_vol.to_le_bytes());
+        }
     }
     out
 }
@@ -793,6 +808,10 @@ fn order_status_for_test(
         from_cache: false,
         emulator_mode: false,
         immune_for_clicks: false,
+        vstop_on: false,
+        vstop_fixed: false,
+        vstop_level: 0.0,
+        vstop_vol: 0.0,
     }
 }
 
@@ -826,6 +845,52 @@ fn dispatcher_snapshot_is_immutable_after_later_domain_mutation() {
     assert!(
         d.snapshot().orders().get(uid).is_some(),
         "live dispatcher must still publish the later domain mutation"
+    );
+}
+
+#[test]
+fn stale_orders_snapshot_generation_is_dropped_before_apply() {
+    let mut d = EventDispatcher::new();
+    seed_event_markets(&mut d, &["BTCUSDT"]);
+    d.last_known_server_token = 0xAAAA;
+
+    let mut first = order_status_for_test(0x123, "BTCUSDT", 7, 9, OrderWorkerStatus::BuySet);
+    first.buy_order.actual_price = 100.0;
+    let _ = d.dispatch(Command::Order, &all_statuses_payload(10, &[first]), 1000);
+
+    let mut newer = order_status_for_test(0x123, "BTCUSDT", 7, 9, OrderWorkerStatus::BuySet);
+    newer.epoch_header.epoch = 2;
+    newer.buy_order.actual_price = 200.0;
+    let _ = d.dispatch(Command::Order, &all_statuses_payload(12, &[newer]), 1001);
+
+    let mut stale = order_status_for_test(0x123, "BTCUSDT", 7, 9, OrderWorkerStatus::BuySet);
+    stale.epoch_header.epoch = 3;
+    stale.buy_order.actual_price = 300.0;
+    let events = d.dispatch(Command::Order, &all_statuses_payload(11, &[stale]), 1002);
+
+    assert!(events.is_empty());
+    assert_eq!(d.orders.get(0x123).unwrap().buy_order.actual_price, 200.0);
+}
+
+#[test]
+fn orders_snapshot_generation_restarts_with_new_server_token() {
+    let mut d = EventDispatcher::new();
+    seed_event_markets(&mut d, &["BTCUSDT"]);
+    d.last_known_server_token = 0xAAAA;
+    let first = order_status_for_test(0x123, "BTCUSDT", 7, 9, OrderWorkerStatus::BuySet);
+    let _ = d.dispatch(Command::Order, &all_statuses_payload(100, &[first]), 1000);
+
+    d.last_known_server_token = 0xBBBB;
+    let mut fresh = order_status_for_test(0x123, "BTCUSDT", 7, 9, OrderWorkerStatus::SellSet);
+    fresh.epoch_header.epoch = 1;
+    let events = d.dispatch(Command::Order, &all_statuses_payload(1, &[fresh]), 1001);
+
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, Event::Order(OrderEvent::Snapshot))));
+    assert_eq!(
+        d.orders.get(0x123).unwrap().status,
+        OrderWorkerStatus::SellSet
     );
 }
 

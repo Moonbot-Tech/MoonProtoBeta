@@ -44,6 +44,10 @@ fn make_status(uid: u64, market: &str, status: OrderWorkerStatus, epoch: u16) ->
         from_cache: false,
         emulator_mode: false,
         immune_for_clicks: false,
+        vstop_on: false,
+        vstop_fixed: false,
+        vstop_level: 0.0,
+        vstop_vol: 0.0,
     }
 }
 
@@ -470,7 +474,7 @@ fn outgoing_send_vstop_if_changed_matches_delphi_change_gate() {
 }
 
 #[test]
-fn outgoing_send_replace_if_requested_matches_delphi_gate() {
+fn outgoing_replace_does_not_lose_a_new_target_while_old_replace_is_in_flight() {
     let mut orders = Orders::new();
     let mut buy_status = make_status(42, "BTCUSDT", OrderWorkerStatus::BuySet, 1);
     buy_status.buy_order.order_type = OrderType::Buy;
@@ -495,11 +499,15 @@ fn outgoing_send_replace_if_requested_matches_delphi_gate() {
     assert!(order.bulk_replace_buy);
     assert_eq!(order.replace_sent_time_ms, 1000);
 
-    assert!(
-        orders.send_replace_if_requested(42, 10.7, 1001).is_none(),
-        "ReplaceSentTime gate suppresses another packet while replace is in flight"
-    );
-    assert_eq!(orders.get(42).unwrap().buy_price, 10.7);
+    let (_, _, order_type, price) = orders
+        .send_replace_if_requested(42, 10.7, 1001)
+        .expect("a newer UI target must not be swallowed by the older in-flight replace");
+    assert_eq!(order_type, OrderType::Buy);
+    assert_eq!(price, 10.7);
+    let order = orders.get(42).unwrap();
+    assert_eq!(order.buy_price, 10.7);
+    assert!(order.bulk_replace_buy);
+    assert_eq!(order.replace_sent_time_ms, 1001);
 
     let mut pending = make_status(43, "BTCUSDT", OrderWorkerStatus::None, 1);
     pending.buy_order.mean_price = 9.0;
@@ -1382,14 +1390,13 @@ fn equal_full_cannot_change_phase() {
         10,
     )));
 
-    let (res, _) = orders.apply(order_status_cmd(make_status(
-        1,
-        "X",
-        OrderWorkerStatus::SellSet,
-        10,
-    )));
-    assert_eq!(res, ApplyResult::OutOfOrder);
-    assert_eq!(orders.get(1).unwrap().status, OrderWorkerStatus::BuySet);
+    let mut torn = make_status(1, "X", OrderWorkerStatus::SellSet, 10);
+    torn.stops.stop_loss_on = DelphiBool::TRUE;
+    let (res, _) = orders.apply(order_status_cmd(torn));
+    assert_eq!(res, ApplyResult::Applied);
+    let order = orders.get(1).unwrap();
+    assert_eq!(order.status, OrderWorkerStatus::BuySet);
+    assert_eq!(order.stops.stop_loss_on, DelphiBool::TRUE);
 }
 
 #[test]
@@ -1398,6 +1405,7 @@ fn replace_response_uses_independent_stream_state_and_ack_judges() {
     let mut initial = make_status(1, "X", OrderWorkerStatus::BuySet, 10);
     initial.buy_order.actual_price = 100.0;
     orders.apply(order_status_cmd(initial));
+    std::sync::Arc::make_mut(orders.map.get_mut(&1).unwrap()).buy_price = 130.0;
 
     let short = OrderStatusUpdate {
         epoch_header: make_epoch(1, 3, "X", 12, OrderWorkerStatus::BuySet),
@@ -1426,7 +1434,7 @@ fn replace_response_uses_independent_stream_state_and_ack_judges() {
     );
     let order = orders.get(1).unwrap();
     assert_eq!(order.buy_order.actual_price, 120.0);
-    assert_eq!(order.buy_price, 111.0);
+    assert_eq!(order.buy_price, 130.0);
     assert_eq!(order.buy_order.quantity_base, 2.0);
     assert!(!order.bulk_replace_buy);
 
@@ -1448,13 +1456,13 @@ fn replace_response_uses_independent_stream_state_and_ack_judges() {
     orders.apply(order_replace_response_cmd(same_epoch_ack));
     let order = orders.get(1).unwrap();
     assert_eq!(order.buy_order.actual_price, 125.0);
-    assert_eq!(order.buy_price, 125.0);
+    assert_eq!(order.buy_price, 130.0);
     assert_eq!(order.buy_order.quantity_base, 0.0);
     assert!(!order.bulk_replace_buy);
 }
 
 #[test]
-fn equal_epoch_vstop_is_recovery_but_stops_is_stale() {
+fn direct_stops_and_vstop_equal_to_full_epoch_are_duplicates() {
     let mut orders = Orders::new();
     orders.apply(order_status_cmd(make_status(
         1,
@@ -1472,9 +1480,9 @@ fn equal_epoch_vstop_is_recovery_but_stops_is_stale() {
     };
     assert_eq!(
         orders.apply(TradeCommand::VStopUpdate(vstop)).0,
-        ApplyResult::Applied
+        ApplyResult::OutOfOrder
     );
-    assert!(orders.get(1).unwrap().vstop_on);
+    assert!(!orders.get(1).unwrap().vstop_on);
 
     let stops = OrderStopsUpdate {
         epoch_header: make_epoch(1, 3, "X", 10, OrderWorkerStatus::BuySet),
@@ -1488,6 +1496,204 @@ fn equal_epoch_vstop_is_recovery_but_stops_is_stale() {
         ApplyResult::OutOfOrder
     );
     assert_eq!(orders.get(1).unwrap().stops.stop_loss_on, DelphiBool::FALSE);
+}
+
+#[test]
+fn stops_and_vstop_do_not_advance_shared_lifecycle_watermark() {
+    let mut orders = Orders::new();
+    orders.apply(order_status_cmd(make_status(
+        1,
+        "X",
+        OrderWorkerStatus::BuySet,
+        10,
+    )));
+
+    let stops = OrderStopsUpdate {
+        epoch_header: make_epoch(1, 3, "X", 100, OrderWorkerStatus::SellSet),
+        stops: StopSettings {
+            stop_loss_on: DelphiBool::TRUE,
+            ..Default::default()
+        },
+    };
+    assert_eq!(
+        orders.apply(TradeCommand::OrderStopsUpdate(stops)).0,
+        ApplyResult::Applied
+    );
+    let vstop = VStopUpdate {
+        epoch_header: make_epoch(1, 3, "X", 101, OrderWorkerStatus::SellSet),
+        vstop_on: true,
+        vstop_fixed: false,
+        vstop_level: 12.0,
+        vstop_vol: 3.0,
+    };
+    assert_eq!(
+        orders.apply(TradeCommand::VStopUpdate(vstop)).0,
+        ApplyResult::Applied
+    );
+
+    let short = OrderStatusUpdate {
+        epoch_header: make_epoch(1, 3, "X", 11, OrderWorkerStatus::BuySet),
+        update_data: OrderUpdateData {
+            actual_price: 111.0,
+            ..Default::default()
+        },
+        sell_reason_code: 0,
+    };
+    assert_eq!(
+        orders.apply(TradeCommand::OrderStatusUpdate(short)).0,
+        ApplyResult::Applied
+    );
+    assert_eq!(orders.get(1).unwrap().server_watermark, 11);
+}
+
+#[test]
+fn stale_lifecycle_full_can_repair_lost_stops_and_vstop_echo() {
+    let mut orders = Orders::new();
+    let mut initial = make_status(1, "X", OrderWorkerStatus::BuySet, 10);
+    initial.buy_order.actual_price = 100.0;
+    orders.apply(order_status_cmd(initial));
+
+    let short = OrderStatusUpdate {
+        epoch_header: make_epoch(1, 3, "X", 12, OrderWorkerStatus::BuySet),
+        update_data: OrderUpdateData {
+            actual_price: 120.0,
+            ..Default::default()
+        },
+        sell_reason_code: 0,
+    };
+    orders.apply(TradeCommand::OrderStatusUpdate(short));
+
+    let mut stale_full = make_status(1, "X", OrderWorkerStatus::BuySet, 11);
+    stale_full.buy_order.actual_price = 110.0;
+    stale_full.stops.stop_loss_on = DelphiBool::TRUE;
+    stale_full.vstop_on = true;
+    stale_full.vstop_level = 15.0;
+    let (res, _) = orders.apply(order_status_cmd(stale_full));
+
+    assert_eq!(res, ApplyResult::Applied);
+    let order = orders.get(1).unwrap();
+    assert_eq!(order.buy_order.actual_price, 120.0);
+    assert_eq!(order.stops.stop_loss_on, DelphiBool::TRUE);
+    assert!(order.vstop_on);
+    assert_eq!(order.vstop_level, 15.0);
+}
+
+#[test]
+fn newer_stops_and_vstop_echo_are_not_rolled_back_by_full() {
+    let mut orders = Orders::new();
+    orders.apply(order_status_cmd(make_status(
+        1,
+        "X",
+        OrderWorkerStatus::BuySet,
+        10,
+    )));
+
+    let stops = OrderStopsUpdate {
+        epoch_header: make_epoch(1, 3, "X", 12, OrderWorkerStatus::BuySet),
+        stops: StopSettings {
+            stop_loss_on: DelphiBool::TRUE,
+            ..Default::default()
+        },
+    };
+    orders.apply(TradeCommand::OrderStopsUpdate(stops));
+    orders.apply(TradeCommand::VStopUpdate(VStopUpdate {
+        epoch_header: make_epoch(1, 3, "X", 12, OrderWorkerStatus::BuySet),
+        vstop_on: true,
+        vstop_fixed: false,
+        vstop_level: 20.0,
+        vstop_vol: 2.0,
+    }));
+
+    let full = make_status(1, "X", OrderWorkerStatus::BuySet, 11);
+    orders.apply(order_status_cmd(full));
+    let order = orders.get(1).unwrap();
+    assert_eq!(order.stops.stop_loss_on, DelphiBool::TRUE);
+    assert!(order.vstop_on);
+    assert_eq!(order.vstop_level, 20.0);
+}
+
+#[test]
+fn first_replace_response_seeds_ack_judge_in_word_tail() {
+    let mut orders = Orders::new();
+    let mut initial = make_status(1, "X", OrderWorkerStatus::BuySet, 65_000);
+    initial.buy_order.actual_price = 100.0;
+    orders.apply(order_status_cmd(initial));
+    std::sync::Arc::make_mut(orders.map.get_mut(&1).unwrap()).bulk_replace_buy = true;
+
+    let response = OrderReplaceResponse {
+        epoch_header: make_epoch(1, 3, "X", 65_000, OrderWorkerStatus::BuySet),
+        order_type: OrderType::Buy,
+        price: 999.0,
+        update_data: Default::default(),
+        quantity_base: 0.0,
+    };
+    assert_eq!(
+        orders.apply(order_replace_response_cmd(response)).0,
+        ApplyResult::Applied
+    );
+    let order = orders.get(1).unwrap();
+    assert!(order.ack_seeded_buy);
+    assert_eq!(order.ack_epoch_buy, 65_000);
+    assert!(!order.bulk_replace_buy);
+    assert_eq!(order.buy_price, 100.0);
+}
+
+#[test]
+fn terminal_tombstone_blocks_stale_snapshot_until_hard_session_changes() {
+    let mut orders = Orders::new();
+    let token_a = 0xAAAA;
+    let token_b = 0xBBBB;
+    orders.apply_at_with_server_token(
+        order_status_cmd(make_status(1, "X", OrderWorkerStatus::SellSet, 10)),
+        900,
+        token_a,
+    );
+    orders.apply_at_with_server_token(
+        order_status_cmd(make_status(1, "X", OrderWorkerStatus::SellDone, 11)),
+        1000,
+        token_a,
+    );
+    assert_eq!(orders.drain_pending_removals_due(1401).len(), 1);
+    assert!(orders.get(1).is_none());
+
+    let (res, _) = orders.apply_at_with_server_token(
+        order_status_cmd(make_status(1, "X", OrderWorkerStatus::SellSet, 12)),
+        1500,
+        token_a,
+    );
+    assert_eq!(res, ApplyResult::OutOfOrder);
+    assert!(orders.get(1).is_none());
+
+    let (res, _) = orders.apply_at_with_server_token(
+        order_status_cmd(make_status(1, "X", OrderWorkerStatus::SellSet, 1)),
+        1600,
+        token_b,
+    );
+    assert_eq!(res, ApplyResult::Applied);
+    assert!(orders.get(1).is_some());
+}
+
+#[test]
+fn fresh_session_full_cancels_old_terminal_cleanup() {
+    let mut orders = Orders::new();
+    orders.apply_at_with_server_token(
+        order_status_cmd(make_status(1, "X", OrderWorkerStatus::SellSet, 10)),
+        900,
+        0xAAAA,
+    );
+    orders.apply_at_with_server_token(
+        order_status_cmd(make_status(1, "X", OrderWorkerStatus::SellDone, 11)),
+        1000,
+        0xAAAA,
+    );
+    orders.apply_at_with_server_token(
+        order_status_cmd(make_status(1, "X", OrderWorkerStatus::BuySet, 1)),
+        1100,
+        0xBBBB,
+    );
+
+    assert!(orders.drain_pending_removals_due(1401).is_empty());
+    assert_eq!(orders.get(1).unwrap().status, OrderWorkerStatus::BuySet);
 }
 
 #[test]
@@ -1554,7 +1760,7 @@ fn stops_update_uses_epoch_guard() {
 }
 
 #[test]
-fn vstop_update_uses_phase_guard() {
+fn vstop_update_is_independent_of_lifecycle_phase() {
     let mut orders = Orders::new();
     orders.apply(order_status_cmd(make_status(
         1,
@@ -1572,8 +1778,8 @@ fn vstop_update_uses_phase_guard() {
     };
 
     let (res, _) = orders.apply(TradeCommand::VStopUpdate(rollback));
-    assert_eq!(res, ApplyResult::PhaseMismatch);
-    assert!(!orders.get(1).unwrap().vstop_on);
+    assert_eq!(res, ApplyResult::Applied);
+    assert!(orders.get(1).unwrap().vstop_on);
 }
 
 #[test]
@@ -1888,6 +2094,7 @@ fn replace_response_quantity_base_zero_preserves_existing_value() {
     let mut orders = Orders::new();
     let mut status = make_status(1, "X", OrderWorkerStatus::BuySet, 10);
     status.buy_order.quantity_base = 12.5;
+    status.buy_order.actual_price = 100.0;
     orders.apply(order_status_cmd(status));
 
     let rr = OrderReplaceResponse {
@@ -1906,7 +2113,7 @@ fn replace_response_quantity_base_zero_preserves_existing_value() {
     assert!(matches!(ev, OrderEvent::Updated(order) if order.uid == 1));
     let quantity_base = orders.get(1).unwrap().buy_order.quantity_base;
     assert_eq!(quantity_base, 12.5);
-    assert_eq!(orders.get(1).unwrap().buy_price, 123.0);
+    assert_eq!(orders.get(1).unwrap().buy_price, 100.0);
 }
 
 #[test]
@@ -1940,7 +2147,7 @@ fn replace_response_buy_stop_uses_sell_side() {
     assert_eq!(order.buy_price, 111.0);
     assert_eq!(sell_actual_price, 456.0);
     assert_eq!(sell_quantity_base, 7.5);
-    assert_eq!(order.sell_price, 456.0);
+    assert_eq!(order.sell_price, 222.0);
 }
 
 #[test]
@@ -2139,7 +2346,7 @@ fn bulk_replace_notify_unknown_order_type_uses_sell_side() {
 
 #[test]
 // parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
-fn order_status_maintains_local_price_fields() {
+fn same_phase_full_does_not_overwrite_local_price_intent() {
     let mut orders = Orders::new();
     let mut status = make_status(1, "X", OrderWorkerStatus::BuySet, 10);
     status.buy_order.actual_price = 10.0;
@@ -2156,8 +2363,8 @@ fn order_status_maintains_local_price_fields() {
     orders.apply(order_status_cmd(repeated));
 
     let order = orders.get(1).unwrap();
-    assert_eq!(order.buy_price, 11.0);
-    assert_eq!(order.sell_price, 21.0);
+    assert_eq!(order.buy_price, 10.0);
+    assert_eq!(order.sell_price, 20.0);
 }
 
 #[test]
@@ -2357,7 +2564,12 @@ fn direct_all_statuses_is_not_hidden_batch_inside_process_command_order() {
     let mut orders = Orders::new();
     let snap = AllStatuses {
         header: make_base(0, 3),
-        orders: vec![make_status(1, "X", OrderWorkerStatus::SellSet, 2)],
+        orders: vec![order_status_cmd(make_status(
+            1,
+            "X",
+            OrderWorkerStatus::SellSet,
+            2,
+        ))],
     };
 
     let (res, ev) = orders.apply(TradeCommand::AllStatuses(snap));
