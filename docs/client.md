@@ -157,12 +157,13 @@ until explicit `disconnect()` or drop. UI code reads typed events, lifecycle
 events, and immutable snapshots:
 
 `Ready` covers the mandatory init spine: authorization, BaseCheck/AuthCheck,
-markets list/server-index map, initial price refresh, and strategy schema.
-Strategy schema is
+markets list/server-index map, initial price refresh, strategy schema, and the
+post-init command flush. Strategy schema is
 requested after AuthCheck and may be received while the market init requests are
 still running; `Ready` is emitted only after the schema is applied. It does not
-wait for retained 5m candles, CoinCard candles, transfer assets, or the first
-stream packet; those arrive as normal domain events and snapshot updates.
+wait for the replies to the queued order/settings/balance/local-strategy resync,
+retained 5m candles, CoinCard candles, transfer assets, or the first stream
+packet; those arrive as normal domain events and snapshot updates.
 
 ```rust
 if let Some(snapshot) = client.snapshot() {
@@ -259,16 +260,18 @@ let client = MoonClient::connect(cfg, ConnectConfig::new(init))?;
 It starts the runtime immediately and reports completion as
 `LifecycleEvent::Ready`; startup errors arrive as `LifecycleEvent::ConnectFailed`.
 
-The MoonBot init contract is mandatory: BaseCheck, AuthCheck, markets list
-(which also builds the initial server-index map), price refresh, balance
-refresh, order snapshot, client strategy
-snapshot, and settings sync. `InitConfig` only adds local strategies, optional
-stream subscriptions, and timing.
+The mandatory Ready barrier is authorization, BaseCheck, AuthCheck, the markets
+list (which also builds the initial server-index map), price refresh, strategy
+schema, and the post-init send flush. Before publishing `Ready`, the runtime also
+queues the order snapshot, client strategy snapshot, settings, MM-orders, and
+balance resync intents. Their replies are normal domain updates and may arrive
+after `Ready`. `InitConfig` adds local strategies, optional stream
+subscriptions, and timing.
 
 The runtime keeps the client loop running while it waits for the connection and
-for each mandatory Engine API response. It applies state in the runtime owner,
-publishes snapshots, and fills `client.server_info()` after `BaseCheck` and
-`client.auth_info()` after a successful `AuthCheck`.
+for each Engine API response on the mandatory spine. It applies state in the
+runtime owner, publishes snapshots, and fills `client.server_info()` after
+`BaseCheck` and `client.auth_info()` after a successful `AuthCheck`.
 
 Init is a one-time step for a `MoonClient` session. After it succeeds, do not
 start a second init just because the UDP transport reconnected; the library
@@ -316,13 +319,15 @@ set this marker automatically:
 `settings().switch_dex`, and
 `settings().switch_spot`.
 
-Domain pushes received before init completion are ignored in every client run
-mode, including internal low-level test pumps. This matches the MoonBot core
-`InitDone` gate for `Order`, `Strat`, `Balance`, `TradesStream`,
-`TradesResendResponse`, `OrderBook`, and `UI` pushes. Engine API responses and
-transport service packets are not part of this domain gate, because Init itself
-depends on Engine API. Once the Engine API init block succeeds, the helper opens
-the domain gate, then sends the post-init refresh set: order snapshot request,
+Before init completion, ordinary mutable domain pushes are ignored. The
+startup-safe exceptions are strategy schema, strategy snapshot requests/runtime
+state, core runtime/license state, and news/history payloads. A pre-init strategy
+snapshot request is latched and answered after schema/state initialization;
+startup-safe state/news payloads are applied immediately and can precede
+`Ready`. Engine API responses and transport service packets are outside this
+gate because Init itself depends on Engine API. Once the mandatory Engine API
+block succeeds, the helper opens the general domain gate, then sends the
+post-init refresh set: order snapshot request,
 full client strategy snapshot from the runtime-owned local strategy list,
 settings request, MM-orders subscription state, and balance refresh request.
 When the server later asks for the client's current strategy list, the runtime

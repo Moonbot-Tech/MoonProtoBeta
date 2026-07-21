@@ -297,7 +297,7 @@ fn release_process_sync() {
 /// failed (mobile memory pressure / thread limits) it returns `Arc<AtomicBool::new(true)>`
 /// immediately (meaning "already off", nothing to stop).
 ///
-/// audit_responsibility A6: the ability to stop the thread is needed for:
+/// The shutdown handle is needed for:
 /// - mobile suspend (iOS Background App Refresh — battery saving)
 /// - graceful Client shutdown (via Drop)
 /// - reconnecting to a different server (a new Client is created → the old NTP is no longer needed)

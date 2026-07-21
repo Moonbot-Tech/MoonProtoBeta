@@ -80,7 +80,7 @@ impl Client {
             }
         }
         // All 200 bind attempts failed → we cannot create a socket ON THIS TICK.
-        // Do NOT set need_connect=false (audit_responsibility H3): on mobile, port
+        // Do NOT set need_connect=false: on mobile, port
         // exhaustion (CGNAT, iOS background, ulimit) plus Disconnected would force the app
         // to recreate the Client. Delphi (`MoonProtoUDPClient.pas:680+`) retries forever —
         // the active library must too.

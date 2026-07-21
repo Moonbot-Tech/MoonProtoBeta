@@ -23,9 +23,8 @@ pub(super) struct OrderBookCache {
     /// and terminals did not show the degraded diff view.
     pub(super) last_applied_seq: u16,
     /// List of accumulated out-of-order packets, sorted by seq.
-    /// audit_rust_quality #5 + audit_robustness M5: `VecDeque` so that `pop_front()` in `drain_cache`
-    /// is O(1) instead of O(N) on `Vec::remove(0)`. On a burst recovery of 64 packets this saves
-    /// ~2080 memmove ops (64+63+62+…+1).
+    /// `VecDeque` keeps `pop_front()` in `drain_cache` O(1) instead of the
+    /// O(N) `Vec::remove(0)` shift on every packet in a recovery burst.
     pub(super) packets: VecDeque<CachedPacket>,
     /// Whether the cache is marked as corrupted (a Full is needed).
     pub(super) corrupted: bool,

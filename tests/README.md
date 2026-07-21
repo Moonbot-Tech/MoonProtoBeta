@@ -16,7 +16,7 @@ application examples: some are intentionally low-level protocol guards.
 
 Tests under `src/client/tests/` protect protocol mechanics: handshake,
 reconnect, PMTU, send queues, pending Engine API routing, subscriptions, and
-Delphi-compatible timing. They may instantiate internal `Client` or
+wire-compatible timing/retry semantics. They may instantiate internal `Client` or
 `EventDispatcher` directly because their job is to lock down machine-effect
 parity, not to demonstrate the public API.
 

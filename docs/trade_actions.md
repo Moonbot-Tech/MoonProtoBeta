@@ -4,6 +4,11 @@
 order snapshots and sends user actions back to the runtime by passing the
 visible `&Order`:
 
+OrdersProto packet structs are not trading API. Do not import similarly named
+types from the diagnostic-only `moonproto::commands` module; retired packet
+commands are removed when the wire protocol changes while these typed handles
+remain the application boundary.
+
 ```rust
 use moonproto::{StopSettings, VStopParams};
 

@@ -7,7 +7,7 @@ use super::*;
 // Internal one-time init spine:
 //
 // `BaseCheck -> AuthCheck -> GetMarketsList -> UpdateMarketsList
-//  -> Delphi post-init resync -> optional subscriptions`.
+//  -> strategy schema -> post-init resync -> optional subscriptions`.
 //
 // This mirrors Delphi `TCryptoPumpTool.InitInt`, but it is not a public
 // application runtime model. `MoonClient::connect` owns this sequence inside its
@@ -88,7 +88,7 @@ pub(crate) fn connect_and_init(
 ///
 /// Internal one-time domain initialization sequence after transport
 /// authorization. A successful run opens the
-/// dispatcher domain gate and sends the Delphi post-init refresh set:
+/// dispatcher domain gate and sends the post-init refresh set:
 /// strategy schema request, order snapshot, client strategy snapshot, settings
 /// request, MM-orders subscription flag, balance refresh, and optional stream
 /// subscriptions.
@@ -193,8 +193,9 @@ pub(crate) fn run_init_sequence(
     // live authorized transport. Start it after the first successful BaseCheck
     // (or the fallback successful auth path) and let the normal Engine API waits
     // pump its Sliced response in parallel with AuthCheck and the critical
-    // market init steps. Only TStratSchemaRequest/TStratSchema are allowed
-    // through the pre-domain gate.
+    // market init steps. Strategy schema, snapshot request/runtime state,
+    // core runtime/license state, and news/history are the startup-safe
+    // exceptions to the general pre-domain gate.
     // A pre-init TStratSnapshotRequest is only latched by EventDispatcher; the
     // actual TStratSnapshot reply is sent by post-init resync after schema/state
     // are ready. The rest of MPC_Strat remains gated until domain_ready.

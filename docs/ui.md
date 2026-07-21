@@ -3,7 +3,8 @@
 The UI channel carries bot settings and UI-originated control commands:
 settings snapshots, strategy start/stop, market-maker subscription, version
 update control, leverage management, trigger management, DEX/spot switching, and
-arb activation notifications.
+arb activation notifications. It also carries retained runtime, license, and
+profit-counter state.
 
 Applications normally receive UI updates through `Event::Settings` and send
 user intents through `MoonClient` settings/update/switch helpers.
@@ -45,6 +46,12 @@ for event in client.drain_events() {
                     redraw_license_panel(license.paid_version, license.moon_credits);
                 }
             }
+            SettingsEvent::ProfitStateUpdated => {
+                let Some(state) = client.snapshot() else { continue; };
+                if let Some(profit) = state.settings().profit_state {
+                    redraw_profit_counters(profit);
+                }
+            }
             _ => {}
         }
     }
@@ -52,11 +59,11 @@ for event in client.drain_events() {
 ```
 
 `SettingsState` stores the latest settings snapshot and small derived fields:
-leverage management, runtime state, kernel license/MoonCredits state, and arb
-validity time. Client-originated UI commands such as MM-orders subscription,
-emulator ticks, trigger management, reset-profit, restart-now, and DEX/spot
-switching are sent through high-level handles; they are not inbound settings
-state.
+leverage management, runtime state, kernel license/MoonCredits state, profit
+counters, and arb validity time. Client-originated UI commands such as MM-orders
+subscription, emulator ticks, trigger management, reset-profit, restart-now, and
+DEX/spot switching are sent through high-level handles; they are not inbound
+settings state.
 
 ## Requesting Current Settings
 
@@ -222,6 +229,37 @@ from the wire timestamp at parse time. A missing/invalid timestamp reads as
 `None`; application code should compare valid timestamps with `MoonTime::now()`
 when it needs an active/expired indicator.
 
+### Profit State
+
+The server sends the current report-profit counters after connect and whenever
+its calculated values change. Read them from `snapshot().settings().profit_state`
+after `SettingsEvent::ProfitStateUpdated`:
+
+```rust
+if let Some(profit) = client
+    .snapshot()
+    .and_then(|state| state.settings().profit_state)
+{
+    show_time_window_profit(profit.rep_total_profit, profit.rep_total_trades);
+    show_last_trades_profit(profit.rep_trades_total, profit.rep_count_trades);
+}
+```
+
+`rep_total_profit` / `rep_total_trades` are the core's configured time-window
+profit and row count. `rep_trades_total` / `rep_count_trades` are the configured
+last-trades window. These are report-database counters, not account balance and
+not a live per-order PnL stream.
+
+Reset either counter through the typed intent and wait for the next
+`ProfitStateUpdated` event instead of changing the retained value locally:
+
+```rust
+use moonproto::ResetProfitKind;
+
+client.settings().reset_profit(ResetProfitKind::CurrentProfit)?;
+client.settings().reset_profit(ResetProfitKind::AllProfit)?;
+```
+
 ### Leverage Management
 
 Leverage management is a separate settings snapshot, just like in MoonBot. A
@@ -375,7 +413,7 @@ Common settings controls:
 |---|---|---|
 | Main take-profit target | numeric percent input/slider | `set_main_take_profit_percent(...)`, `set_scalp_take_profit_percent(...)`, `effective_take_profit_percent()` |
 | Fixed-sell mode | segmented control or toggle | `fixed_sell_mode`, fixed-sell read/set helpers; helpers keep `fixed_sell_price` synchronized like MoonBot `UpdateFixedButtons` |
-| Stop-loss / trailing / global take-profit | numeric percent inputs + enable checkbox | `price_drop_level`, `trailing_drop`, `use_g_take_profit`, `g_take_profit` |
+| Stop-loss / trailing / global take-profit | numeric percent inputs + enable checkbox | `price_drop_level`, `trailing_drop`, `trailing_stop`, `use_g_take_profit`, `g_take_profit` |
 | Panic-on-price-drop protection | checkbox | `panic_if_price_drop` |
 | Emulator mode | checkbox/toggle | `emu_mode` |
 | Buy/sell iceberg flags | two checkboxes | `buy_iceberg`, `sell_iceberg` |

@@ -45,9 +45,10 @@ if let Some(derived) = state.market_history_derived_snapshot_now_for(&market) {
 }
 ```
 
-Snapshot history reads are non-blocking. They return `None` until the retained
-history worker has published the market's read handle; the UI should try again
-on the next event/tick instead of waiting.
+Snapshot history reads are synchronous in-memory reads and never wait for the
+network or history worker. They can briefly take the selected retained ring's
+read lock and return `None` until the worker has published that market's handle;
+the UI should try again on the next event/tick instead of waiting.
 
 If the subscription scope is limited, candles are retained only for that scope.
 If trades storage is disabled, chunked candles are not kept in market history.

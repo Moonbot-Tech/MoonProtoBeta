@@ -282,8 +282,9 @@ sections newer than the section already retained. A delayed patch can therefore
 fill a missing section but cannot roll a newer stop, execution, or lifecycle
 section back.
 
-After each newly authorized hard session, Active Lib requests a full canonical
-order snapshot. Later snapshot/catalog pages provide membership reconciliation.
+After Init and after every successful re-authorization/rebind, Active Lib
+requests a full canonical order snapshot. Later snapshot/catalog pages provide
+membership reconciliation.
 A row whose revision/hash is incomplete is repaired with an addressed status
 request; an explicit not-found response removes it. This repair is owned by the
 runtime and requires no application polling. `PeerAppToken`, rather than a

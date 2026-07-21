@@ -56,6 +56,13 @@ Application code usually works with:
 
 Internally, the crate contains the transport modes V0/V1/V2, handshake / authorization / reconnect / liveness handling, reliable sliced datagrams with ACK/retry over UDP, typed binary command parsers and builders, the retained read-model state, and the owned runtime session API.
 
+The diagnostic-only `moonproto::commands` module is the byte-level protocol
+implementation, not a second application API. Its packet structs follow the
+current wire revision and may be replaced when that revision changes. Trading
+applications use `MoonClient::trade()` / `MoonClient::orders()` and the
+documented root-exported parameter and state types; they do not construct
+command packets.
+
 ### Transport modes
 
 MoonProto has built-in transport modes **V0**, **V1**, and **V2**. The selected client mode must match the server-side connection setting; unsupported mode values normalize to `V0`.
@@ -215,8 +222,8 @@ $env:MOONPROTO_FIRETEST_PROFILE = "quick"
 cargo test --release --features diagnostics --test fire_test -- --ignored --nocapture
 ```
 
-- **Quick profile** (< 30 s, one client) — connect / AuthDone / InitDone, base/auth checks, markets & server-index map, strategy schema apply, trades & orderbook subscriptions, retained trades/price/history, MarkPrice + funding/balance/order UI state, `ParseFailed == 0`, and a PMTU + CPU summary (`>5 ms` in protocol/apply sections is a hard red flag).
-- **Full profile** (destructive/stress, `allow_mutation = true`) — two live clients, `err_emu` packet loss (10% → 50%), chunked candles under loss, settings/strategy broadcast, an emulator order lifecycle, and a real SOLUSDT safety gate: place a $1000 long limit 5% below market, cancel it through the tracked ActiveLib order path, and verify that balance changes arrive without a manual balance request. It also exercises simple operations at 50% loss, forced reconnect and post-reconnect delivery, plus sliced/retry/parse/PMTU/CPU diagnostics; `>5 ms` in protocol/apply sections is a hard red flag.
+- **Quick profile** (< 30 s, one client) — connect / AuthDone / InitDone, base/auth checks, markets & server-index map, strategy schema, core CPU/memory/core-count telemetry, startup news/tags, trades & orderbook subscriptions, retained trades/price/history, MarkPrice + funding/balance/order UI state, `ParseFailed == 0`, and PMTU/CPU gates (`>5 ms` in protocol/apply sections is a hard red flag).
+- **Full profile** (destructive/stress, `allow_mutation = true`) — two live clients, `err_emu` packet loss (10% → 50%), chunked candles under loss, settings/strategy broadcast and restore, report-schema/database migration plus offline catch-up, an emulator order lifecycle, and a real SOLUSDT safety gate: place a $1000 long limit 5% below market, cancel it through the tracked Active Lib order path, and verify that balance changes arrive without a manual balance request. It also exercises simple operations at 50% loss, forced reconnect and post-reconnect delivery, plus sliced/retry/parse/PMTU/CPU diagnostics; `>5 ms` in protocol/apply sections is a hard red flag.
 
 Set `MOONPROTO_FIRETEST_ERR_EMU=0` to disable the client-side packet-loss emulation (default 10%). FireTest writes strategy diagnostics under `target/` (`firetest_strategy_info_<profile>.txt`, `firetest_strategy_raw/`). See [`tests/README.md`](tests/README.md) for the full test-layer map and [`tests/fire_test.rs`](tests/fire_test.rs) for scenario-specific overrides.
 

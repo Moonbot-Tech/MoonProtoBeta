@@ -85,11 +85,12 @@ if let Some(auth) = session.client.auth_info() {
 ```
 
 The same values are reachable from a held snapshot via
-`session.client.snapshot()?.server_info()` and `.auth_info()`. Before the first
-`BaseCheck`, `server_info()` returns the all-empty default, and `auth_info()` is
-`None` until authentication completes; both are always safe to read. Extended
-exchange-specific UI should be enabled only after the corresponding server
-metadata is known (for example, gate it on `info.has_identity()`).
+`session.client.snapshot()?.server_info()` and `.auth_info()`. `server_info()`
+is `None` only before the runtime publishes its first snapshot; after that it is
+the all-empty default until `BaseCheck` fills it. `auth_info()` remains `None`
+until `AuthCheck` succeeds. Extended exchange-specific UI should be enabled only
+after the corresponding metadata is known (for example, gate it on
+`info.has_identity()`).
 
 Use `ExchangeCode::stable_id()` when application code needs a compact stable
 identity key for grouping sessions by exchange/platform, for example to pick

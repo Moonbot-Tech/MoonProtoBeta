@@ -62,13 +62,14 @@ pub(super) fn poll_engine_init_step(
 }
 
 /// Run the full init sequence: BaseCheck → AuthCheck → GetMarketsList →
-/// UpdateMarketsList →
-/// Delphi post-init resync → optional subscriptions.
+/// UpdateMarketsList → strategy schema → post-init resync → optional
+/// subscriptions.
 ///
 /// Until this function completes successfully,
-/// `EventDispatcher::dispatch_into_active` drops domain pushes
-/// (`Order`/`Strat`/`Balance`/`Trades*`/`OrderBook`/`UI`), matching Delphi
-/// `ClientNewData` under `not InitDone`. After a successful bootstrap, the
+/// `EventDispatcher::dispatch_into_active` drops ordinary mutable domain pushes.
+/// Startup-safe strategy schema/request/runtime state, core runtime/license
+/// state, and news/history payloads are accepted earlier. After a successful
+/// bootstrap, the
 /// library sends `TOrderStatusRequest(OrderID=0, ExactRev=0)`, `TSettingsRequest`,
 /// `TStratSnapshot.CreateFromStrats(...)`, `TMMOrdersSubscribeCommand`, and
 /// `TRequestBalanceRefresh`. The dispatcher also answers later server
@@ -82,9 +83,11 @@ pub(super) fn poll_engine_init_step(
 /// loop while it waits for each Engine API response. If a UI command marked
 /// `ServerUpdateSent`, the Init spine also mirrors Delphi `BaseCheck`:
 /// wait up to 34 * 300 ms for `AuthDone`, clear the marker, send BaseCheck once,
-/// and if it still fails retry it 10 times with 2000 ms pauses. All init steps
-/// above are mandatory: a timeout/error means Init failed and `domain_ready`
-/// stays closed.
+/// and if it still fails retry it 10 times with 2000 ms pauses. The mandatory
+/// request waits are BaseCheck, AuthCheck, market list/prices, and strategy
+/// schema; post-init resync commands must be queued/flushed, but their replies
+/// are not part of the Ready barrier. A mandatory timeout/error means Init failed
+/// and `domain_ready` stays closed.
 ///
 /// [`ServerInfo`]: crate::commands::engine_api::ServerInfo
 #[derive(Debug, Clone)]

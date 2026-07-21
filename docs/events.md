@@ -209,8 +209,11 @@ Low-level diagnostic builds may also receive hidden raw/parse-failure/raw Engine
 API response events. They are for FireTest/protocol dumps only; they are not a
 recovery mechanism or normal application control flow.
 
-`TradesEvent::Applied` is a signal that retained trade/history state has been
-updated. Read actual rows from `MarketHistoryReaders`.
+`TradesEvent::Applied` means the packet was accepted, live market tails were
+updated, and retained-history work was queued. It is not a history-worker
+barrier: an immediate reader call can still observe zero new rows until the
+worker publishes the batch. Read actual rows from `MarketHistoryReaders` on the
+event or the next normal UI update.
 
 `CandlesSnapshotEvent::Ready` is emitted after the initial full 5m candles
 snapshot has been processed by the history worker. At that point
@@ -257,10 +260,13 @@ rows, and `MoonTime` helpers.
 
 ## Domain Gate
 
-Before Init opens the domain gate, trading-domain packets are dropped rather
-than delivered to UI code. After Init, trades packets additionally require an
-explicit trades subscription intent. This keeps pre-init or unexpected stream
-data from creating partial UI state.
+Before Init opens the general domain gate, ordinary mutable trading packets are
+dropped rather than delivered to UI code. Startup-safe strategy schema/request
+and runtime state, core runtime/license state, and news/history payloads are
+accepted earlier; a pre-init strategy snapshot request is answered only after
+strategy state is ready. After Init, trades packets additionally require an
+explicit trades subscription intent. This keeps unexpected stream data from
+creating partial UI state without delaying safe startup metadata.
 
 When the server token changes after reconnect, MoonProto resets per-token
 trades/orderbook sync state before applying new indexed stream packets.

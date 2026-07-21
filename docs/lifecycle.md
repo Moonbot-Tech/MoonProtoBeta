@@ -14,7 +14,7 @@ pub enum LifecycleEvent {
     Connected { fresh: bool },
     Ready,
     InitStepCompleted { step: &'static str, elapsed_ms: u64 },
-    ConnectFailed { error: String },
+    ConnectFailed { error: ConnectError },
     Disconnected,
     Reconnecting,
     BindFailed { consecutive_failures: u32 },
@@ -86,11 +86,13 @@ but normal domain dispatch is isolated at payload scope.
 
 `Ready` is not a "all background data is fully loaded" barrier. It waits for
 the mandatory init spine: authorization, BaseCheck/AuthCheck, markets list with
-the initial server-index map, price refresh, and strategy schema. The schema
-request can overlap the market/price requests, but `Ready` is still emitted
-only after the schema is applied. Retained 5m candles, CoinCard candles,
-transfer assets, stream
-packets, and later refreshes report their own domain events after `Ready`.
+the initial server-index map, price refresh, strategy schema, and the post-init
+send flush. The schema request can overlap the market/price requests, but
+`Ready` is still emitted only after the schema is applied. Replies to the queued
+order/settings/balance/local-strategy resync, retained 5m candles, CoinCard
+candles, transfer assets, stream packets, and later refreshes report their own
+domain events and may arrive after `Ready`. Startup-safe news and runtime/license
+state may instead arrive before `Ready`.
 
 ## Callback Cost
 

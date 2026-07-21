@@ -4,7 +4,7 @@
 //! values from retained Active Lib state. The parser/builder functions in this
 //! module are byte-exact protocol tools kept inside the crate for diagnostics
 //! and tests, not terminal-facing data models.
-use super::registry::read_string;
+use super::registry::{read_string, CURRENT_PROTO_CMD_VER};
 use crate::commands::market::PositionType;
 use crate::commands::trade::OrderType;
 
@@ -81,7 +81,6 @@ pub(crate) struct BalanceUpdate {
 #[doc(hidden)]
 pub(crate) fn build_request_balance_refresh(uid: u64) -> Vec<u8> {
     const CMD_REQUEST_BALANCE_REFRESH: u8 = 5;
-    const CURRENT_PROTO_CMD_VER: u16 = 3;
     let mut out = Vec::with_capacity(11);
     out.push(CMD_REQUEST_BALANCE_REFRESH);
     out.extend_from_slice(&CURRENT_PROTO_CMD_VER.to_le_bytes());
@@ -297,6 +296,22 @@ mod tests {
         out.extend_from_slice(&hash.to_le_bytes());
         out.extend_from_slice(&0u32.to_le_bytes());
         out
+    }
+
+    #[test]
+    // parity: MoonBot MoonProtoBaseStruct.pas:TBaseCommand.Create/StoreToStream
+    fn balance_refresh_uses_current_command_version() {
+        let payload = build_request_balance_refresh(0x0102_0304_0506_0708);
+
+        assert_eq!(payload[0], 5);
+        assert_eq!(
+            u16::from_le_bytes([payload[1], payload[2]]),
+            CURRENT_PROTO_CMD_VER
+        );
+        assert_eq!(
+            u64::from_le_bytes(payload[3..11].try_into().unwrap()),
+            0x0102_0304_0506_0708
+        );
     }
 
     #[test]

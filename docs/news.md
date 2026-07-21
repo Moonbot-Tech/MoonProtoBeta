@@ -1,9 +1,11 @@
 # News And Tags
 
-MoonProto receives the same news feed that is available to the connected
-MoonBot core. No subscription call is required. On a fresh connection the core
-sends its retained news ring and latest tags catalog; later news and tag changes
-arrive as live events.
+MoonProto receives the news feed available to the connected MoonBot core. No
+subscription call is required. On a fresh connection, a running core news
+client sends its retained news ring and latest tags catalog when either contains
+data; later news and tag changes arrive as live events. A core with no active
+news client or no retained news/tags sends no startup history, so applications
+must not wait for `HistoryApplied` before becoming ready.
 
 The library removes the protocol framing and GZip layer on receive. Application
 code works with UTF-8 JSON strings, not compressed packets.
@@ -106,8 +108,10 @@ Build the terminal's logical news list by ID, not by frame position:
 4. If the retained row already has `meta.isOriginal = false`, ignore a later
    frame with the same ID. This preserves the already accepted copy instead of
    replacing it with a late original.
-5. Recompute displayed text, coins, tags, vote counters, and timestamps when a
-   row is updated; do not append a second UI row.
+5. Replace only the row's translated texts, combined ticker list, and tags; then
+   refresh its displayed body and chart-marker text. Keep the identity,
+   publication/receive/send times, source, author, vote metadata, and other
+   fields from the first accepted frame. Do not append a second UI row.
 
 `NewsEvent::Received` means "one frame arrived", not "one new logical news item
 was created". Likewise, `HistoryApplied.news_count` is a frame count and may be

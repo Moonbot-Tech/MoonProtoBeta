@@ -1,13 +1,15 @@
-//! Protocol data-model types for MoonProto command channels.
+//! Byte-level MoonProto command implementation.
 //!
-//! Regular applications should use `MoonClient` intents, typed events, and
-//! read-only snapshots. This module re-exports the data-model records, enums,
-//! and command structs that appear in public signatures, snapshots, and events;
-//! the byte-level builders and parsers themselves are crate-internal.
+//! This module is not the application API. Regular applications use
+//! `MoonClient` handles, typed events, snapshots, and the reviewed data types
+//! re-exported from the crate root. Wire command structs may be replaced or
+//! removed when the protocol revision changes without removing the equivalent
+//! high-level user intent.
 //!
-//! These types preserve the production MoonProto wire contract: base command
-//! header, command id, version, UID, per-command priority/retry semantics, and
-//! exact field order. See `docs/` for public Active Lib/API guides.
+//! The module becomes externally visible only with the `diagnostics` feature so
+//! protocol tests can inspect exact bytes. Builders, parsers, command ids,
+//! versions, retry metadata, and field order remain protocol implementation
+//! details even in that build.
 
 #![cfg_attr(feature = "diagnostics", allow(unreachable_pub))]
 

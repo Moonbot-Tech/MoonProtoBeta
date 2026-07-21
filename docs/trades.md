@@ -93,10 +93,12 @@ for event in client.drain_events() {
 
 `TradesEvent::Applied` is a signal, not a payload carrier. By the time it is
 emitted, Active Lib has already updated live market tails and queued retained
-history writes. A UI normally resolves the selected `MarketHandle` once, keeps
-the `MarketHistoryReaders` once they become available, and advances its own
-`SeqRingCursor` on each signal. Re-searching by string or rebuilding readers on
-every paint/event tick is unnecessary.
+history writes. It is not a retained-history barrier: the worker may publish the
+new rows just after the event, so an immediate bounded read can legitimately
+return zero rows. A UI normally resolves the selected `MarketHandle` once,
+keeps the `MarketHistoryReaders` once they become available, and advances its
+own `SeqRingCursor` on the event or next normal update. Re-searching by string or
+rebuilding readers on every paint/event tick is unnecessary.
 
 Gap, duplicate, out-of-order, resend, and bucket-close notifications are hidden
 diagnostic telemetry. Applications do not drive recovery from them;

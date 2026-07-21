@@ -17,7 +17,7 @@ moonproto
   Snapshot state      read-only orders/books/trades/balances/markets view
   Protocol core       UDP, handshake, retry, slicing, pending Engine API
   Runtime state       mutable Active Lib owner inside the runtime
-  Init spine          BaseCheck/AuthCheck/markets/prices/balances/post-init sync
+  Init spine          BaseCheck/AuthCheck/markets/prices/schema/post-init flush
   command handles     typed user intents: streams/orders/settings/candles/etc.
   state snapshots     orders, orderbooks, trades, balances, strategies, markets
         |
@@ -26,6 +26,16 @@ MoonBot server
 ```
 
 Use one `MoonClient` per server connection in regular applications.
+
+## Public API Boundary
+
+Application code starts from `MoonClient`, its typed handles, events, snapshots,
+and documented non-diagnostic types exported from the `moonproto` crate root. The
+`moonproto::commands` module is exposed only by the `diagnostics` feature for
+byte-level protocol tests. Public visibility in that diagnostic build does not
+make its packet structs a supported terminal API; they can disappear together
+with a retired wire command. In particular, trading code uses
+`client.trade()` and `client.orders()`, not similarly named command structs.
 
 `MoonClient` already owns the background protocol/runtime thread. A terminal
 does not need an extra feed thread that periodically polls `drain_events()` and
@@ -64,9 +74,10 @@ for lifecycle in client.drain_lifecycle_events() {
     }
 }
 
-// Domain state is opened only after init succeeds. Initial server pushes that
-// arrive earlier are dropped; the helper then requests fresh orders, settings,
-// balance, and strategy state.
+// Ordinary mutable domain state opens only after init succeeds. Startup-safe
+// runtime/license/news/schema payloads may arrive earlier. The helper also
+// requests fresh orders, settings, balance, and strategy state before Ready;
+// those replies may arrive later.
 // All-trades is optional in the Rust public API; subscribe explicitly if the
 // application expects trades-stream events.
 // Init is one-time for this Client session; reconnect restore is automatic.
@@ -88,7 +99,8 @@ for event in client.drain_events() {
 
 - Reconnects and re-handshakes.
 - Fetches markets, builds the initial server-index map from the market list,
-  then fetches prices and balances during the mandatory one-time init.
+  fetches prices and strategy schema, then queues order/settings/balance/local-
+  strategy resync before the one-time `Ready` event.
 - After init, refreshes stale market indexes only after a changed
   `PeerAppToken`, refreshes prices, and replays registry subscriptions after
   reconnect without requiring a second Init.

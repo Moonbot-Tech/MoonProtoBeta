@@ -133,6 +133,9 @@
 mod api_pending;
 mod app_queue;
 pub mod client;
+// `commands` is public only so diagnostics/integration tests can inspect exact
+// wire packets. That visibility is not an application-API or compatibility
+// promise; supported user types are the reviewed crate-root re-exports below.
 #[cfg(feature = "diagnostics")]
 #[doc(hidden)]
 pub mod commands;

@@ -57,9 +57,8 @@ impl RefreshClocks {
 /// Groups the pending-Engine-API request registry (`api_pending`) and the
 /// internal chunked full-candles snapshot collectors keyed by `request_uid`
 /// (`pending_candles`). Both are about responses still in flight; neither is a
-/// refresh clock, so they live in their own struct (deviation from the
-/// suggested grouping — see DELIVERABLE). Field names, types, and meaning are
-/// unchanged from when they lived directly on `Client`.
+/// refresh clock, so they live in their own struct. Field names, types, and
+/// meaning are unchanged from when they lived directly on `Client`.
 ///
 /// `api_pending` is an `Arc<ApiPending>` cloned into the runtime loop via
 /// `Arc::clone`; `pending_candles` is owned outright.

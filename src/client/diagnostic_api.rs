@@ -65,7 +65,7 @@ impl Client {
     }
 
     // ====================================================================
-    //  Diagnostic getters (audit_responsibility A4)
+    //  Diagnostic getters for terminal status UI
     //
     //  In Delphi `TMoonProtoNetClient` these fields are public and read by the UI
     //  (MoonProtoUnit.pas:363 — "Ping: %d PMTU: %d RS: %d%%"). The Rust analog

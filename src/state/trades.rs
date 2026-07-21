@@ -8,8 +8,9 @@
 //!
 //! The server sends `MPC_TradesStream` packets with wrapping `packet_num: u16`.
 //! The active client owns the sequence-gap bookkeeping, sends `TradesResend`
-//! requests, applies resend payloads, and writes retained history before it
-//! publishes the lightweight `TradesEvent::Applied` signal. Applications do not
+//! requests, applies resend payloads, and queues retained-history work before it
+//! publishes the lightweight `TradesEvent::Applied` signal. The event is not a
+//! history-worker completion barrier. Applications do not
 //! feed packets or drive recovery manually; they subscribe through `MoonClient`
 //! and read retained rows from `MarketHistoryReaders`.
 
