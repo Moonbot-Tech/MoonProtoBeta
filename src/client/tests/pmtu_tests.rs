@@ -293,7 +293,10 @@ fn ping_ack_does_not_drop_pending_h_until_writer_copy_apply() {
 fn ping_ack_reader_core_is_not_reapplied_by_main_ping_branch() {
     let mut client = Client::new(dummy_cfg());
     let payload = ping_payload_with_ack(40, &[1 << 2]);
-    client.send_lock.lock().apply_ping_ack_bitmap(&payload);
+    client
+        .send_lock
+        .lock()
+        .apply_ping_ack_bitmap(&payload, control::PING_SIZE);
     ProtocolCore {
         client: &mut client,
     }
@@ -328,7 +331,7 @@ fn ping_ack_reader_core_is_not_reapplied_by_main_ping_branch() {
 // parity: MoonBot MoonProtoIntStruct.pas:TMoonProtoClient.DeleteSendingByKey
 fn sliced_u_key_cleanup_does_not_drop_pending_h() {
     let mut client = Client::new(dummy_cfg());
-    let key = UniqueKey::order_move(42);
+    let key = UniqueKey::order_command(crate::commands::registry::UK_ORDER_CMD_BUY, 42);
 
     let mut old_sliced = sent_sliced_with_lengths(&[8], 0);
     old_sliced.u_key = key;
@@ -400,7 +403,7 @@ fn sliced_u_key_cleanup_does_not_drop_pending_h() {
 // parity: MoonBot MoonProtoIntStruct.pas:TMoonProtoClient.ApplyRegularHLAck
 fn high_u_key_cleanup_runs_after_regular_ack() {
     let mut client = Client::new(dummy_cfg());
-    let key = UniqueKey::order_move(42);
+    let key = UniqueKey::order_command(crate::commands::registry::UK_ORDER_CMD_BUY, 42);
 
     let mut acked_same_key = pending_h_item(42);
     acked_same_key.u_key = key;
@@ -1062,7 +1065,7 @@ fn writer_tick_copies_ack_queues_then_check_sening_data() {
     client
         .send_lock
         .lock()
-        .apply_ping_ack_bitmap(&ping_payload_with_ack(40, &[1 << 2]));
+        .apply_ping_ack_bitmap(&ping_payload_with_ack(40, &[1 << 2]), control::PING_SIZE);
 
     let mut ack = [0u8; slicing::ACK256_WIRE_SIZE];
     ack[0] = 0b0000_0001;
@@ -1119,7 +1122,7 @@ fn send_lock_snapshot_copies_send_acks_and_tmp_slider_atomically() {
         let mut send_lock = client.send_lock.lock();
         send_lock.push_send_cmd_int(send_item);
         send_lock.push_sliced_ack(Client::parse_sliced_ack_payload(&ack).unwrap());
-        send_lock.apply_ping_ack_bitmap(&ping_payload_with_ack(40, &[1 << 2]));
+        send_lock.apply_ping_ack_bitmap(&ping_payload_with_ack(40, &[1 << 2]), control::PING_SIZE);
     }
 
     let mut sliced = Vec::new();

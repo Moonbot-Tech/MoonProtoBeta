@@ -533,13 +533,12 @@ impl ReportReplicationState {
             .is_some_and(|active| active.awaiting_apply.is_some())
     }
 
-    pub(crate) fn retry_active_page(&mut self, request_uid: u64) -> Option<ReportSyncRequest> {
+    pub(crate) fn retry_active_page(&mut self) -> Option<(u64, ReportSyncRequest)> {
         let active = self.active.as_mut()?;
         if active.awaiting_apply.is_some() {
             return None;
         }
-        active.current_request_uid = request_uid;
-        Some(active.current_request)
+        Some((active.current_request_uid, active.current_request))
     }
 
     pub(crate) fn defer_open_rows_check_until_schema(&mut self, rec_ids: Arc<[i64]>) {
@@ -1130,6 +1129,35 @@ mod tests {
             &mut controls,
         ));
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn retry_keeps_request_uid_so_a_delayed_page_remains_valid() {
+        let mut state = ready_state();
+        let ticket = ReportSyncTicket { sync_id: 52 };
+        let request = ReportSyncRequest::resume(5);
+        let mut out = Vec::new();
+        let mut controls = Vec::new();
+        let request_uid = state.begin_sync(ticket, request, &mut out);
+        out.clear();
+
+        let (retry_uid, retry_request) = state.retry_active_page().unwrap();
+        assert_eq!(retry_uid, request_uid);
+        assert_eq!(retry_request, request);
+
+        assert!(state.apply_sync_page(
+            WireSyncPage {
+                header: header(39),
+                request_uid,
+                last_rec_id: 7,
+                max_rec_id: 7,
+                row_count: 1,
+                blob: synlz_compress(&row(7, 1)),
+            },
+            &mut out,
+            &mut controls,
+        ));
+        assert!(matches!(out.as_slice(), [ReportEvent::SyncPage(_)]));
     }
 
     #[test]

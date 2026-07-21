@@ -12,7 +12,7 @@ use crate::state::{MarketHandle, OrderBookKind, OrderBookReadGuard, TopOfBook};
 /// does not deep-clone large maps while a UI view is alive.
 #[derive(Debug, Clone)]
 pub struct MoonStateSnapshot {
-    orders: CowState<Orders>,
+    orders: Orders,
     report_schema: Option<std::sync::Arc<crate::state::ReportSchema>>,
     order_books: CowState<OrderBooks>,
     account: CowState<AccountState>,
@@ -24,6 +24,8 @@ pub struct MoonStateSnapshot {
     markets: CowState<MarketsState>,
     chart_alerts: CowState<ChartAlertsState>,
     chart_text: CowState<ChartTextState>,
+    kernel_health: crate::state::KernelHealth,
+    news: CowState<crate::state::NewsState>,
     market_history: Option<MarketHistoryHandle>,
     local_strategy_epoch: u64,
     server_info: std::sync::Arc<ServerInfo>,
@@ -219,6 +221,16 @@ impl MoonStateSnapshot {
         &self.chart_text
     }
 
+    /// Latest CPU and memory telemetry reported by the connected MoonBot core.
+    pub fn kernel_health(&self) -> crate::state::KernelHealth {
+        self.kernel_health
+    }
+
+    /// Retained news JSON and the latest tags catalog from the MoonBot core.
+    pub fn news(&self) -> &crate::state::NewsState {
+        &self.news
+    }
+
     /// Retained history readers for one market, if trades storage is active.
     pub fn market_history_readers(&self, market_name: &str) -> Option<MarketHistoryReaders> {
         self.market_history.as_ref()?.try_readers(market_name)
@@ -332,7 +344,7 @@ impl EventDispatcher {
     /// hooks and the one-shot queued-event buffer from the live dispatcher.
     pub(crate) fn snapshot(&self) -> MoonStateSnapshot {
         MoonStateSnapshot {
-            orders: self.orders.clone(),
+            orders: self.orders.snapshot(),
             report_schema: self.reports.schema().cloned(),
             order_books: self.order_books.clone(),
             account: self.account.clone(),
@@ -344,6 +356,8 @@ impl EventDispatcher {
             markets: self.markets.clone(),
             chart_alerts: self.chart_alerts.clone(),
             chart_text: self.chart_text.clone(),
+            kernel_health: self.kernel_health,
+            news: self.news.clone(),
             market_history: self.market_history.clone(),
             local_strategy_epoch: self.local_strategy_epoch,
             server_info: self.session_server_info.clone(),

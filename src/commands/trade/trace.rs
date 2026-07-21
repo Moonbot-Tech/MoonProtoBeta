@@ -1,5 +1,6 @@
 //! Trade visual/trace command payloads.
 
+use super::records::{read_f32_zero_tail, read_f64_zero_tail, read_u8_zero_tail};
 use super::*;
 #[cfg(any(test, feature = "diagnostics"))]
 use crate::time::DelphiTime;
@@ -86,34 +87,6 @@ impl CorridorUpdate {
             market,
             price_down,
             price_up,
-        })
-    }
-}
-
-/// `TBulkReplaceNotify` (TradeStruct.pas:275-284).
-///
-/// Notification that these UIDs are being bulk-replaced; UI should show them
-/// as moving/in-flight.
-#[derive(Debug, Clone)]
-pub struct BulkReplaceNotify {
-    pub market: MarketCommandHeader,
-    pub order_type: OrderType,
-    pub uids: Vec<u64>,
-}
-
-impl BulkReplaceNotify {
-    pub fn read(r: &mut &[u8]) -> Option<Self> {
-        let market = MarketCommandHeader::read(r)?;
-        let order_type = OrderType::from_byte(read_u8_zero_tail(r));
-        let count = read_u16_zero_tail(r) as usize;
-        let mut uids = Vec::with_capacity(count);
-        for _ in 0..count {
-            uids.push(read_u64_zero_tail(r));
-        }
-        Some(Self {
-            market,
-            order_type,
-            uids,
         })
     }
 }

@@ -3,39 +3,10 @@
 use super::{
     commands::{RuntimeCommand, RuntimeCommandKind, RuntimeTradeCommandKind, UiRuntimeCommand},
     CoinCardCandlesTicket, EngineActionTicket, MoonClient, MoonClientError, NewOrderParams,
-    NewOrderTicket, OrderSide, SellOrderParams, SplitOrderParams, TradesStreamMode, VStopParams,
+    NewOrderTicket, OrderSide, OrderTarget, SellOrderParams, SplitOrderParams, TradesStreamMode,
+    VStopParams,
 };
 use std::sync::mpsc;
-
-/// Existing order selected by UI code for a stateful action.
-///
-/// Application code can pass either an order UID or a borrowed
-/// [`crate::state::Order`] from a snapshot. The runtime still resolves and
-/// mutates the live order state before sending, so this is only a user-facing
-/// selector, not a copied worker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct OrderTarget {
-    uid: u64,
-}
-
-impl OrderTarget {
-    /// Server order UID.
-    pub fn uid(self) -> u64 {
-        self.uid
-    }
-}
-
-impl From<u64> for OrderTarget {
-    fn from(uid: u64) -> Self {
-        Self { uid }
-    }
-}
-
-impl From<&crate::state::Order> for OrderTarget {
-    fn from(order: &crate::state::Order) -> Self {
-        Self { uid: order.uid }
-    }
-}
 
 /// Order intent handle.
 ///
@@ -267,9 +238,8 @@ impl MoonOrders {
 ///
 /// These actions create or manage orders by selected market. Terminal UI can
 /// pass its retained `MarketHandle` through `*_for_market` helpers; scripts can
-/// still use market-name helpers. The caller never passes `TradeCtx`; the
-/// runtime owner derives the active session route and queues the corresponding
-/// trading intent.
+/// still use market-name helpers. Canonical v4 actions encode that market name;
+/// the caller never builds protocol envelopes, action ids, or route records.
 #[derive(Clone)]
 pub struct MoonTrade {
     pub(super) tx: mpsc::Sender<RuntimeCommand>,
@@ -453,6 +423,11 @@ impl MoonTrade {
         market: &crate::state::MarketHandle,
     ) -> Result<(), MoonClientError> {
         self.penalty(market.name())
+    }
+
+    /// Trigger the core's one-shot panic-sell-all action.
+    pub fn panic_sell_all(&self) -> Result<(), MoonClientError> {
+        self.send_intent(RuntimeTradeCommandKind::PanicSellAll)
     }
 
     fn send_intent(&self, kind: RuntimeTradeCommandKind) -> Result<(), MoonClientError> {

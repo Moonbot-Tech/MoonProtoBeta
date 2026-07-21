@@ -80,6 +80,13 @@ impl Client {
         self.metrics.protocol_metrics.record_pmtu(ping.pmtu);
         self.overheat = ping.overheat;
         self.rs = rs;
+        self.kernel_health.process_cpu_percent = ping.moment_cpu_percent;
+        self.kernel_health.system_cpu_percent = ping.total_cpu_percent;
+        if let Some(memory) = ping.memory {
+            self.kernel_health.used_memory_mb = Some(memory.used_memory_mb);
+            self.kernel_health.free_physical_memory_mb = Some(memory.free_physical_memory_mb);
+            self.kernel_health.logical_cpu_count = Some(memory.cores);
+        }
         // A server can start sending Ping after it created its side of the
         // client, even if the final MPC_Fine was lost on the way back. Ping
         // proves the peer is alive, but it does not complete authorization.
@@ -105,7 +112,9 @@ impl Client {
         // DataReadInt(MPC_Ping): write server ACK bitmap into TmpSlider only
         // when it belongs to this hard session.
         if ping.ack_session == self.ack_session32_value {
-            self.send_lock.lock().apply_ping_ack_bitmap(payload);
+            self.send_lock
+                .lock()
+                .apply_ping_ack_bitmap(payload, ping.ack_words_offset);
         }
 
         // ClientNewData(MPC_Ping): update wall-clock deltas before SendPing.
@@ -124,12 +133,14 @@ impl Client {
 
         // SendPing(var APing): mutate the same Ping struct, then append our ACK half.
         let (ack_start, ack_words) = self.recv.data_read_state.build_ack_half();
+        let local_telemetry = self.local_node_telemetry.sample(self.ping_count % 10 == 1);
         let mut response = ping.response_bytes(
             corrected_now_dt,
             total_sent_before_ping,
             total_recv_after_packet,
             ack_start,
             self.ack_session32_value,
+            local_telemetry,
         );
         for word in &ack_words {
             response.extend_from_slice(&word.to_le_bytes());

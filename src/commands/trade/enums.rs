@@ -149,7 +149,7 @@ impl std::fmt::Debug for OrderSubType {
 /// ```
 ///
 /// **Terminal states** (the order is closed and no further transition is expected):
-/// `SellDone`, `SellAlmostDone`, `BuyFail`, `BuyCancel`, `SellFail`, `SellCancel`.
+/// `SellDone`, `BuyFail`, `BuyCancel`, `SellFail`, `SellCancel`.
 ///
 /// **Phase semantics** for UI grouping:
 /// - **Buy phase** (`BuySet`/`BuyDone`/`BuyFail`/`BuyCancel`) waits for or
@@ -190,7 +190,8 @@ impl OrderWorkerStatus {
     #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub const SelLDone: Self = Self::SellDone;
-    /// Sell completed through an intermediate path; terminal for worker/state.
+    /// Sell completed through an intermediate path; the worker may still
+    /// publish the final `SellDone` state.
     pub const SellAlmostDone: Self = Self(9);
     /// Delphi wire/source spelling kept for protocol parity tests.
     #[cfg(any(test, feature = "diagnostics"))]
@@ -245,12 +246,7 @@ impl OrderWorkerStatus {
     pub const fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::SellDone
-                | Self::SellAlmostDone
-                | Self::BuyCancel
-                | Self::BuyFail
-                | Self::SellFail
-                | Self::SellCancel
+            Self::SellDone | Self::BuyCancel | Self::BuyFail | Self::SellFail | Self::SellCancel
         )
     }
 }

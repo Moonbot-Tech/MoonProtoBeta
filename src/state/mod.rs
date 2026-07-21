@@ -23,7 +23,9 @@ pub(crate) mod eps;
 pub(crate) mod history;
 pub(crate) mod history_store;
 pub(crate) mod history_worker;
+pub(crate) mod kernel_health;
 pub(crate) mod markets;
+pub(crate) mod news;
 pub(crate) mod order_books;
 pub(crate) mod orders;
 pub(crate) mod report;
@@ -54,6 +56,7 @@ pub(crate) use history_worker::{
     MarketHistoryStreamSection, MarketHistoryStreamSectionKind, MarketHistoryTradeInput,
     MarketHistoryWorker,
 };
+pub use kernel_health::KernelHealth;
 #[cfg(feature = "diagnostics")]
 #[doc(hidden)]
 pub use markets::MarketsListApplyTiming;
@@ -61,6 +64,7 @@ pub use markets::{
     BaseCurrencyPrice, MarketBalancePosition, MarketDeltaState, MarketGlobalDeltas, MarketHandle,
     MarketPrice, MarketTradeState, MarketsEvent, MarketsState,
 };
+pub use news::{NewsEvent, NewsState, NEWS_HISTORY_CAPACITY};
 pub(crate) use order_books::OrderBookControl;
 pub use order_books::{
     OrderBookEvent, OrderBookKind, OrderBookLevel, OrderBookReadGuard, OrderBookSnapshot,
@@ -69,12 +73,11 @@ pub use order_books::{
 #[cfg(any(test, feature = "diagnostics"))]
 #[doc(hidden)]
 pub use orders::ApplyResult;
-#[cfg(not(any(test, feature = "diagnostics")))]
-pub(crate) use orders::ApplyResult;
 pub use orders::{
     MarketPositionProtection, Order, OrderEvent, OrderTraceChartPoint, OrderTraceLine, Orders,
     PositionProtectionSide, SellReason,
 };
+pub(crate) use orders::{OrderRepair, OrderState};
 pub(crate) use report::{ReportControl, ReportPageApplyAction, ReportReplicationState};
 pub use report::{
     ReportEvent, ReportFieldKind, ReportFieldValue, ReportHistoryDepth, ReportRow, ReportSchema,

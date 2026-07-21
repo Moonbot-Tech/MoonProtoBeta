@@ -78,6 +78,10 @@ impl Client {
         self.round_trip_delay
     }
 
+    pub(crate) fn kernel_health(&self) -> crate::state::KernelHealth {
+        self.kernel_health
+    }
+
     /// Current Path MTU in bytes. Starts at 508; the runtime ProbeMTU can
     /// raise the value above 8000 in 32-byte steps.
     /// Matches Delphi `TMoonProtoNetClient.PMTU`.

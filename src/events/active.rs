@@ -9,13 +9,11 @@ use std::sync::Arc;
 
 use super::{copy_max_leverage_from_markets_list, Event, EventDispatcher};
 use crate::commands::market::BaseCurrency;
-use crate::commands::trade::TradeCtx;
 use crate::protocol::Command;
 use crate::state::eps::EpsProfile;
-use crate::state::orders::OrderCancelSend;
 #[cfg(any(test, feature = "diagnostics"))]
 use crate::state::OrderBookEvent;
-use crate::state::{MarketsEvent, OrderBookControl, OrderEvent, TradesEvent};
+use crate::state::{MarketsEvent, OrderBookControl, TradesEvent};
 
 pub(crate) struct ActiveDispatchContext {
     pub(crate) peer_app_token: u64,
@@ -31,6 +29,8 @@ pub(crate) struct ActiveDispatchContext {
     pub(crate) eps_profile: EpsProfile,
     pub(crate) server_base_currency_name: Option<Arc<str>>,
     pub(crate) server_base_currency_code: Option<BaseCurrency>,
+    pub(crate) exchange_code: crate::commands::market::ExchangeCode,
+    pub(crate) kernel_health: crate::state::KernelHealth,
 }
 
 impl ActiveDispatchContext {
@@ -51,6 +51,11 @@ impl ActiveDispatchContext {
             eps_profile: EpsProfile::from_exchange_code(client.server_info().exchange_code),
             server_base_currency_name: client.server_base_currency_name_arc(),
             server_base_currency_code: client.server_info().base_currency_code,
+            exchange_code: client
+                .server_info()
+                .exchange_code
+                .unwrap_or(crate::commands::market::ExchangeCode::None),
+            kernel_health: client.kernel_health(),
         }
     }
 }
@@ -58,7 +63,6 @@ impl ActiveDispatchContext {
 pub(crate) enum ActiveAction {
     RequestMarketsList,
     RequestUpdateMarketsList,
-    RequestOrderSnapshot,
     RequestStrategySchema,
     RequestOrderBookFull {
         market_index: u16,
@@ -71,11 +75,8 @@ pub(crate) enum ActiveAction {
         data: Vec<u8>,
     },
     RequestOrderStatus {
-        ctx: TradeCtx,
-        market_name: String,
-    },
-    OrderCancel {
-        request: OrderCancelSend,
+        order_id: u64,
+        exact_rev: u64,
     },
     TradesResend {
         payload: Vec<u8>,
@@ -142,6 +143,15 @@ impl EventDispatcher {
             ctx.server_base_currency_name.as_deref(),
             ctx.server_base_currency_code,
         );
+        self.orders.set_route(
+            ctx.server_base_currency_code
+                .unwrap_or(BaseCurrency::UNKNOWN),
+            ctx.exchange_code,
+        );
+        if cmd == Command::Ping && self.kernel_health != ctx.kernel_health {
+            self.kernel_health = ctx.kernel_health;
+            out.push(Event::KernelHealth(ctx.kernel_health));
+        }
         self.set_trade_storage_scope(ctx.trades_storage_scope.as_deref(), ctx.now_time_days);
 
         if matches!(cmd, Command::TradesStream | Command::TradesResendResponse)
@@ -175,15 +185,27 @@ impl EventDispatcher {
         {
             self.trades.full_reset_at(now_ms);
             self.order_books.reset_caches_keep_books();
+            // A hard session creates a fresh server-side client and SrvConnect
+            // sends the authoritative news ring again. Drop the previous local
+            // ring first; live frames that overtake the sliced history are then
+            // merged after that history by NewsState::apply_history.
+            self.news.clear_for_hard_session();
             log::info!(target: "moonproto::events",
-                "ServerToken changed ({:#x} -> {:#x}) - trades reset + orderbook caches reset",
+                "ServerToken changed ({:#x} -> {:#x}) - trades/orderbook/news session state reset",
                 self.last_known_server_token, current_token);
         }
         self.last_known_server_token = current_token;
+        if ctx.peer_app_token != 0
+            && self.last_known_peer_app_token != 0
+            && self.last_known_peer_app_token != ctx.peer_app_token
+        {
+            self.news.clear_for_new_world();
+        }
+        self.last_known_peer_app_token = ctx.peer_app_token;
 
         if is_pre_init_domain_command(cmd)
             && !ctx.domain_ready
-            && !is_pre_init_strategy_handshake(cmd, payload)
+            && !is_pre_init_state_payload(cmd, payload)
         {
             log::debug!(target: "moonproto::events",
                 "domain command {:?} skipped before init completion", cmd);
@@ -217,6 +239,12 @@ impl EventDispatcher {
         let start_len = out.len();
         self.dispatch_into_with_history(cmd, payload, now_ms, Some(ctx.now_time_days), out);
         self.sync_market_history_storage();
+        for repair in self.order_repairs.drain(..) {
+            actions.push(ActiveAction::RequestOrderStatus {
+                order_id: repair.order_id,
+                exact_rev: repair.exact_rev,
+            });
+        }
         for control in self.report_controls.drain(..) {
             match control {
                 crate::state::ReportControl::SendSync {
@@ -297,11 +325,6 @@ impl EventDispatcher {
             .collect::<Vec<_>>();
         let mut strategy_schema_applied = false;
         let mut new_markets_added = false;
-        // Auto-action 3: OrderEvent::Snapshot -> CleanupMissingWorkers.
-        // Delphi after TAllStatuses increments CurrentSnapshotFlag, applies all
-        // statuses, then requests exact status for workers absent from the fresh
-        // snapshot. The application must not know about snapshot flags.
-        let mut order_snapshot_applied = false;
         let mut idx = start_len;
         while idx < out.len() {
             let remove_event = match &out[idx] {
@@ -313,10 +336,6 @@ impl EventDispatcher {
                     // Ignored orderbook packets are protocol diagnostics; low-level
                     // EventDispatcher users can still observe them directly.
                     true
-                }
-                Event::Order(OrderEvent::Snapshot) => {
-                    order_snapshot_applied = true;
-                    false
                 }
                 Event::Strat(crate::state::StratEvent::SchemaApplied { .. }) => {
                     strategy_schema_applied = true;
@@ -335,7 +354,7 @@ impl EventDispatcher {
             }
         }
         if new_markets_added {
-            actions.push(ActiveAction::RequestOrderSnapshot);
+            self.rescan_parked_orders(now_ms, out);
         }
         if new_markets_need_price_refresh {
             actions.push(ActiveAction::RequestUpdateMarketsList);
@@ -379,9 +398,6 @@ impl EventDispatcher {
                 }
             }
         }
-        if order_snapshot_applied {
-            self.cleanup_missing_workers(actions);
-        }
         if processed_trades_packet {
             let (payloads, tick_events) = self
                 .trades
@@ -407,7 +423,7 @@ fn is_pre_init_domain_command(cmd: Command) -> bool {
     )
 }
 
-fn is_pre_init_strategy_handshake(cmd: Command, payload: &[u8]) -> bool {
+fn is_pre_init_state_payload(cmd: Command, payload: &[u8]) -> bool {
     matches!(
         cmd,
         Command::Strat
@@ -419,5 +435,6 @@ fn is_pre_init_strategy_handshake(cmd: Command, payload: &[u8]) -> bool {
         Command::UI
             if crate::commands::ui::is_runtime_state_payload(payload)
                 || crate::commands::ui::is_kernel_license_state_payload(payload)
+                || crate::commands::ui::is_news_payload(payload)
     )
 }

@@ -52,19 +52,6 @@ impl StrategySnapshotReply {
     }
 }
 
-/// Follow-up order-status request target produced after a full order-status
-/// snapshot did not mention a locally tracked worker.
-///
-/// Active `MoonClient` sends these automatically after applying the snapshot.
-/// The type is kept crate-private because terminal code should see the updated
-/// order state/events, not build follow-up protocol requests manually.
-#[doc(hidden)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct MissingOrderStatusRequest {
-    pub ctx: TradeCtx,
-    pub market_name: String,
-}
-
 /// One watcher fill after trades-stream time-shift application.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WatcherFillEvent {
@@ -379,6 +366,10 @@ pub enum ArbEvent {
 /// All typed events emitted by the [`crate::MoonClient`] runtime.
 #[derive(Debug)]
 pub enum Event {
+    /// CPU and memory telemetry reported by the connected MoonBot core.
+    KernelHealth(crate::state::KernelHealth),
+    /// News JSON, tags catalog, or startup history completion.
+    News(crate::state::NewsEvent),
     /// Order channel event: order creation, update, removal, or snapshot
     /// follow-up.
     Order(OrderEvent),

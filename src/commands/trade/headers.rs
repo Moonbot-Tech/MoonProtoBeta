@@ -1,7 +1,5 @@
 //! Delphi-shaped command headers for `MPC_Order`.
 
-use super::records::{read_u16_zero_tail, read_u8_zero_tail};
-use super::OrderWorkerStatus;
 use crate::commands::registry::{decode_utf8_delphi, write_string};
 use std::convert::TryInto;
 
@@ -65,33 +63,6 @@ impl MarketCommandHeader {
         out.push(base_currency);
         out.push(base_platform);
         write_string(out, &self.market_name);
-    }
-}
-
-/// Header `TTradeEpochCommand`: market_header + epoch:u16 + status:u8.
-#[derive(Debug, Clone)]
-pub struct TradeEpochHeader {
-    pub market: MarketCommandHeader,
-    pub epoch: u16,
-    pub status: OrderWorkerStatus,
-}
-
-impl TradeEpochHeader {
-    pub fn read(r: &mut &[u8]) -> Option<Self> {
-        let market = MarketCommandHeader::read(r)?;
-        let epoch = read_u16_zero_tail(r);
-        let status = OrderWorkerStatus::from_byte(read_u8_zero_tail(r));
-        Some(Self {
-            market,
-            epoch,
-            status,
-        })
-    }
-
-    pub fn write(&self, out: &mut Vec<u8>, base_currency: u8, base_platform: u8) {
-        self.market.write(out, base_currency, base_platform);
-        out.extend_from_slice(&self.epoch.to_le_bytes());
-        out.push(self.status.to_byte());
     }
 }
 

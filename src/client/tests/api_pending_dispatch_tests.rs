@@ -1145,8 +1145,14 @@ fn post_init_resync_enqueues_delphi_commands() {
     for item in sliced.into_iter().chain(high).chain(low) {
         let data = item.data;
         match Command::from_byte(item.cmd) {
-            Command::Order if data.first().copied() == Some(9) => {
-                seen_order_req = true;
+            Command::Order if data.first().copied() == Some(45) => {
+                let crate::commands::trade::TradeCommand::OrderStatusRequest(request) =
+                    crate::commands::trade::TradeCommand::parse(&data)
+                        .expect("post-init order status request must parse")
+                else {
+                    panic!("expected TOrderStatusRequest");
+                };
+                seen_order_req = request.header.uid == 0 && request.exact_rev == 0;
             }
             Command::Strat if data.first().copied() == Some(2) => {
                 let cmd = crate::commands::strat::StratCommand::parse(&data)
@@ -1177,7 +1183,10 @@ fn post_init_resync_enqueues_delphi_commands() {
         }
     }
 
-    assert!(seen_order_req, "post-init must request TAllStatuses");
+    assert!(
+        seen_order_req,
+        "post-init must request the full canonical order snapshot"
+    );
     assert!(
         seen_strat_snapshot,
         "post-init must send TStratSnapshot.CreateFromStrats equivalent"

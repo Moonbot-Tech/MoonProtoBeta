@@ -60,9 +60,9 @@ older move that has not yet been copied by the writer.
 
 ## Market Trade Intents
 
-New orders and market-level actions use `client.trade()`. User code does not
-build `TradeCtx`; the runtime derives the route bytes learned during Init
-BaseCheck:
+New orders and market-level actions use `client.trade()`. User code supplies a
+retained market handle (or a market name in scripts); canonical v4 commands
+serialize that market name directly:
 
 ```rust
 use moonproto::{ClosePositionParams, NewOrderParams, OrderSide, SplitOrderParams};
@@ -76,7 +76,11 @@ let _ticket = client.trade().new_order(
 )?;
 
 client.trade().join_orders_for_market(&market, OrderSide::Long)?;
-client.trade().split_order(SplitOrderParams::for_market(&market, 3))?;
+if let Some(order) = snapshot.orders().iter().find(|order| {
+    order.market_name == market.name()
+}) {
+    client.trade().split_order(SplitOrderParams::new(order, 3))?;
+}
 client.trade().close_position(ClosePositionParams::for_market(&market))?;
 client.trade().close_position(ClosePositionParams::market_order_for_market(&market))?;
 client.trade().limit_close_position_for_market(&market, OrderSide::Long)?;
@@ -95,9 +99,10 @@ client.trade().move_all_buys_for_market(
 )?;
 ```
 
-If Init/BaseCheck route fields are unavailable, these methods return
-`MoonClientError::TradeContext` instead of exposing `TradeCtx` to application
-code.
+The legacy `penalty` command is the sole public trade helper that still needs
+the BaseCheck currency/exchange route. It returns
+`MoonClientError::TradeContext` when those fields are unavailable. Canonical v4
+order actions do not depend on those route bytes.
 
 Manual strategy mode is an application decision, matching MoonBot UI behavior.
 When settings say `use_manual_strategy` and the trader selected
@@ -122,10 +127,10 @@ Market-level helpers have the same split: terminal UI should keep the selected
 `MarketHandle` and call `*_for_market` methods or `...Params::for_market`.
 String-keyed methods remain for scripts and one-shot tools.
 
-`SplitOrderParams::for_market` means the normal equal-parts split. The small
-strategy-piece buttons use `strategy_piece_for_market` or
-`strategy_piece_and_sell_for_market`, so application code does not pass raw
-split-mode booleans.
+`SplitOrderParams::new(order, parts)` means the normal equal-parts split of one
+selected retained order. The small strategy-piece buttons use
+`strategy_piece(order, parts)` or `strategy_piece_and_sell(order, parts)`, so
+application code does not pass raw split-mode booleans.
 
 `ClosePositionParams::for_market` means the normal default: place closing limit
 orders for the current position. Use `market_order_for_market` only for the
@@ -141,28 +146,33 @@ requested action, the action becomes a no-op. Normal UI code keeps rendering the
 retained order snapshot; low-level rejected-action telemetry is available only
 in `test`/`diagnostics` builds.
 
-After Init, actions append to unbounded send queues and reconnect keeps the
-session state alive automatically.
+After Init, actions are non-blocking: the runtime owns packet construction,
+send/retry state, and reconnect handling. An intent may still become a no-op if
+the referenced live order disappears or changes to an incompatible phase before
+the runtime applies it.
 
 ## Command Semantics
 
-- `move_order` derives market route, order type, current status, and dedup key
-  from live `Orders`.
+- `move_order` derives the active leg, current status, target size, and dedup key
+  from live `Orders`; the wire action addresses the order by server `uid`.
 - `cancel` derives the current status from live `Orders`; pending orders use the
   replace-then-cancel path.
 - `update_stops` and `update_vstop` compare against previous local values and
   send only when something changed.
 - `set_immune_for_orders` updates only found active local orders and sends
   nothing if no target order exists.
-- panic-sell methods update live local panic flags before sending.
-- `client.trade().new_order`, join/split/close/sell/penalty commands derive
-  `TradeCtx` from the session route and do not require caller-supplied protocol
-  ordinals.
+- panic-sell methods update live local panic flags before sending. Turning off
+  an auto-activated market panic also disables local stop-loss, trailing-stop,
+  and VStop toggles while preserving their numeric settings.
+- `client.trade().new_order`, join/split/close/sell and MoveAll commands encode
+  canonical market-name payloads. Only the legacy `penalty` command derives a
+  `TradeCtx` from the session route.
 - `move_all_sells` and `move_all_buys` read the live order state and send only
   when the active-client pre-send gates find a candidate order.
 
-Epoch/status/route fields are intentionally not caller-supplied in the normal
-API. They come from BaseCheck and the tracked order state.
+Protocol action IDs and current order status are intentionally not
+caller-supplied in the normal API. Active Lib owns action-ID generation and
+resolves status from the live retained order.
 
 ## Retry Counts
 

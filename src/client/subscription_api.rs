@@ -225,6 +225,12 @@ impl Client {
             return;
         }
 
+        // OrdersProto requires one full pull after every new authorized hard
+        // session. The server's eager snapshot is useful latency-wise, but it
+        // can race the Fine boundary; this independent request closes that
+        // window and also reconciles orders missed while the transport was down.
+        self.request_orders_snapshot();
+
         let indexes_stale = self.peer_app_token != 0 && !self.market_indexes_current_for_peer();
         let orderbooks_need_fresh_indexes =
             self.subscriptions.subscription_summary.has_orderbook_subs() && indexes_stale;

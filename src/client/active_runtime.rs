@@ -19,13 +19,14 @@ use crate::commands::ui::SpotMarketKind;
 use commands::{RuntimeCommand, StratRuntimeCommand, UiRuntimeCommand};
 pub use handles::{
     MoonAccount, MoonBalances, MoonCandles, MoonChartAlerts, MoonChartText, MoonEmulator,
-    MoonOrders, MoonReports, MoonSettings, MoonStrategies, MoonStreams, MoonTrade, OrderTarget,
+    MoonOrders, MoonReports, MoonSettings, MoonStrategies, MoonStreams, MoonTrade,
 };
 use runtime_loop::runtime_loop;
 pub use types::{
     ClosePositionParams, CoinCardCandlesTicket, EngineActionTicket, MoonClientError,
     MoonClientEvent, MoonClientSnapshot, MoonEventQueue, MoonEventSink, NewOrderParams,
-    NewOrderTicket, OrderSide, SellOrderParams, SplitOrderParams, TradesStreamMode, VStopParams,
+    NewOrderTicket, OrderSide, OrderTarget, SellOrderParams, SplitOrderParams, TradesStreamMode,
+    VStopParams,
 };
 
 #[cfg(any(test, feature = "diagnostics"))]
@@ -391,8 +392,7 @@ impl MoonClient {
         }
     }
 
-    /// Market-level trade intent API. The runtime derives `TradeCtx` from the
-    /// active session route learned during Init/BaseCheck.
+    /// Market-level canonical v4 trade intent API.
     pub fn trade(&self) -> MoonTrade {
         MoonTrade {
             tx: self.tx.clone(),

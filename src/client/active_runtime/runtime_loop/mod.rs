@@ -376,8 +376,8 @@ mod tests {
     use crate::commands::market::{BaseCurrency, ExchangeCode};
     use crate::commands::strategy_serializer::{FieldValue, StrategyFields, StrategySnapshot};
     use crate::commands::trade::{
-        BaseCommandHeader, DelphiBool, MarketCommandHeader, OrderCompact, OrderStatus,
-        OrderWorkerStatus, StopSettings, TradeCommand, TradeEpochHeader,
+        BaseCommandHeader, CanonicalOrderState, DelphiBool, OrderCommandPayload, OrderDescription,
+        OrderImage, OrderWorkerStatus, StopSettings, TradeCommand, ORDER_SECTION_ALL_MASK,
     };
 
     fn dummy_cfg() -> ClientConfig {
@@ -408,48 +408,39 @@ mod tests {
         client
     }
 
-    fn make_order_status(uid: u64, status: OrderWorkerStatus) -> OrderStatus {
-        OrderStatus {
-            epoch_header: TradeEpochHeader {
-                market: MarketCommandHeader {
-                    base: BaseCommandHeader {
-                        cmd_id: 4,
-                        ver: 3,
-                        uid,
-                    },
-                    currency: 17,
-                    platform: 9,
-                    market_name: "DOGEUSDT".to_string(),
-                },
-                epoch: 1,
-                status,
-            },
-            buy_order: OrderCompact::default(),
-            sell_order: OrderCompact::default(),
-            stops: StopSettings::default(),
-            strat_id: 0,
-            is_short: false,
-            db_id: 0,
-            from_cache: false,
-            emulator_mode: false,
-            immune_for_clicks: false,
-            vstop_on: false,
-            vstop_fixed: false,
-            vstop_level: 0.0,
-            vstop_vol: 0.0,
-        }
-    }
-
     fn seed_runtime_order(
         dispatcher: &mut crate::events::EventDispatcher,
         uid: u64,
         status: OrderWorkerStatus,
+        revision: u64,
     ) {
-        dispatcher
-            .orders_mut()
-            .apply(TradeCommand::OrderStatus(Box::new(make_order_status(
-                uid, status,
-            ))));
+        let desc = OrderDescription::for_test("DOGEUSDT", false, false);
+        let mut state = CanonicalOrderState::default();
+        state.0[0] = status.to_byte();
+        let command = TradeCommand::OrderImage(OrderImage {
+            header: BaseCommandHeader {
+                cmd_id: 41,
+                ver: crate::commands::registry::CURRENT_PROTO_CMD_VER,
+                uid,
+            },
+            state_rev: revision,
+            desc: desc.clone(),
+            section_mask: ORDER_SECTION_ALL_MASK,
+            state: state.clone(),
+        });
+        let mut events = Vec::new();
+        let mut repairs = Vec::new();
+        dispatcher.orders_mut().apply_protocol(
+            command,
+            1_000,
+            1,
+            2,
+            0.0,
+            &|_| true,
+            &mut events,
+            &mut repairs,
+        );
+        assert!(repairs.is_empty());
         assert!(dispatcher.orders().get(uid).is_some());
     }
 
@@ -500,35 +491,47 @@ mod tests {
     }
 
     #[test]
-    fn moon_trade_new_order_derives_route_and_builds_delphi_wire() {
+    fn moon_trade_new_order_builds_v4_start_command() {
         let mut client = ready_client();
         let mut dispatcher = crate::events::EventDispatcher::new();
 
-        let queued = handle_trade_action(
+        let changed = handle_trade_action(
             &mut client,
             &mut dispatcher,
             RuntimeTradeCommandKind::NewOrder {
                 params: NewOrderParams::new("DOGEUSDT", OrderSide::Short, 12.5, 0.25)
-                    .with_strategy_id(42),
+                    .with_strategy_id(42)
+                    .with_planned_sell_price(15.0)
+                    .with_market_stop(true),
                 request_uid: 0xCAFE_BABE,
             },
         )
-        .expect("BaseCheck route is present");
+        .expect("v4 start command does not need legacy route bytes");
 
-        assert!(queued);
+        assert!(!changed);
         let (_, high, _) = client.take_send_queues_for_test();
         assert_eq!(high.len(), 1);
         match TradeCommand::parse(&high[0].data).expect("valid new order") {
-            TradeCommand::NewOrder(cmd) => {
-                assert_eq!(cmd.market.market_name, "DOGEUSDT");
-                assert_eq!(cmd.market.base.uid, 0xCAFE_BABE);
-                assert_eq!(cmd.market.currency, 17);
-                assert_eq!(cmd.market.platform, 9);
-                assert!(cmd.is_short);
-                assert_eq!(cmd.price, 12.5);
-                assert_eq!(cmd.strat_id, 42);
-                assert_eq!(cmd.order_size, 0.25);
-            }
+            TradeCommand::OrderCommand(cmd) => match cmd.payload {
+                OrderCommandPayload::Start {
+                    market_name,
+                    is_short,
+                    use_market_stop,
+                    strategy_id,
+                    size,
+                    price,
+                    planned_sell_price,
+                } => {
+                    assert_eq!(cmd.header.uid, 0xCAFE_BABE);
+                    assert_eq!(market_name, "DOGEUSDT");
+                    assert!(is_short && use_market_stop);
+                    assert_eq!(strategy_id, 42);
+                    assert_eq!(size, 0.25);
+                    assert_eq!(price, 12.5);
+                    assert_eq!(planned_sell_price, 15.0);
+                }
+                other => panic!("unexpected order payload: {other:?}"),
+            },
             other => panic!("unexpected trade command: {other:?}"),
         }
     }
@@ -538,7 +541,7 @@ mod tests {
         let uid = 0x5151;
         let mut client = ready_client();
         let mut dispatcher = crate::events::EventDispatcher::new();
-        seed_runtime_order(&mut dispatcher, uid, OrderWorkerStatus::BuySet);
+        seed_runtime_order(&mut dispatcher, uid, OrderWorkerStatus::BuySet, 1);
 
         let stops = StopSettings {
             stop_loss_on: DelphiBool::TRUE,
@@ -558,19 +561,20 @@ mod tests {
         let (_, high, _) = client.take_send_queues_for_test();
         assert_eq!(high.len(), 1);
         match TradeCommand::parse(&high[0].data).expect("valid stops update") {
-            TradeCommand::OrderStopsUpdate(cmd) => {
-                assert_eq!(cmd.epoch_header.market.base.uid, uid);
-                assert_eq!(cmd.epoch_header.market.market_name, "DOGEUSDT");
-                assert_eq!(cmd.epoch_header.status, OrderWorkerStatus::BuySet);
-                assert!(bool::from(cmd.stops.stop_loss_on));
-                assert_eq!(cmd.stops.sl_level, 12.5);
-                assert!(bool::from(cmd.stops.use_take_profit));
-                assert_eq!(cmd.stops.take_profit, 15.0);
-                assert!(
-                    bool::from(cmd.stops.take_profit_changed),
-                    "runtime derives the TP latch before sending"
-                );
-            }
+            TradeCommand::OrderCommand(cmd) => match cmd.payload {
+                OrderCommandPayload::Stops { order_id, stops } => {
+                    assert_eq!(order_id, uid);
+                    assert!(bool::from(stops.stop_loss_on));
+                    assert_eq!(stops.sl_level, 12.5);
+                    assert!(bool::from(stops.use_take_profit));
+                    assert_eq!(stops.take_profit, 15.0);
+                    assert!(
+                        bool::from(stops.take_profit_changed),
+                        "runtime derives the TP latch before sending"
+                    );
+                }
+                other => panic!("unexpected order payload: {other:?}"),
+            },
             other => panic!("unexpected trade command: {other:?}"),
         }
     }
@@ -580,7 +584,7 @@ mod tests {
         let uid = 0x5252;
         let mut client = ready_client();
         let mut dispatcher = crate::events::EventDispatcher::new();
-        seed_runtime_order(&mut dispatcher, uid, OrderWorkerStatus::SellSet);
+        seed_runtime_order(&mut dispatcher, uid, OrderWorkerStatus::SellSet, 1);
 
         let mut pending = RuntimePending::default();
         assert!(handle_command(
@@ -596,15 +600,22 @@ mod tests {
         let (_, high, _) = client.take_send_queues_for_test();
         assert_eq!(high.len(), 1);
         match TradeCommand::parse(&high[0].data).expect("valid VStop update") {
-            TradeCommand::VStopUpdate(cmd) => {
-                assert_eq!(cmd.epoch_header.market.base.uid, uid);
-                assert_eq!(cmd.epoch_header.market.market_name, "DOGEUSDT");
-                assert_eq!(cmd.epoch_header.status, OrderWorkerStatus::SellSet);
-                assert!(cmd.vstop_on);
-                assert!(!cmd.vstop_fixed);
-                assert_eq!(cmd.vstop_level, 12.5);
-                assert_eq!(cmd.vstop_vol, 100.0);
-            }
+            TradeCommand::OrderCommand(cmd) => match cmd.payload {
+                OrderCommandPayload::VStop {
+                    order_id,
+                    enabled,
+                    fixed,
+                    level,
+                    volume,
+                } => {
+                    assert_eq!(order_id, uid);
+                    assert!(enabled);
+                    assert!(!fixed);
+                    assert_eq!(level, 12.5);
+                    assert_eq!(volume, 100.0);
+                }
+                other => panic!("unexpected order payload: {other:?}"),
+            },
             other => panic!("unexpected trade command: {other:?}"),
         }
     }
@@ -917,5 +928,25 @@ mod tests {
         let second = snapshot.read().clone().expect("second snapshot");
         assert_eq!(second.revision(), 2);
         assert_eq!(second.orders().len(), first.orders().len());
+    }
+
+    #[test]
+    fn published_order_snapshot_is_persistent_without_cloning_protocol_state() {
+        let mut dispatcher = crate::events::EventDispatcher::new();
+        let uid = 0x5151;
+        seed_runtime_order(&mut dispatcher, uid, OrderWorkerStatus::BuySet, 1);
+        let held = dispatcher.snapshot();
+
+        seed_runtime_order(&mut dispatcher, uid, OrderWorkerStatus::SellSet, 2);
+        let fresh = dispatcher.snapshot();
+
+        assert_eq!(
+            held.orders().get(uid).unwrap().status,
+            OrderWorkerStatus::BuySet
+        );
+        assert_eq!(
+            fresh.orders().get(uid).unwrap().status,
+            OrderWorkerStatus::SellSet
+        );
     }
 }

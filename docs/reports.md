@@ -88,7 +88,9 @@ When `database_recreated` is true, discard the stale local replica and then
 call `page_applied`. Active Lib restarts the same operation from a fresh cursor.
 
 Missing page responses are retried automatically. A retry repeats only the
-current page, not the complete history.
+current page, not the complete history, and keeps that page request's wire UID.
+Therefore a delayed response to an earlier transmission of the same page remains
+valid instead of being invalidated by the retry itself.
 
 ## Open Rows After Reconnect
 

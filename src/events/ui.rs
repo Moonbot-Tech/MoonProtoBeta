@@ -27,6 +27,15 @@ impl EventDispatcher {
                 }
             }
             Some(UICommand::AlertSnapshotRequest { .. } | UICommand::ChartTextState(_)) => {}
+            Some(UICommand::NewsRelay(command)) => match self.news.apply_relay(command) {
+                Ok(Some(event)) => out.push(Event::News(event)),
+                Ok(None) => {}
+                Err(()) => Self::push_parse_failed(out, Command::UI, payload),
+            },
+            Some(UICommand::NewsHistory(command)) => match self.news.apply_history(command) {
+                Ok(event) => out.push(Event::News(event)),
+                Err(()) => Self::push_parse_failed(out, Command::UI, payload),
+            },
             Some(cmd_v) => {
                 let coin_blacklist_text = match &cmd_v {
                     UICommand::ClientSettings(settings) => {

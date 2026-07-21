@@ -526,7 +526,7 @@ fn build_snapshot_normalizes_empty_raw_payload_to_empty_serializer() {
 #[test]
 // parity: MoonBot MoonProtoBaseStruct.pas:TCommandRegistry.FromStream
 fn version_gate_returns_skipped() {
-    // ver=99 > CURRENT_PROTO_CMD_VER=3 → Delphi registry FSkipped.
+    // ver=99 > CURRENT_PROTO_CMD_VER=4 -> Delphi registry FSkipped.
     let mut payload = vec![CMD_SNAPSHOT, 99, 0];
     payload.extend_from_slice(&77u64.to_le_bytes());
     let cmd = StratCommand::parse(&payload).unwrap();

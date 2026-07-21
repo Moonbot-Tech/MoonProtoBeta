@@ -57,52 +57,6 @@ fn take_send_items(q: &Arc<Mutex<SendLockState>>) -> Vec<SendItem> {
     sliced
 }
 
-fn tracked_orders_for_sender(
-    uid: u64,
-    currency: u8,
-    platform: u8,
-    market_name: &str,
-    status: crate::commands::trade::OrderWorkerStatus,
-) -> crate::state::Orders {
-    use crate::commands::trade::{
-        BaseCommandHeader, MarketCommandHeader, OrderCompact, OrderStatus, StopSettings,
-        TradeCommand, TradeEpochHeader,
-    };
-
-    let mut orders = crate::state::Orders::new();
-    let status_cmd = OrderStatus {
-        epoch_header: TradeEpochHeader {
-            market: MarketCommandHeader {
-                base: BaseCommandHeader {
-                    cmd_id: 4,
-                    ver: 3,
-                    uid,
-                },
-                currency,
-                platform,
-                market_name: market_name.to_string(),
-            },
-            epoch: 11,
-            status,
-        },
-        buy_order: OrderCompact::default(),
-        sell_order: OrderCompact::default(),
-        stops: StopSettings::default(),
-        strat_id: 0,
-        is_short: false,
-        db_id: 0,
-        from_cache: false,
-        emulator_mode: false,
-        immune_for_clicks: false,
-        vstop_on: false,
-        vstop_fixed: false,
-        vstop_level: 0.0,
-        vstop_vol: 0.0,
-    };
-    let _ = orders.apply(TradeCommand::OrderStatus(Box::new(status_cmd)));
-    orders
-}
-
 fn command_uid(payload: &[u8]) -> Option<u64> {
     payload
         .get(3..11)
@@ -337,24 +291,10 @@ fn try_subscribe_returns_disconnected_when_receiver_dropped() {
 }
 
 #[test]
-fn disconnected_sender_stateful_action_does_not_mutate_or_send() {
-    use crate::commands::trade::OrderWorkerStatus;
-
-    let (sender, _, send_q, alive, _, _) = make_sender();
-    alive.store(false, Ordering::Relaxed);
-    let uid = 0x7777;
-    let mut orders = tracked_orders_for_sender(uid, 17, 9, "DOGEUSDT", OrderWorkerStatus::SellSet);
-
-    assert!(!sender.replace_order(&mut orders, uid, 50100.0));
-    assert_eq!(orders.get(uid).unwrap().sell_price, 0.0);
-    assert!(take_send_items(&send_q).is_empty());
-}
-
-#[test]
 fn sender_try_send_cmd_keyed_queues_send_item() {
     let (sender, _, send_q, _, _, _) = make_sender();
     let payload = vec![1, 2, 3, 4];
-    let key = UniqueKey::order_move(42);
+    let key = UniqueKey::order_command(crate::commands::registry::UK_ORDER_CMD_BUY, 42);
 
     sender
         .try_send_cmd_keyed(
@@ -390,7 +330,7 @@ fn sender_retry_left_clamps_zero() {
             SendPriority::High,
             true,
             0,
-            UniqueKey::order_move(42),
+            UniqueKey::order_command(crate::commands::registry::UK_ORDER_CMD_BUY, 42),
         )
         .expect("send command should enqueue");
 
@@ -435,7 +375,7 @@ fn pre_init_raw_sender_send_cmd_is_gated() {
             SendPriority::High,
             true,
             3,
-            UniqueKey::order_move(42),
+            UniqueKey::order_command(crate::commands::registry::UK_ORDER_CMD_BUY, 42),
         )
         .unwrap_err();
 
@@ -484,63 +424,6 @@ fn cloned_sender_updates_same_registry_and_send_queues() {
     assert!(sent
         .iter()
         .all(|item| method_id(&item.data) == Some(EngineMethod::SubscribeOrderBook.to_byte())));
-}
-
-#[test]
-fn sender_replace_order_uses_client_wrapper_wire_defaults() {
-    let (sender, _, send_q, _, _, _) = make_sender();
-    let uid = 42;
-    let mut orders = tracked_orders_for_sender(
-        uid,
-        17,
-        9,
-        "BTCUSDT",
-        crate::commands::trade::OrderWorkerStatus::SellSet,
-    );
-
-    assert!(sender.replace_order(&mut orders, uid, 50100.0));
-
-    let sent = take_send_items(&send_q);
-    assert_eq!(sent.len(), 1);
-    let item = &sent[0];
-    assert_eq!(item.cmd, Command::Order.to_byte());
-    assert_eq!(item.priority, SendPriority::High);
-    assert!(item.encrypted);
-    assert_eq!(item.max_retries, 3);
-    assert_eq!(item.retry_left, 2);
-    assert_eq!(item.u_key, UniqueKey::order_move(uid));
-
-    match crate::commands::trade::TradeCommand::parse(&item.data).expect("valid replace command") {
-        crate::commands::trade::TradeCommand::OrderReplace(cmd) => {
-            assert_eq!(cmd.epoch_header.market.base.uid, 42);
-            assert_eq!(cmd.epoch_header.market.currency, 17);
-            assert_eq!(cmd.epoch_header.market.platform, 9);
-            assert_eq!(cmd.epoch_header.market.market_name, "BTCUSDT");
-        }
-        other => panic!("unexpected trade command: {other:?}"),
-    }
-}
-
-#[test]
-fn sender_stops_and_vstop_use_independent_delphi_queue_keys() {
-    use crate::commands::trade::{DelphiBool, OrderWorkerStatus, StopSettings};
-
-    let uid = 42;
-    let (sender, _, send_q, _, _, _) = make_sender();
-    let mut orders = tracked_orders_for_sender(uid, 17, 9, "BTCUSDT", OrderWorkerStatus::SellSet);
-
-    let stops = StopSettings {
-        stop_loss_on: DelphiBool::TRUE,
-        sl_level: 10.0,
-        ..Default::default()
-    };
-    assert!(sender.update_order_stops(&mut orders, uid, &stops));
-    assert!(sender.update_vstop(&mut orders, uid, true, false, 9.0, 1.0));
-
-    let sent = take_send_items(&send_q);
-    assert_eq!(sent.len(), 2);
-    assert_eq!(sent[0].u_key, UniqueKey::stop_move(uid));
-    assert_eq!(sent[1].u_key, UniqueKey::vstop_move(uid));
 }
 
 #[test]

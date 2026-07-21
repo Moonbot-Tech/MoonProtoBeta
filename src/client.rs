@@ -47,6 +47,7 @@ mod helpers;
 mod init;
 mod lifecycle;
 pub(crate) mod metrics;
+mod node_telemetry;
 mod protocol_api;
 mod protocol_connect;
 mod protocol_core;
@@ -106,8 +107,6 @@ pub use init::{ConnectConfig, ConnectError, InitConfig, InitError, InitialStrate
 #[cfg(any(test, feature = "diagnostics"))]
 #[doc(hidden)]
 pub use metrics::ProtocolMetricsSnapshot;
-#[cfg(test)]
-pub(crate) use send_queue::UK_ORDER_MOVE;
 pub(crate) use send_queue::{SendPriority, UniqueKey};
 pub(crate) use sender::{ClientSender, SubscribeError};
 pub use subscriptions::{ActiveSubscriptions, TradesSubscription};
@@ -134,6 +133,7 @@ use lifecycle::ClientLifecycle;
 #[cfg(any(test, feature = "diagnostics"))]
 use metrics::ProfilePhase;
 use metrics::{ClientMetrics, ProtocolMetrics};
+use node_telemetry::LocalNodeTelemetryReader;
 use protocol_core::ProtocolCore;
 use refresh_clocks::{PendingApi, RefreshClocks};
 #[cfg(test)]
@@ -337,6 +337,8 @@ pub(crate) struct Client {
     server_time_delta: f64, // ServerTimeDelta = Ping.InitialTime - Now (for order time correction)
     global_timing_orders: u16, // GlobalTimingOrders from Ping
     net_lag_ping: i64,      // NetLagPing (ms abs diff between NTP-corrected time and server time)
+    kernel_health: crate::state::KernelHealth,
+    local_node_telemetry: LocalNodeTelemetryReader,
 
     // Adaptive rate control (matches MoonProtoIntStruct.pas:197-245)
     trip_delay_k: f64,        // TripDelayK (1.05-1.25, init 1.1)
@@ -351,9 +353,10 @@ pub(crate) struct Client {
     // BytesPerSec sliding window (10 sec) — observability metric.
     // B-13 fix: a running sum is maintained alongside the window — `bytes_per_sec_*` is O(1)
     // instead of an O(N) walk on every request.
-    // #5 audit_delphi_deviation: O(1) EMA counter (port of Delphi MoonProtoUDPClient.pas:113-138
-    // AddBytesCount). The VecDeque<(i64,u64)> sliding window was removed — it cost ~8MB heap on
-    // a 50K pps burst plus 100K push_back/pop_front ops/sec. Now it is 24 bytes + 4 ops/add.
+    // O(1) EMA counter matching the production core. The old
+    // VecDeque<(i64,u64)> sliding window cost about 8 MB of heap on a 50K pps
+    // burst plus 100K push_back/pop_front operations per second; the current
+    // counter is 24 bytes and four arithmetic operations per packet.
     //
     // Observability/diagnostics cluster: byte/packet counters (`total_recv`,
     // `total_sent`, `total_recv_shared`), the BytesPerSec EMA counters
@@ -615,6 +618,8 @@ impl Client {
             server_time_delta: 0.0,
             global_timing_orders: 0,
             net_lag_ping: 0,
+            kernel_health: crate::state::KernelHealth::default(),
+            local_node_telemetry: LocalNodeTelemetryReader::new(),
             trip_delay_k: 1.1,
             last_set_trip_k: i64::MIN / 2,
             last_checked_slices: 0,

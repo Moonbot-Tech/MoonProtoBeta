@@ -1,7 +1,7 @@
 use super::SlicedAck;
 pub(crate) use crate::commands::registry::{
-    find_descriptor, CommandDescriptor, CommandPriority, UKeyRule, UK_IMMUNE_CLICKS, UK_NONE,
-    UK_ORDER_MOVE, UK_STOP_MOVE, UK_STRAT_SELL_PRICE_UPDATE, UK_VSTOP_MOVE,
+    find_descriptor, CommandDescriptor, CommandPriority, UKeyRule, UK_NONE,
+    UK_STRAT_SELL_PRICE_UPDATE,
 };
 #[cfg(test)]
 pub(crate) use crate::commands::registry::{
@@ -56,32 +56,10 @@ impl UniqueKey {
     pub(crate) fn is_none(&self) -> bool {
         self.kind == UK_NONE
     }
-    /// UKey for order move/cancel/panic commands keyed by task id.
-    pub(crate) fn order_move(task_id: u64) -> Self {
+    pub(crate) fn order_command(kind: u8, order_id: u64) -> Self {
         Self {
-            kind: UK_ORDER_MOVE,
-            uid: task_id,
-        }
-    }
-    /// UKey for stop-settings commands keyed by task id.
-    pub(crate) fn stop_move(task_id: u64) -> Self {
-        Self {
-            kind: UK_STOP_MOVE,
-            uid: task_id,
-        }
-    }
-    /// UKey for VStop commands keyed by task id.
-    pub(crate) fn vstop_move(task_id: u64) -> Self {
-        Self {
-            kind: UK_VSTOP_MOVE,
-            uid: task_id,
-        }
-    }
-    /// UKey for `TSetImmuneCommand`, keyed by the wrapping sum of item UIDs.
-    pub(crate) fn immune_clicks(items_uid_sum: u64) -> Self {
-        Self {
-            kind: UK_IMMUNE_CLICKS,
-            uid: items_uid_sum,
+            kind,
+            uid: order_id,
         }
     }
 
@@ -160,10 +138,21 @@ pub(crate) fn typed_send_metadata(
     let cmd_id = payload.first().copied()?;
     let desc = find_descriptor(outer, cmd_id)?;
     let u_key = descriptor_u_key(desc, payload, explicit_u_key)?;
+    let max_retries = if outer == Command::Order
+        && cmd_id == 47
+        && matches!(payload.get(11), Some(14) | Some(15))
+    {
+        // Delphi TOrderCommand constructors deliberately reduce the market
+        // Close/ManualSell buttons to one attempt. Retrying later can execute
+        // the same intent at a materially different market price.
+        1
+    } else {
+        desc.max_retries
+    };
     Some(TypedSendMetadata {
         priority: desc.priority.into(),
         encrypted: desc.default_encrypted,
-        max_retries: desc.max_retries,
+        max_retries,
         u_key,
     })
 }
@@ -182,12 +171,11 @@ fn descriptor_u_key(
 
     match desc.ukey {
         UKeyRule::None => Some(UniqueKey::none()),
-        UKeyRule::HeaderUid | UKeyRule::TradeEpochUid => {
-            payload_header_uid(payload).map(|uid| UniqueKey {
-                kind: desc.unique_kind,
-                uid,
-            })
-        }
+        UKeyRule::Explicit => None,
+        UKeyRule::HeaderUid => payload_header_uid(payload).map(|uid| UniqueKey {
+            kind: desc.unique_kind,
+            uid,
+        }),
         UKeyRule::Singleton(uid) => Some(UniqueKey {
             kind: desc.unique_kind,
             uid,
@@ -198,7 +186,6 @@ fn descriptor_u_key(
         // market text/index bytes.
         UKeyRule::MarketIndex
         | UKeyRule::StrategyId
-        | UKeyRule::ImmuneItemsSum
         | UKeyRule::SendContextClientId
         | UKeyRule::CandleUpdate => None,
     }
@@ -323,17 +310,17 @@ impl SendLockState {
         copied
     }
 
-    pub(crate) fn apply_ping_ack_bitmap(&mut self, payload: &[u8]) {
+    pub(crate) fn apply_ping_ack_bitmap(&mut self, payload: &[u8], ack_words_offset: usize) {
         // DataReadInt(MPC_Ping): parse server's ACK bitmap into TmpSlider only.
         // Delphi drops PendingH later in writer CheckSeningData via
         // CopyRecvdData -> ApplyRegularHLAck.
-        if payload.len() > control::PING_SIZE {
+        if payload.len() > ack_words_offset && ack_words_offset >= control::PING_SIZE {
             let srv_ack_start = u64::from_le_bytes(payload[42..50].try_into().unwrap());
-            let ack_data_len = payload.len() - control::PING_SIZE;
+            let ack_data_len = payload.len() - ack_words_offset;
             let r_count = (ack_data_len / 8).min(64);
             let mut bits = [0u64; 64];
             for i in 0..r_count {
-                let start = control::PING_SIZE + i * 8;
+                let start = ack_words_offset + i * 8;
                 bits[i] = u64::from_le_bytes(payload[start..start + 8].try_into().unwrap());
             }
             self.tmp_slider.bit_field = bits;

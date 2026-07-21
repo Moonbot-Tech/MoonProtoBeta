@@ -4,7 +4,6 @@
 use super::*;
 
 mod balance;
-mod orders;
 mod strat;
 mod subscriptions;
 mod ui;

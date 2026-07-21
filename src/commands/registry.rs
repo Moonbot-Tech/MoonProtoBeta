@@ -5,51 +5,56 @@
 //! Wire format of every command:
 //!   CmdId (1 byte) + ver (2 bytes u16 LE) + UID (8 bytes u64 LE) + payload
 //!
-//! Version gate: if ver > CURRENT_VER (3), skip the command.
+//! Version gate: if `ver` is newer than the concrete command version, skip the
+//! command. The current shared version is 4, including the canonical order
+//! command set 41..47.
 
 use crate::protocol::Command;
 
-pub(crate) const CURRENT_PROTO_CMD_VER: u16 = 3;
+pub(crate) const CURRENT_PROTO_CMD_VER: u16 = 4;
 
 /// `UK_None`: no queue deduplication.
 pub(crate) const UK_NONE: u8 = 0;
-/// `UK_OrderStatus`: low-level order-status request key.
-pub(crate) const UK_ORDER_STATUS: u8 = 1;
-/// `UK_OrderStatusShort`: low-level short order-status request key.
-pub(crate) const UK_ORDER_STATUS_SHORT: u8 = 2;
-/// `UK_OrderMove`: replace/cancel/panic dedup by order task id.
-pub(crate) const UK_ORDER_MOVE: u8 = 3;
-/// `UK_StopMove`: stop-settings dedup by order task id.
-pub(crate) const UK_STOP_MOVE: u8 = 4;
 /// `UK_StratSnapshot`: singleton strategy snapshot dedup key.
-pub(crate) const UK_STRAT_SNAPSHOT: u8 = 5;
+pub(crate) const UK_STRAT_SNAPSHOT: u8 = 1;
 /// `UK_BaseUISettings`: singleton client-settings snapshot dedup key.
-pub(crate) const UK_BASE_UI_SETTINGS: u8 = 6;
+pub(crate) const UK_BASE_UI_SETTINGS: u8 = 2;
 /// `UK_StratSellPriceUpdate`: per-strategy sell-price dedup key.
-pub(crate) const UK_STRAT_SELL_PRICE_UPDATE: u8 = 7;
+pub(crate) const UK_STRAT_SELL_PRICE_UPDATE: u8 = 3;
 /// `UK_BalanceFull`: singleton full-balance snapshot dedup key.
-pub(crate) const UK_BALANCE_FULL: u8 = 8;
+pub(crate) const UK_BALANCE_FULL: u8 = 4;
 /// `UK_TurnMMDetection`: MM-orders subscription command key.
-pub(crate) const UK_TURN_MM_DETECTION: u8 = 9;
-/// `UK_ImmuneClicks`: batch order-immunity dedup key.
-pub(crate) const UK_IMMUNE_CLICKS: u8 = 10;
+pub(crate) const UK_TURN_MM_DETECTION: u8 = 5;
 /// `UK_LevManageSettings`: singleton leverage-management settings key.
-pub(crate) const UK_LEV_MANAGE_SETTINGS: u8 = 11;
+pub(crate) const UK_LEV_MANAGE_SETTINGS: u8 = 6;
 /// `UK_ArbPrices`: arbitrage price command key.
 #[allow(dead_code)]
-pub(crate) const UK_ARB_PRICES: u8 = 12;
+pub(crate) const UK_ARB_PRICES: u8 = 7;
 /// `UK_DexSwitch`: DEX switch command key.
-pub(crate) const UK_DEX_SWITCH: u8 = 13;
+pub(crate) const UK_DEX_SWITCH: u8 = 8;
 /// `UK_SpotSwitch`: spot-mode switch command key.
-pub(crate) const UK_SPOT_SWITCH: u8 = 14;
+pub(crate) const UK_SPOT_SWITCH: u8 = 9;
 /// `UK_ChartTextSnapshot`: per-client chart text snapshot key.
-pub(crate) const UK_CHART_TEXT_SNAPSHOT: u8 = 15;
+pub(crate) const UK_CHART_TEXT_SNAPSHOT: u8 = 10;
 /// `UK_ChartTextState`: singleton chart text state key.
-pub(crate) const UK_CHART_TEXT_STATE: u8 = 16;
+pub(crate) const UK_CHART_TEXT_STATE: u8 = 11;
 /// `UK_CandleUpdate`: per-client, per-market, per-TF live candle update key.
-pub(crate) const UK_CANDLE_UPDATE: u8 = 17;
-/// `UK_VStopMove`: VStop dedup by order task id.
-pub(crate) const UK_VSTOP_MOVE: u8 = 18;
+pub(crate) const UK_CANDLE_UPDATE: u8 = 12;
+
+pub(crate) const UK_ORDER_IMAGE: u8 = 13;
+pub(crate) const UK_ORDER_PATCH: u8 = 15;
+pub(crate) const UK_ORDERS_SNAPSHOT: u8 = 16;
+pub(crate) const UK_ORDERS_CATALOG: u8 = 17;
+pub(crate) const UK_ORDER_REQUEST: u8 = 18;
+pub(crate) const UK_ORDER_NOT_FOUND: u8 = 19;
+pub(crate) const UK_ORDER_CMD_BUY: u8 = 20;
+pub(crate) const UK_ORDER_CMD_SELL: u8 = 21;
+pub(crate) const UK_ORDER_CMD_STOPS: u8 = 22;
+pub(crate) const UK_ORDER_CMD_VSTOP: u8 = 23;
+pub(crate) const UK_ORDER_CMD_PANIC: u8 = 24;
+pub(crate) const UK_ORDER_CMD_IMMUNE: u8 = 25;
+/// `UK_NewsHistory`: one targeted startup history per client id.
+pub(crate) const UK_NEWS_HISTORY: u8 = 26;
 
 /// Send priority as protocol metadata, independent from the concrete client
 /// queue implementation. Conversion to `SendPriority` happens at the send edge.
@@ -72,13 +77,12 @@ impl CommandPriority {
 /// Wire-base family inherited by a typed command.
 ///
 /// This models command ancestry that matters on the wire: the base header is
-/// always `CmdId + ver + UID`, while market/epoch descendants prepend extra
-/// fields and also change the inherited UKey rule.
+/// always `CmdId + ver + UID`, while market descendants prepend extra fields
+/// and also change the inherited UKey rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CommandBase {
     Base,
     Market,
-    TradeEpoch,
 }
 
 /// How a command computes Delphi `TMoonUniqueKey.UID` after `unique_kind` chose
@@ -86,12 +90,14 @@ pub(crate) enum CommandBase {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UKeyRule {
     None,
+    /// The command computes its key from non-generic payload semantics. The
+    /// caller must provide it; silently falling back to `UK_None` would break
+    /// the matching server-side freshness group.
+    Explicit,
     HeaderUid,
     MarketIndex,
-    TradeEpochUid,
     Singleton(u64),
     StrategyId,
-    ImmuneItemsSum,
     SendContextClientId,
     CandleUpdate,
 }
@@ -157,7 +163,6 @@ const fn inherited_ukey(base: CommandBase) -> UKeyRule {
     match base {
         CommandBase::Base => UKeyRule::HeaderUid,
         CommandBase::Market => UKeyRule::MarketIndex,
-        CommandBase::TradeEpoch => UKeyRule::TradeEpochUid,
     }
 }
 
@@ -239,204 +244,16 @@ pub(crate) const ORDER_COMMANDS: &[CommandDescriptor] = &[
         priority = High,
         direction = Both
     ),
-    cmd_desc!(
-        Command::Order,
-        2,
-        "TTradeEpochCommand",
-        base = TradeEpoch,
-        priority = High,
-        direction = Both
-    ),
-    cmd_desc!(
-        Command::Order,
-        3,
-        "TNewOrderCommand",
-        base = Market,
-        priority = High,
-        direction = Outbound
-    ),
-    cmd_desc!(
-        Command::Order,
-        4,
-        "TOrderStatus",
-        base = TradeEpoch,
-        priority = High,
-        unique = UK_ORDER_STATUS,
-        direction = Inbound
-    ),
-    cmd_desc!(
-        Command::Order,
-        5,
-        "TOrderStatusUpdate",
-        base = TradeEpoch,
-        priority = High,
-        unique = UK_ORDER_STATUS_SHORT,
-        direction = Inbound
-    ),
-    cmd_desc!(
-        Command::Order,
-        6,
-        "TOrderReplaceCommand",
-        base = TradeEpoch,
-        priority = High,
-        unique = UK_ORDER_MOVE,
-        direction = Outbound
-    ),
-    cmd_desc!(
-        Command::Order,
-        7,
-        "TOrderReplaceResponse",
-        base = TradeEpoch,
-        priority = High,
-        retries = Some(4),
-        unique = UK_ORDER_MOVE,
-        ukey = UKeyRule::TradeEpochUid,
-        direction = Inbound
-    ),
-    cmd_desc!(
-        Command::Order,
-        8,
-        "TAllStatuses",
-        base = Base,
-        priority = Sliced,
-        direction = Inbound
-    ),
-    cmd_desc!(
-        Command::Order,
-        9,
-        "TAllStatusesReq",
-        base = Base,
-        priority = High,
-        direction = Outbound
-    ),
-    cmd_desc!(
-        Command::Order,
-        10,
-        "TOrderCancelCommand",
-        base = TradeEpoch,
-        priority = High,
-        unique = UK_ORDER_MOVE,
-        direction = Outbound
-    ),
-    cmd_desc!(
-        Command::Order,
-        11,
-        "TJoinOrdersCommand",
-        base = Market,
-        priority = High,
-        direction = Outbound
-    ),
-    cmd_desc!(
-        Command::Order,
-        12,
-        "TSplitOrderCommand",
-        base = Market,
-        priority = High,
-        direction = Outbound
-    ),
-    cmd_desc!(
-        Command::Order,
-        13,
-        "TMoveAllSellsCommand",
-        base = Market,
-        priority = High,
-        direction = Outbound
-    ),
-    cmd_desc!(
-        Command::Order,
-        14,
-        "TDoClosePositionCommand",
-        base = Market,
-        priority = High,
-        retries = Some(1),
-        unique = UK_NONE,
-        ukey = UKeyRule::None,
-        direction = Outbound
-    ),
-    cmd_desc!(
-        Command::Order,
-        15,
-        "TDoLimitClosePositionCommand",
-        base = Market,
-        priority = High,
-        retries = Some(1),
-        unique = UK_NONE,
-        ukey = UKeyRule::None,
-        direction = Outbound
-    ),
-    cmd_desc!(
-        Command::Order,
-        16,
-        "TDoSplitPositionCommand",
-        base = Market,
-        priority = High,
-        retries = Some(1),
-        unique = UK_NONE,
-        ukey = UKeyRule::None,
-        direction = Outbound
-    ),
-    cmd_desc!(
-        Command::Order,
-        17,
-        "TDoSellOrderCommand",
-        base = Market,
-        priority = High,
-        retries = Some(1),
-        unique = UK_NONE,
-        ukey = UKeyRule::None,
-        direction = Outbound
-    ),
-    cmd_desc!(
-        Command::Order,
-        18,
-        "TOrderStatusRequest",
-        base = TradeEpoch,
-        priority = High,
-        direction = Outbound
-    ),
-    cmd_desc!(
-        Command::Order,
-        19,
-        "TOrderNotFound",
-        base = TradeEpoch,
-        priority = High,
-        direction = Inbound
-    ),
-    cmd_desc!(
-        Command::Order,
-        20,
-        "TOrderStopsUpdate",
-        base = TradeEpoch,
-        priority = High,
-        unique = UK_STOP_MOVE,
-        direction = Both
-    ),
-    cmd_desc!(
-        Command::Order,
-        21,
-        "TTurnPanicSellCommand",
-        base = TradeEpoch,
-        priority = High,
-        unique = UK_ORDER_MOVE,
-        direction = Both
-    ),
-    cmd_desc!(
-        Command::Order,
-        22,
-        "TSetImmuneCommand",
-        base = Base,
-        priority = High,
-        retries = None,
-        unique = UK_IMMUNE_CLICKS,
-        ukey = UKeyRule::ImmuneItemsSum,
-        direction = Both
-    ),
+    // CmdId 2..22 are permanently retired OrdersProto v1 commands.
     cmd_desc!(
         Command::Order,
         23,
         "TPenaltyCommand",
         base = Market,
         priority = High,
+        retries = Some(4),
+        unique = UK_NONE,
+        ukey = UKeyRule::None,
         direction = Both
     ),
     cmd_desc!(
@@ -463,42 +280,7 @@ pub(crate) const ORDER_COMMANDS: &[CommandDescriptor] = &[
         priority = Low,
         direction = Inbound
     ),
-    cmd_desc!(
-        Command::Order,
-        27,
-        "TMoveAllBuysCommand",
-        base = Market,
-        priority = High,
-        direction = Outbound
-    ),
-    cmd_desc!(
-        Command::Order,
-        28,
-        "TBulkReplaceNotify",
-        base = Market,
-        priority = High,
-        direction = Inbound
-    ),
-    cmd_desc!(
-        Command::Order,
-        29,
-        "TVStopUpdate",
-        base = TradeEpoch,
-        priority = High,
-        unique = UK_VSTOP_MOVE,
-        direction = Both
-    ),
-    cmd_desc!(
-        Command::Order,
-        30,
-        "TDoMarketSplitPositionCommand",
-        base = Market,
-        priority = High,
-        retries = Some(1),
-        unique = UK_NONE,
-        ukey = UKeyRule::None,
-        direction = Outbound
-    ),
+    // CmdId 27..30 are permanently retired OrdersProto v1 commands.
     cmd_desc!(
         Command::Order,
         31,
@@ -562,6 +344,71 @@ pub(crate) const ORDER_COMMANDS: &[CommandDescriptor] = &[
         "TRepCheckRowsRequest",
         base = Base,
         priority = High,
+        direction = Outbound
+    ),
+    cmd_desc!(
+        Command::Order,
+        41,
+        "TOrderImage",
+        base = Base,
+        priority = High,
+        unique = UK_ORDER_IMAGE,
+        direction = Inbound
+    ),
+    cmd_desc!(
+        Command::Order,
+        42,
+        "TOrderPatch",
+        base = Base,
+        priority = High,
+        unique = UK_ORDER_PATCH,
+        direction = Inbound
+    ),
+    cmd_desc!(
+        Command::Order,
+        43,
+        "TOrdersSnapshot",
+        base = Base,
+        priority = Sliced,
+        unique = UK_ORDERS_SNAPSHOT,
+        direction = Inbound
+    ),
+    cmd_desc!(
+        Command::Order,
+        44,
+        "TOrdersCatalog",
+        base = Base,
+        priority = Sliced,
+        unique = UK_ORDERS_CATALOG,
+        direction = Inbound
+    ),
+    cmd_desc!(
+        Command::Order,
+        45,
+        "TOrderStatusRequest",
+        base = Base,
+        priority = High,
+        unique = UK_ORDER_REQUEST,
+        direction = Outbound
+    ),
+    cmd_desc!(
+        Command::Order,
+        46,
+        "TOrderNotFound",
+        base = Base,
+        priority = High,
+        unique = UK_ORDER_NOT_FOUND,
+        direction = Inbound
+    ),
+    cmd_desc!(
+        Command::Order,
+        47,
+        "TOrderCommand",
+        base = Base,
+        priority = High,
+        retries = Some(4),
+        unique = UK_NONE,
+        ukey = UKeyRule::Explicit,
         direction = Outbound
     ),
 ];
@@ -789,6 +636,25 @@ pub(crate) const UI_COMMANDS: &[CommandDescriptor] = &[
         base = Base,
         priority = High,
         direction = Outbound
+    ),
+    cmd_desc!(
+        Command::UI,
+        26,
+        "TNewsRelayCommand",
+        base = Base,
+        priority = High,
+        direction = Inbound
+    ),
+    cmd_desc!(
+        Command::UI,
+        27,
+        "TNewsHistoryCommand",
+        base = Base,
+        priority = Sliced,
+        retries = None,
+        unique = UK_NEWS_HISTORY,
+        ukey = UKeyRule::SendContextClientId,
+        direction = Inbound
     ),
 ];
 
@@ -1086,11 +952,21 @@ mod tests {
 
     #[test]
     fn descriptor_map_covers_known_typed_domains() {
-        assert_eq!(ORDER_COMMANDS.len(), 39);
-        assert_eq!(UI_COMMANDS.len(), 26);
+        assert_eq!(ORDER_COMMANDS.len(), 21);
+        assert_eq!(UI_COMMANDS.len(), 28);
         assert_eq!(STRAT_COMMANDS.len(), 11);
         assert_eq!(BALANCE_COMMANDS.len(), 7);
         assert_eq!(API_COMMANDS.len(), 4);
+    }
+
+    #[test]
+    fn descriptor_map_keeps_retired_order_ids_unregistered() {
+        for id in (2..=22).chain(27..=30) {
+            assert!(
+                find_descriptor(Command::Order, id).is_none(),
+                "retired order command id {id} must stay unregistered"
+            );
+        }
     }
 
     #[test]
@@ -1099,9 +975,10 @@ mod tests {
         assert_eq!(settings.priority, CommandPriority::Sliced);
         assert_eq!(settings.max_retries, 6);
 
-        let close = find_descriptor(Command::Order, 14).unwrap();
-        assert_eq!(close.priority, CommandPriority::High);
-        assert_eq!(close.max_retries, 1);
+        let order_command = find_descriptor(Command::Order, 47).unwrap();
+        assert_eq!(order_command.priority, CommandPriority::High);
+        assert_eq!(order_command.max_retries, 4);
+        assert_eq!(order_command.ukey, UKeyRule::Explicit);
 
         let balance_refresh = find_descriptor(Command::Balance, 5).unwrap();
         assert_eq!(balance_refresh.priority, CommandPriority::High);
@@ -1139,9 +1016,9 @@ mod tests {
         assert_eq!(mm.unique_kind, UK_TURN_MM_DETECTION);
         assert_eq!(mm.ukey, UKeyRule::HeaderUid);
 
-        let replace = find_descriptor(Command::Order, 6).unwrap();
-        assert_eq!(replace.unique_kind, UK_ORDER_MOVE);
-        assert_eq!(replace.ukey, UKeyRule::TradeEpochUid);
+        let order_command = find_descriptor(Command::Order, 47).unwrap();
+        assert_eq!(order_command.unique_kind, UK_NONE);
+        assert_eq!(order_command.ukey, UKeyRule::Explicit);
 
         let settings = find_descriptor(Command::UI, 1).unwrap();
         assert_eq!(settings.unique_kind, UK_BASE_UI_SETTINGS);
@@ -1149,21 +1026,20 @@ mod tests {
     }
 
     #[test]
-    fn order_move_stops_and_vstop_have_distinct_delphi_unique_kinds() {
-        let replace = find_descriptor(Command::Order, 6).unwrap();
-        let cancel = find_descriptor(Command::Order, 10).unwrap();
-        let stops = find_descriptor(Command::Order, 20).unwrap();
-        let panic_sell = find_descriptor(Command::Order, 21).unwrap();
-        let vstop = find_descriptor(Command::Order, 29).unwrap();
-
-        assert_eq!(replace.unique_kind, UK_ORDER_MOVE);
-        assert_eq!(cancel.unique_kind, UK_ORDER_MOVE);
-        assert_eq!(panic_sell.unique_kind, UK_ORDER_MOVE);
-        assert_eq!(stops.unique_kind, UK_STOP_MOVE);
-        assert_eq!(vstop.unique_kind, UK_VSTOP_MOVE);
-        assert_ne!(UK_ORDER_MOVE, UK_STOP_MOVE);
-        assert_ne!(UK_ORDER_MOVE, UK_VSTOP_MOVE);
-        assert_ne!(UK_STOP_MOVE, UK_VSTOP_MOVE);
+    fn order_command_groups_have_distinct_unique_kinds() {
+        let kinds = [
+            UK_ORDER_CMD_BUY,
+            UK_ORDER_CMD_SELL,
+            UK_ORDER_CMD_STOPS,
+            UK_ORDER_CMD_VSTOP,
+            UK_ORDER_CMD_PANIC,
+            UK_ORDER_CMD_IMMUNE,
+        ];
+        let unique: HashSet<_> = kinds.into_iter().collect();
+        assert_eq!(unique.len(), kinds.len());
+        for kind in kinds {
+            assert_ne!(kind, UK_NONE);
+        }
     }
 
     #[test]

@@ -1,10 +1,9 @@
-//! Fixed packed records used by the `MPC_Order` channel.
+//! Public order projection values and the fixed stop-settings wire record.
 //!
-//! The core reads/writes these as fixed-size packed records. Public Rust
-//! structs keep ergonomic fields; private `Wire*` structs mirror the packed
-//! wire layout with compile-time size checks.
+//! Canonical order images are decoded in `order_v2`; only `StopSettings` still
+//! needs a private packed mirror because it is also an outbound command value.
 
-use zerocopy::byteorder::little_endian::{F32 as LeF32, F64 as LeF64, I64 as LeI64, U64 as LeU64};
+use zerocopy::byteorder::little_endian::F64 as LeF64;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 use super::enums::{OrderSubType, OrderType};
@@ -65,64 +64,14 @@ impl From<DelphiBool> for bool {
     }
 }
 
-/// TPriceZone (Vars.pas:73) — packed record: `MinP, MaxP: double`.
+/// Inclusive price interval used by bulk sell moves.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PriceZone {
     pub min_p: f64,
     pub max_p: f64,
 }
 
-#[repr(C, packed)]
-#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
-struct WirePriceZone {
-    min_p: LeF64,
-    max_p: LeF64,
-}
-
-pub(super) const PRICE_ZONE_SIZE: usize = std::mem::size_of::<WirePriceZone>();
-const _: [(); 16] = [(); PRICE_ZONE_SIZE];
-
-impl PriceZone {
-    fn from_wire(wire: WirePriceZone) -> Self {
-        Self {
-            min_p: wire.min_p.get(),
-            max_p: wire.max_p.get(),
-        }
-    }
-
-    fn to_wire(self) -> WirePriceZone {
-        WirePriceZone {
-            min_p: LeF64::new(self.min_p),
-            max_p: LeF64::new(self.max_p),
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) fn from_bytes(data: &[u8]) -> Option<Self> {
-        if data.len() < PRICE_ZONE_SIZE {
-            return None;
-        }
-        Some(Self::from_wire(
-            WirePriceZone::read_from_bytes(&data[..PRICE_ZONE_SIZE]).ok()?,
-        ))
-    }
-
-    pub(super) fn read_from_delphi_stream(r: &mut &[u8]) -> Self {
-        let bytes = read_zero_tail::<PRICE_ZONE_SIZE>(r);
-        let wire = WirePriceZone::read_from_bytes(&bytes).expect("fixed in-memory price zone");
-        Self::from_wire(wire)
-    }
-
-    pub(super) fn write_to(self, out: &mut Vec<u8>) {
-        out.extend_from_slice(self.to_wire().as_bytes());
-    }
-}
-
-/// Exchange-side order leg retained inside a tracked order.
-///
-/// On the wire this is a 117-byte packed order-leg record. The public type name
-/// describes the terminal meaning; `OrderCompact` remains only as an internal
-/// protocol alias for parity tests and packet readers.
+/// Exchange-side order leg materialized from canonical order sections.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ExchangeOrder {
     pub int_id: i64,
@@ -162,121 +111,7 @@ pub struct ExchangeOrder {
     pub(crate) is_short: DelphiBool,
 }
 
-pub(crate) type OrderCompact = ExchangeOrder;
-
-#[repr(C, packed)]
-#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
-struct WireOrderCompact {
-    int_id: LeI64,
-    quantity: LeF64,
-    quantity_remaining: LeF64,
-    total_btc: LeF64,
-    spent_btc: LeF64,
-    open_time: LeF64,
-    close_time: LeF64,
-    actual_price: LeF64,
-    mean_price: LeF64,
-    quantity_base: LeF64,
-    actual_q: LeF64,
-    tmp_btc: LeF64,
-    create_time: LeF64,
-    panic_sell_down: LeF32,
-    order_type: u8,
-    sub_type: u8,
-    stop_flag: u8,
-    partial_done: u8,
-    leverage: u8,
-    is_opened: u8,
-    is_closed: u8,
-    canceled: u8,
-    is_short: u8,
-}
-
-/// Compact order-leg wire size: 13×8 + 4 + 9×1 = 117 bytes.
-pub(crate) const ORDER_COMPACT_SIZE: usize = std::mem::size_of::<WireOrderCompact>();
-const _: [(); 117] = [(); ORDER_COMPACT_SIZE];
-
 impl ExchangeOrder {
-    fn from_wire(wire: WireOrderCompact) -> Self {
-        Self {
-            int_id: wire.int_id.get(),
-            quantity: wire.quantity.get(),
-            quantity_remaining: wire.quantity_remaining.get(),
-            total_btc: wire.total_btc.get(),
-            spent_btc: wire.spent_btc.get(),
-            open_time: wire.open_time.get(),
-            close_time: wire.close_time.get(),
-            actual_price: wire.actual_price.get(),
-            mean_price: wire.mean_price.get(),
-            quantity_base: wire.quantity_base.get(),
-            actual_q: wire.actual_q.get(),
-            tmp_btc: wire.tmp_btc.get(),
-            create_time: wire.create_time.get(),
-            panic_sell_down: wire.panic_sell_down.get(),
-            order_type: OrderType::from_byte(wire.order_type),
-            sub_type: OrderSubType::from_byte(wire.sub_type),
-            stop_flag: wire.stop_flag,
-            partial_done: wire.partial_done,
-            leverage: wire.leverage,
-            is_opened: DelphiBool::from_byte(wire.is_opened),
-            is_closed: DelphiBool::from_byte(wire.is_closed),
-            canceled: DelphiBool::from_byte(wire.canceled),
-            is_short: DelphiBool::from_byte(wire.is_short),
-        }
-    }
-
-    fn to_wire(self) -> WireOrderCompact {
-        WireOrderCompact {
-            int_id: LeI64::new(self.int_id),
-            quantity: LeF64::new(self.quantity),
-            quantity_remaining: LeF64::new(self.quantity_remaining),
-            total_btc: LeF64::new(self.total_btc),
-            spent_btc: LeF64::new(self.spent_btc),
-            open_time: LeF64::new(self.open_time),
-            close_time: LeF64::new(self.close_time),
-            actual_price: LeF64::new(self.actual_price),
-            mean_price: LeF64::new(self.mean_price),
-            quantity_base: LeF64::new(self.quantity_base),
-            actual_q: LeF64::new(self.actual_q),
-            tmp_btc: LeF64::new(self.tmp_btc),
-            create_time: LeF64::new(self.create_time),
-            panic_sell_down: LeF32::new(self.panic_sell_down),
-            order_type: self.order_type.to_byte(),
-            sub_type: self.sub_type.to_byte(),
-            stop_flag: self.stop_flag,
-            partial_done: self.partial_done,
-            leverage: self.leverage,
-            is_opened: self.is_opened.to_byte(),
-            is_closed: self.is_closed.to_byte(),
-            canceled: self.canceled.to_byte(),
-            is_short: self.is_short.to_byte(),
-        }
-    }
-
-    #[cfg(any(test, feature = "diagnostics"))]
-    #[doc(hidden)]
-    pub fn from_bytes(data: &[u8]) -> Option<Self> {
-        if data.len() < ORDER_COMPACT_SIZE {
-            return None;
-        }
-        Some(Self::from_wire(
-            WireOrderCompact::read_from_bytes(&data[..ORDER_COMPACT_SIZE]).ok()?,
-        ))
-    }
-
-    pub(super) fn read_from_delphi_stream(r: &mut &[u8]) -> Self {
-        let bytes = read_zero_tail::<ORDER_COMPACT_SIZE>(r);
-        let wire =
-            WireOrderCompact::read_from_bytes(&bytes).expect("fixed in-memory order compact");
-        Self::from_wire(wire)
-    }
-
-    #[cfg(any(test, feature = "diagnostics"))]
-    #[doc(hidden)]
-    pub fn write_to(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(self.to_wire().as_bytes());
-    }
-
     pub fn open_time(self) -> MoonTime {
         MoonTime::from_delphi_days(self.open_time).unwrap_or(MoonTime::ZERO)
     }
@@ -568,146 +403,11 @@ impl StopSettings {
     }
 }
 
-/// `TOrderUpdateData` (MarketsU.pas:263), 66-byte packed record.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct OrderUpdateData {
-    pub int_id: i64,
-    pub actual_price: f64,
-    pub open_time: f64,
-    pub quantity: f64,
-    pub quantity_remaining: f64,
-    pub actual_q: f64,
-    pub total_btc: f64,
-    pub mean_price: f64,
-    pub partial_done: u8,
-    pub stop_flag: u8,
-}
-
-#[repr(C, packed)]
-#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
-struct WireOrderUpdateData {
-    int_id: LeI64,
-    actual_price: LeF64,
-    open_time: LeF64,
-    quantity: LeF64,
-    quantity_remaining: LeF64,
-    actual_q: LeF64,
-    total_btc: LeF64,
-    mean_price: LeF64,
-    partial_done: u8,
-    stop_flag: u8,
-}
-
-pub(crate) const ORDER_UPDATE_DATA_SIZE: usize = std::mem::size_of::<WireOrderUpdateData>();
-const _: [(); 66] = [(); ORDER_UPDATE_DATA_SIZE];
-
-impl OrderUpdateData {
-    fn from_wire(wire: WireOrderUpdateData) -> Self {
-        Self {
-            int_id: wire.int_id.get(),
-            actual_price: wire.actual_price.get(),
-            open_time: wire.open_time.get(),
-            quantity: wire.quantity.get(),
-            quantity_remaining: wire.quantity_remaining.get(),
-            actual_q: wire.actual_q.get(),
-            total_btc: wire.total_btc.get(),
-            mean_price: wire.mean_price.get(),
-            partial_done: wire.partial_done,
-            stop_flag: wire.stop_flag,
-        }
-    }
-
-    fn to_wire(self) -> WireOrderUpdateData {
-        WireOrderUpdateData {
-            int_id: LeI64::new(self.int_id),
-            actual_price: LeF64::new(self.actual_price),
-            open_time: LeF64::new(self.open_time),
-            quantity: LeF64::new(self.quantity),
-            quantity_remaining: LeF64::new(self.quantity_remaining),
-            actual_q: LeF64::new(self.actual_q),
-            total_btc: LeF64::new(self.total_btc),
-            mean_price: LeF64::new(self.mean_price),
-            partial_done: self.partial_done,
-            stop_flag: self.stop_flag,
-        }
-    }
-
-    #[cfg(any(test, feature = "diagnostics"))]
-    #[doc(hidden)]
-    pub fn from_bytes(data: &[u8]) -> Option<Self> {
-        if data.len() < ORDER_UPDATE_DATA_SIZE {
-            return None;
-        }
-        Some(Self::from_wire(
-            WireOrderUpdateData::read_from_bytes(&data[..ORDER_UPDATE_DATA_SIZE]).ok()?,
-        ))
-    }
-
-    pub(super) fn read_from_delphi_stream(r: &mut &[u8]) -> Self {
-        let bytes = read_zero_tail::<ORDER_UPDATE_DATA_SIZE>(r);
-        let wire =
-            WireOrderUpdateData::read_from_bytes(&bytes).expect("fixed in-memory order update");
-        Self::from_wire(wire)
-    }
-
-    #[cfg(any(test, feature = "diagnostics"))]
-    #[doc(hidden)]
-    pub fn write_to(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(self.to_wire().as_bytes());
-    }
-
-    pub fn open_time(self) -> MoonTime {
-        MoonTime::from_delphi_days(self.open_time).unwrap_or(MoonTime::ZERO)
-    }
-
-    #[cfg(any(test, feature = "diagnostics"))]
-    #[doc(hidden)]
-    pub fn open_time_delphi(self) -> DelphiTime {
-        DelphiTime::from_days(self.open_time)
-    }
-
-    pub fn adjust_time(&mut self, delta: f64) {
-        if self.open_time > 1.0 {
-            self.open_time -= delta;
-        }
-    }
-}
-
-/// TImmuneItem (TradeStruct.pas:210, packed) — UID:u64 + Value:bool.
+/// One explicit immune-clicks update intent.
 #[derive(Debug, Clone, Copy)]
 pub struct ImmuneItem {
     pub uid: u64,
     pub value: bool,
-}
-
-#[repr(C, packed)]
-#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
-struct WireImmuneItem {
-    uid: LeU64,
-    value: u8,
-}
-
-pub(super) const IMMUNE_ITEM_SIZE: usize = std::mem::size_of::<WireImmuneItem>();
-const _: [(); 9] = [(); IMMUNE_ITEM_SIZE];
-
-impl ImmuneItem {
-    fn from_wire(wire: WireImmuneItem) -> Self {
-        Self {
-            uid: wire.uid.get(),
-            value: wire.value != 0,
-        }
-    }
-
-    fn to_wire(self) -> WireImmuneItem {
-        WireImmuneItem {
-            uid: LeU64::new(self.uid),
-            value: self.value as u8,
-        }
-    }
-
-    pub(super) fn write_to(self, out: &mut Vec<u8>) {
-        out.extend_from_slice(self.to_wire().as_bytes());
-    }
 }
 
 pub(super) fn read_zero_tail<const N: usize>(r: &mut &[u8]) -> [u8; N] {
@@ -724,28 +424,10 @@ pub(super) fn read_u8_zero_tail(r: &mut &[u8]) -> u8 {
     read_zero_tail::<1>(r)[0]
 }
 
-pub(super) fn read_u16_zero_tail(r: &mut &[u8]) -> u16 {
-    u16::from_le_bytes(read_zero_tail::<2>(r))
-}
-
-pub(super) fn read_i32_zero_tail(r: &mut &[u8]) -> i32 {
-    i32::from_le_bytes(read_zero_tail::<4>(r))
-}
-
-pub(super) fn read_u64_zero_tail(r: &mut &[u8]) -> u64 {
-    u64::from_le_bytes(read_zero_tail::<8>(r))
-}
-
 pub(super) fn read_f32_zero_tail(r: &mut &[u8]) -> f32 {
     f32::from_le_bytes(read_zero_tail::<4>(r))
 }
 
 pub(super) fn read_f64_zero_tail(r: &mut &[u8]) -> f64 {
     f64::from_le_bytes(read_zero_tail::<8>(r))
-}
-
-pub(super) fn read_immune_item_zero_tail(r: &mut &[u8]) -> ImmuneItem {
-    let bytes = read_zero_tail::<IMMUNE_ITEM_SIZE>(r);
-    let wire = WireImmuneItem::read_from_bytes(&bytes).expect("fixed in-memory immune item");
-    ImmuneItem::from_wire(wire)
 }

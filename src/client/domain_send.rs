@@ -47,52 +47,47 @@ impl Client {
         self.send_typed_domain_cmd(payload, Command::Order)
     }
 
-    /// `send_trade` with a UniqueKey — for commands carrying the `[MoonCmdUnique(UK_*)]` attribute.
-    /// Older pending commands with the same UKey are removed from `self.sending`/`self.pending_h`
-    /// (matches Delphi SendCmdInt:780-785 + CheckSendingData).
     pub(super) fn send_trade_keyed(&self, payload: Vec<u8>, u_key: UniqueKey) -> bool {
         self.send_typed_domain_cmd_keyed(payload, Command::Order, u_key)
     }
 
-    pub(crate) fn send_order_cancel_request(&self, request: crate::state::orders::OrderCancelSend) {
-        match request {
-            crate::state::orders::OrderCancelSend::PendingReplaceThenCancel {
-                ctx,
-                market,
-                price,
-            } => {
-                let replace = crate::commands::trade::build_order_replace(
-                    ctx,
-                    &market,
-                    crate::commands::trade::OrderType::Buy,
-                    price,
-                );
-                self.send_trade_keyed(replace, UniqueKey::order_move(ctx.uid));
-                let cancel = crate::commands::trade::build_order_cancel(
-                    ctx,
-                    &market,
-                    0,
-                    crate::commands::trade::OrderWorkerStatus::None,
-                );
-                self.send_trade_keyed(cancel, UniqueKey::order_move(ctx.uid));
-            }
-            crate::state::orders::OrderCancelSend::Cancel {
-                ctx,
-                market,
-                status,
-            } => {
-                let raw = crate::commands::trade::build_order_cancel(ctx, &market, 0, status);
-                self.send_trade_keyed(raw, UniqueKey::order_move(ctx.uid));
-            }
-        }
+    pub(super) fn send_order_command_at(
+        &self,
+        envelope_uid: u64,
+        payload: crate::commands::trade::OrderCommandPayload,
+    ) -> bool {
+        let u_key = order_command_u_key(&payload);
+        let raw = crate::commands::trade::build_order_command(envelope_uid, payload);
+        self.send_trade_keyed(raw, u_key)
     }
 
-    pub(super) fn send_panic_sell_request(&self, request: crate::state::orders::PanicSellSend) {
-        let raw = crate::commands::trade::build_turn_panic_sell(
-            request.ctx,
-            &request.market,
-            request.turn_on,
-        );
-        self.send_trade_keyed(raw, UniqueKey::order_move(request.ctx.uid));
+    pub(super) fn send_order_command_payload(
+        &self,
+        payload: crate::commands::trade::OrderCommandPayload,
+    ) -> bool {
+        let envelope_uid = if payload.group().is_some() || payload.is_move_all() {
+            crate::commands::trade::next_order_action_id()
+        } else {
+            random_nonzero_u64()
+        };
+        self.send_order_command_at(envelope_uid, payload)
+    }
+}
+
+pub(super) fn order_command_u_key(
+    payload: &crate::commands::trade::OrderCommandPayload,
+) -> UniqueKey {
+    match (payload.group(), payload.order_id()) {
+        (Some(group), Some(order_id)) => UniqueKey::order_command(group.unique_kind(), order_id),
+        _ => UniqueKey::none(),
+    }
+}
+
+fn random_nonzero_u64() -> u64 {
+    loop {
+        let value = rand::random();
+        if value != 0 {
+            return value;
+        }
     }
 }

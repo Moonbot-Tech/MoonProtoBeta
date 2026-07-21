@@ -2,8 +2,25 @@
 
 use super::{MarketPositionProtection, Order, Orders, PositionProtectionSide};
 use crate::commands::trade::{OrderWorkerStatus, PositionFilter};
+use std::sync::Arc;
 
 impl Orders {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Clear an application-owned read model.
+    pub fn clear(&mut self) {
+        self.map.clear();
+    }
+
+    /// Remove one order from an application-owned read model.
+    pub fn remove(&mut self, uid: u64) -> Option<Order> {
+        self.map
+            .remove(&uid)
+            .map(|order| Arc::try_unwrap(order).unwrap_or_else(|order| (*order).clone()))
+    }
+
     /// Get one order by UID.
     pub fn get(&self, uid: u64) -> Option<&Order> {
         self.map.get(&uid).map(AsRef::as_ref)
@@ -21,11 +38,6 @@ impl Orders {
 
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
-    }
-
-    /// Current snapshot flag value.
-    pub fn current_snapshot_flag(&self) -> u8 {
-        self.current_snapshot_flag
     }
 
     /// Total active closing sell quantity for one market and position side.

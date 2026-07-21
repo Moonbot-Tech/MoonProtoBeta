@@ -29,6 +29,8 @@ polling = "3.11.0"
 parking_lot = { version = "0.12", features = ["arc_lock"] }
 crc32c = "0.6"
 zeroize = "1.8"
+sysinfo = "0.33.1"
+im = "15.1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

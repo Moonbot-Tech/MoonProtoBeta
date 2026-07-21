@@ -43,16 +43,11 @@ impl Client {
         self.identity.auth_info = Some(info);
     }
 
-    /// Build a trade command context from the active server route.
+    /// Build the legacy market-command context from the active server route.
     ///
-    /// This is the recommended path for market-level trade commands such as
-    /// [`Self::new_order`], [`Self::move_all_sells`], or position close/split
-    /// commands. It uses `ServerInfo::base_currency_code` and
-    /// `ServerInfo::exchange_code`, which are filled during Init.
-    ///
-    /// Existing-order actions should usually use the `*_tracked_order` wrappers
-    /// instead, because they derive the route and current status from
-    /// `EventDispatcher::orders()` state.
+    /// Canonical v4 order actions serialize a market name or server order UID
+    /// and do not use this record. It remains for the legacy `Penalty` packet,
+    /// whose market header still carries BaseCheck currency/exchange bytes.
     pub(crate) fn trade_ctx(
         &self,
         uid: u64,
@@ -71,25 +66,17 @@ impl Client {
         }
     }
 
-    /// Build a session-derived trade context with a random command UID.
-    ///
-    /// Use this for client-originated market commands where the UID only needs to
-    /// be unique for the outgoing command. For actions on an existing order,
-    /// prefer tracked-order wrappers because their UID must be the server order
-    /// task id.
+    /// Build a legacy market-command context with a random command UID.
     pub(crate) fn random_trade_ctx(
         &self,
     ) -> Result<crate::commands::trade::TradeCtx, TradeContextError> {
         self.trade_ctx(rand::random())
     }
 
-    /// Whether the active server route already has the fields required for
-    /// market-level trade commands: `exchange_code` and `base_currency_code`,
-    /// both learned from `emk_BaseCheck`.
+    /// Whether the active server route already has the fields required for the
+    /// legacy `Penalty` market header.
     ///
-    /// `Ok(())` means [`Self::trade_ctx`] / [`Self::new_order`] can build a route
-    /// now; `Err` names the missing field(s). This is the cheap predicate to gate
-    /// a UI trade affordance without constructing and discarding a `TradeCtx`.
+    /// `Err` names the missing BaseCheck field(s).
     #[cfg(test)]
     pub(crate) fn trade_route_status(&self) -> Result<(), TradeContextError> {
         match TradeContextError::from_server_info(&self.identity.server_info) {
@@ -98,8 +85,7 @@ impl Client {
         }
     }
 
-    /// `true` when [`Self::trade_route_status`] is `Ok` — the session learned the
-    /// route fields needed for market-level trade commands.
+    /// `true` when the session learned the legacy market-header route fields.
     #[cfg(test)]
     pub(crate) fn is_ready_to_trade(&self) -> bool {
         self.trade_route_status().is_ok()

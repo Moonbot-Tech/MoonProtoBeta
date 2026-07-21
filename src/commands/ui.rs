@@ -92,6 +92,16 @@ const CMD_KERNEL_LICENSE_STATE: u8 = 22;
 const CMD_KERNEL_LICENSE_STATE_REQUEST: u8 = 23;
 const CMD_PROFIT_STATE: u8 = 24;
 const CMD_AUTO_DETECT: u8 = 25;
+const CMD_NEWS_RELAY: u8 = 26;
+const CMD_NEWS_HISTORY: u8 = 27;
+
+pub(crate) const NEWS_RELAY_KIND_NEWS: u8 = 0;
+pub(crate) const NEWS_RELAY_KIND_TAGS: u8 = 1;
+
+#[inline]
+pub(crate) fn is_news_payload(payload: &[u8]) -> bool {
+    matches!(payload.first(), Some(&CMD_NEWS_RELAY | &CMD_NEWS_HISTORY))
+}
 
 #[inline]
 pub(crate) fn is_runtime_state_payload(payload: &[u8]) -> bool {
@@ -1216,6 +1226,18 @@ pub struct AutoDetectCommand {
     pub active: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NewsRelayCommand {
+    pub(crate) kind: u8,
+    pub(crate) data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NewsHistoryCommand {
+    pub(crate) frames: Vec<Vec<u8>>,
+    pub(crate) tags: Vec<u8>,
+}
+
 /// Trigger-management action used by
 /// [`crate::MoonSettings::set_triggers_for_markets`],
 /// [`crate::MoonSettings::clear_triggers_for_markets`], and the all-market
@@ -1611,6 +1633,8 @@ pub enum UICommand {
     },
     ProfitState(ProfitStateCommand),
     AutoDetect(AutoDetectCommand),
+    NewsRelay(NewsRelayCommand),
+    NewsHistory(NewsHistoryCommand),
     /// Command header is well-formed, but the command version is newer than
     /// this library can parse. The command is skipped without state changes.
     Skipped {

@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// Build CmdId=1 `TClientSettingsCommand`. The version is written as `CURRENT_PROTO_CMD_VER` (v3),
+/// Build CmdId=1 `TClientSettingsCommand`. The version is written as `CURRENT_PROTO_CMD_VER` (v4),
 /// so BuyIceberg/SellIceberg/SignOrders **always** go on the wire.
 #[doc(hidden)]
 pub(crate) fn build_client_settings(cmd: &ClientSettingsCommand) -> Vec<u8> {

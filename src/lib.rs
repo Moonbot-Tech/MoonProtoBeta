@@ -227,8 +227,8 @@ pub use key_import::{
 pub use protocol::Command;
 pub use state::{
     ChartAlertEvent, ChartAlertObject, ChartAlertsState, ChartTextSnapshot, ChartTextState,
-    CoinCardCandlesEvent, CoinCardCandlesState, ExchangeKind, TransferAssetsEvent,
-    TransferAssetsState,
+    CoinCardCandlesEvent, CoinCardCandlesState, ExchangeKind, KernelHealth, NewsEvent, NewsState,
+    TransferAssetsEvent, TransferAssetsState,
 };
 pub use state::{
     ReportEvent, ReportFieldKind, ReportFieldValue, ReportHistoryDepth, ReportRow, ReportSchema,

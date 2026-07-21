@@ -1,7 +1,7 @@
 //! Order read-model and action/event types.
 
 use super::model::Order;
-use crate::commands::trade::{OrderType, OrderWorkerStatus, PositionFilter, TradeCtx};
+use crate::commands::trade::{OrderType, PositionFilter};
 #[cfg(any(test, feature = "diagnostics"))]
 use crate::time::DelphiTime;
 use crate::MoonTime;
@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 /// Order close reason byte used by the MoonBot order stream.
 ///
-/// The server may set this byte in `OrderStatusUpdate.sell_reason_code`.
+/// The core publishes this value in the canonical order `FLAGS` section.
 /// Active Lib updates the local sell reason only when the code is non-zero and
 /// differs from the previous value. Unknown bytes are preserved and display as
 /// `Unknown`.
@@ -95,27 +95,6 @@ impl std::fmt::Debug for SellReason {
             write!(f, "Unknown({})", self.0)
         }
     }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum OrderCancelSend {
-    PendingReplaceThenCancel {
-        ctx: TradeCtx,
-        market: String,
-        price: f64,
-    },
-    Cancel {
-        ctx: TradeCtx,
-        market: String,
-        status: OrderWorkerStatus,
-    },
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct PanicSellSend {
-    pub ctx: TradeCtx,
-    pub market: String,
-    pub turn_on: bool,
 }
 
 /// One side of the chart "unprotected position" calculation.
@@ -284,17 +263,9 @@ impl OrderTraceLine {
 }
 
 /// Result of applying one order command.
-#[allow(unreachable_pub)]
+#[cfg(any(test, feature = "diagnostics"))]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ApplyResult {
-    /// Command was applied and state changed.
-    Applied,
-    /// Command is stale for this status epoch.
-    OutOfOrder,
-    /// A non-full command belongs to a different worker phase.
-    PhaseMismatch,
-    /// Order was not found in state.
-    OrderNotFound,
     /// Command is not applicable to order state.
     NotApplicable,
 }
@@ -306,22 +277,14 @@ pub enum OrderEvent {
     Created(Arc<Order>),
     /// An existing order changed.
     Updated(Arc<Order>),
-    /// Order was removed after deferred terminal cleanup / `TOrderNotFound`.
+    /// Order left retained state after terminal cleanup, `TOrderNotFound`, or
+    /// an application-world reset.
     Removed(Arc<Order>),
-    /// Bulk replace notification.
-    BulkReplaced {
-        order_type: OrderType,
-        uids: Vec<u64>,
-    },
     /// Trace point was added.
     TracePoint { uid: u64 },
     /// Corridor state changed.
     CorridorChanged(u64),
-    /// VStop state changed.
-    VStopChanged(u64),
-    /// Stop settings changed.
-    StopsChanged(u64),
-    /// `TAllStatuses` snapshot was applied.
+    /// A canonical snapshot/catalog page was applied.
     Snapshot,
     /// Command was ignored by the low-level order state machine.
     #[cfg(any(test, feature = "diagnostics"))]
@@ -333,23 +296,17 @@ impl OrderEvent {
     pub fn uid(&self) -> Option<u64> {
         match self {
             Self::Created(order) | Self::Updated(order) | Self::Removed(order) => Some(order.uid),
-            Self::TracePoint { uid }
-            | Self::CorridorChanged(uid)
-            | Self::VStopChanged(uid)
-            | Self::StopsChanged(uid) => Some(*uid),
+            Self::TracePoint { uid } | Self::CorridorChanged(uid) => Some(*uid),
             #[cfg(any(test, feature = "diagnostics"))]
             Self::Ignored { uid, .. } => Some(*uid),
-            Self::BulkReplaced { .. } | Self::Snapshot => None,
+            Self::Snapshot => None,
         }
     }
 
     pub fn changed_uid(&self) -> Option<u64> {
         match self {
             Self::Created(order) | Self::Updated(order) => Some(order.uid),
-            Self::TracePoint { uid }
-            | Self::CorridorChanged(uid)
-            | Self::VStopChanged(uid)
-            | Self::StopsChanged(uid) => Some(*uid),
+            Self::TracePoint { uid } | Self::CorridorChanged(uid) => Some(*uid),
             _ => None,
         }
     }

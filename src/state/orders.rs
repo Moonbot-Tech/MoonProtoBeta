@@ -1,26 +1,6 @@
-//! Orders sync state — applies inbound `TBaseTradeCommand` values to the local
-//! active order read-model.
-//!
-//! ## Module Role
-//!
-//! This is the client-side mirror of server order workers: inbound commands are
-//! applied to retained order state and produce typed events. Active Lib keeps
-//! the retained order cache and cleanup/status-recovery behavior internally.
-//!
-//! Supported behavior:
-//! - One server-worker epoch watermark with full-status baselining.
-//! - Full-status-only phase transitions and phase-gated delta updates.
-//! - Independent replace-state and replace-ack epoch judges.
-//! - Snapshot flag mechanism (`current_snapshot_flag` is incremented on
-//!   `TAllStatuses`; orders without the fresh flag are returned by
-//!   `missing_after_snapshot()`).
-//! - BulkReplace tracking.
-//! - Trace line chart state.
-//! - Corridor state.
-//! - VStop state.
-//! - Deferred removal on terminal statuses / `TOrderNotFound`.
-//! - `ServerTimeDelta` correction for all `TDateTime` fields.
+//! Canonical protocol-v4 order replica and terminal-facing order projection.
 
+use crate::commands::market::{BaseCurrency, ExchangeCode};
 use crate::commands::trade::*;
 use crate::state::eps::EpsProfile;
 use std::collections::HashMap;
@@ -33,71 +13,57 @@ mod maintenance;
 mod model;
 mod types;
 
-use self::apply_helpers::ServerEpochCommandKind;
-
 pub use self::model::Order;
 #[cfg(any(test, feature = "diagnostics"))]
 #[doc(hidden)]
 pub use self::types::ApplyResult;
-#[cfg(not(any(test, feature = "diagnostics")))]
-pub(crate) use self::types::ApplyResult;
 pub use self::types::{
     MarketPositionProtection, OrderEvent, OrderTraceChartPoint, OrderTraceLine,
     PositionProtectionSide, SellReason,
 };
-pub(crate) use self::types::{OrderCancelSend, PanicSellSend};
 
-const BULK_REPLACE_TIMEOUT_MS: i64 = 5000;
+const TARGET_CONFIRM_TIMEOUT_MS: i64 = 5_000;
 const SELL_DONE_REMOVAL_GRACE_MS: i64 = 400;
-const PENDING_CANCEL_REPEAT_MS: i64 = 32;
 const ORDER_TRACE_LINE_SHRINK_TO: usize = 800;
 const ORDER_TRACE_LINE_SHRINK_INTERVAL_MS: i64 = 30_000;
 const ORDER_TOMBSTONE_COUNT: usize = 128;
-
-use super::epoch::epoch_is_ok;
 
 fn order_type_uses_buy_side(order_type: OrderType) -> bool {
     order_type == OrderType::Buy
 }
 
-fn terminal_removal_delay_ms(status: OrderWorkerStatus) -> i64 {
-    if status == OrderWorkerStatus::SellDone {
-        SELL_DONE_REMOVAL_GRACE_MS
-    } else {
-        0
+#[derive(Debug, Clone)]
+struct OrderMirror {
+    desc: OrderDescription,
+    state: CanonicalOrderState,
+    seen_rev: [u64; ORDER_SECTION_COUNT],
+    expected_hash: u32,
+}
+
+impl OrderMirror {
+    fn new(desc: OrderDescription) -> Self {
+        Self {
+            desc,
+            state: CanonicalOrderState::default(),
+            seen_rev: [0; ORDER_SECTION_COUNT],
+            expected_hash: 0,
+        }
+    }
+
+    fn replica_rev(&self) -> u64 {
+        self.seen_rev.iter().copied().max().unwrap_or(0)
+    }
+
+    fn is_exact(&self) -> bool {
+        let rev = self.seen_rev[0];
+        rev != 0 && self.seen_rev.iter().all(|seen| *seen == rev)
     }
 }
 
-fn command_marks_existing_worker_snapshot_flag(cmd: &TradeCommand) -> bool {
-    matches!(
-        cmd,
-        TradeCommand::OrderStatus(_)
-            | TradeCommand::OrderStatusUpdate(_)
-            | TradeCommand::OrderReplace(_)
-            | TradeCommand::OrderReplaceResponse(_)
-            | TradeCommand::OrderCancel(_)
-            | TradeCommand::JoinOrders(_)
-            | TradeCommand::SplitOrder(_)
-            | TradeCommand::MoveAllSells(_)
-            | TradeCommand::DoClosePosition(_)
-            | TradeCommand::DoLimitClosePosition(_)
-            | TradeCommand::DoSplitPosition(_)
-            | TradeCommand::DoSellOrder(_)
-            | TradeCommand::OrderStatusRequest(_)
-            | TradeCommand::OrderNotFound(_)
-            | TradeCommand::OrderStopsUpdate(_)
-            | TradeCommand::TurnPanicSell(_)
-            | TradeCommand::Penalty(_)
-            | TradeCommand::TradeVisual(_)
-            | TradeCommand::OrderTracePoint(_)
-            | TradeCommand::CorridorUpdate(_)
-            | TradeCommand::MoveAllBuys(_)
-            | TradeCommand::VStopUpdate(_)
-            | TradeCommand::DoMarketSplitPosition(_)
-            | TradeCommand::BaseMarket(_)
-            | TradeCommand::TradeEpoch(_)
-            | TradeCommand::NewOrder(_)
-    )
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OrderRepair {
+    pub order_id: u64,
+    pub exact_rev: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -105,77 +71,104 @@ struct PendingRemoval {
     uid: u64,
     due_ms: i64,
     instance_id: u64,
-    tombstone: bool,
-    server_session_token: u64,
 }
 
-/// Main retained orders collection.
+/// Persistent read model published to application snapshots.
 ///
-/// Single-owner state: modified only by the client runtime owner. Consumer code
-/// reads it through `iter()` / `get()` or through `MoonClient` snapshots.
+/// `im::HashMap` keeps snapshot clones O(1) and copies only the changed trie
+/// path when one order changes. Protocol mirrors and maintenance state are not
+/// part of this value and therefore are never copied for UI publication.
 #[derive(Debug, Clone)]
 pub struct Orders {
-    map: HashMap<u64, Arc<Order>>,
-    /// UID's already marked as finishing, but not removed from retained order
-    /// state yet.
-    pending_removals: Vec<PendingRemoval>,
-    /// Recently completed UID's in the current hard session. A delayed sliced
-    /// snapshot captured before the terminal full must not recreate them.
-    tombstones: [u64; ORDER_TOMBSTONE_COUNT],
-    tombstone_index: usize,
-    tombstone_session_token: u64,
-    next_instance_id: u64,
-    /// Incremented on every `TAllStatuses`.
-    current_snapshot_flag: u8,
-    /// `ServerTimeDelta = InitialTime(server) - Now(client)`, applied to
-    /// command `TDateTime` fields.
-    pub server_time_delta: f64,
+    map: im::HashMap<u64, Arc<Order>>,
     eps_profile: EpsProfile,
-    /// Last periodic trace-line shrink pass.
-    last_order_line_shrink_ms: i64,
 }
 
 impl Default for Orders {
+    fn default() -> Self {
+        Self {
+            map: im::HashMap::new(),
+            eps_profile: EpsProfile::default(),
+        }
+    }
+}
+
+/// Mutable protocol/order-action state owned by the Active Lib runtime.
+#[derive(Debug)]
+pub(crate) struct OrderState {
+    read: Orders,
+    mirrors: HashMap<u64, OrderMirror>,
+    pending_removals: Vec<PendingRemoval>,
+    tombstones: [u64; ORDER_TOMBSTONE_COUNT],
+    tombstone_index: usize,
+    world_app_token: u64,
+    next_instance_id: u64,
+    route_currency: BaseCurrency,
+    route_platform: ExchangeCode,
+    next_pending_removal_ms: Option<i64>,
+    next_replace_timeout_ms: Option<i64>,
+    next_order_line_shrink_ms: i64,
+}
+
+impl std::ops::Deref for OrderState {
+    type Target = Orders;
+
+    fn deref(&self) -> &Self::Target {
+        &self.read
+    }
+}
+
+impl Default for OrderState {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Orders {
-    pub fn new() -> Self {
+impl OrderState {
+    pub(crate) fn new() -> Self {
         Self {
-            map: HashMap::new(),
+            read: Orders::default(),
+            mirrors: HashMap::new(),
             pending_removals: Vec::new(),
             tombstones: [0; ORDER_TOMBSTONE_COUNT],
             tombstone_index: 0,
-            tombstone_session_token: 0,
+            world_app_token: 0,
             next_instance_id: 0,
-            current_snapshot_flag: 0,
-            server_time_delta: 0.0,
-            eps_profile: EpsProfile::default(),
-            last_order_line_shrink_ms: 0,
+            route_currency: BaseCurrency::UNKNOWN,
+            route_platform: ExchangeCode::None,
+            next_pending_removal_ms: None,
+            next_replace_timeout_ms: None,
+            next_order_line_shrink_ms: ORDER_TRACE_LINE_SHRINK_INTERVAL_MS,
         }
     }
 
     pub(crate) fn set_eps_profile(&mut self, eps_profile: EpsProfile) {
-        self.eps_profile = eps_profile;
+        self.read.eps_profile = eps_profile;
+    }
+
+    pub(crate) fn set_route(&mut self, currency: BaseCurrency, platform: ExchangeCode) {
+        self.route_currency = currency;
+        self.route_platform = platform;
     }
 
     fn order_mut(&mut self, uid: u64) -> Option<&mut Order> {
-        self.map.get_mut(&uid).map(Arc::make_mut)
-    }
-
-    fn remove_order_arc(&mut self, uid: u64) -> Option<Arc<Order>> {
-        self.map.remove(&uid)
-    }
-
-    fn remove_order(&mut self, uid: u64) -> Option<Order> {
-        self.remove_order_arc(uid)
-            .map(|order| Arc::try_unwrap(order).unwrap_or_else(|order| (*order).clone()))
+        self.read.map.get_mut(&uid).map(Arc::make_mut)
     }
 
     fn order_arc(&self, uid: u64) -> Option<Arc<Order>> {
-        self.map.get(&uid).cloned()
+        self.read.map.get(&uid).cloned()
+    }
+
+    fn remove_order_arc(&mut self, uid: u64) -> Option<Arc<Order>> {
+        self.read.map.remove(&uid)
+    }
+
+    pub(crate) fn read_model(&self) -> &Orders {
+        &self.read
+    }
+
+    pub(crate) fn snapshot(&self) -> Orders {
+        self.read.clone()
     }
 
     fn allocate_instance_id(&mut self) -> u64 {
@@ -186,444 +179,398 @@ impl Orders {
         self.next_instance_id
     }
 
-    fn sync_tombstone_session(&mut self, server_token: u64) {
-        if server_token != 0 && server_token != self.tombstone_session_token {
-            self.tombstones.fill(0);
-            self.tombstone_index = 0;
-            self.tombstone_session_token = server_token;
-        }
+    fn section_seen(&self, uid: u64, section: usize) -> bool {
+        self.mirrors
+            .get(&uid)
+            .is_some_and(|mirror| mirror.seen_rev[section] != 0)
     }
 
     fn is_tombstoned(&self, uid: u64) -> bool {
         uid != 0 && self.tombstones.contains(&uid)
     }
 
-    fn record_tombstone(&mut self, uid: u64, server_session_token: u64) {
-        if uid == 0 || server_session_token != self.tombstone_session_token {
+    fn record_tombstone(&mut self, uid: u64) {
+        if uid == 0 || self.is_tombstoned(uid) {
             return;
         }
         self.tombstones[self.tombstone_index] = uid;
         self.tombstone_index = (self.tombstone_index + 1) & (ORDER_TOMBSTONE_COUNT - 1);
     }
 
-    fn created_event(&self, uid: u64) -> Option<OrderEvent> {
-        self.order_arc(uid).map(OrderEvent::Created)
+    /// Apply one parsed order-channel command with the current transport/world
+    /// identity. Follow-up repairs are returned separately from UI events.
+    pub(crate) fn apply_protocol(
+        &mut self,
+        command: TradeCommand,
+        now_ms: i64,
+        server_token: u64,
+        peer_app_token: u64,
+        server_time_delta: f64,
+        market_exists: &dyn Fn(&str) -> bool,
+        events: &mut Vec<OrderEvent>,
+        repairs: &mut Vec<OrderRepair>,
+    ) {
+        if server_token == 0 {
+            return;
+        }
+        self.ensure_world(peer_app_token, events);
+
+        match command {
+            TradeCommand::OrderImage(image) => {
+                let hash = state_hash(image.state_rev, &image.desc, &image.state);
+                self.merge_state(
+                    image.header.uid,
+                    image.state_rev,
+                    hash,
+                    image.section_mask,
+                    image.state,
+                    Some(image.desc),
+                    market_exists,
+                    now_ms,
+                    events,
+                    repairs,
+                );
+            }
+            TradeCommand::OrderPatch(patch) => self.merge_state(
+                patch.header.uid,
+                patch.state_rev,
+                patch.state_hash,
+                patch.section_mask,
+                patch.state,
+                None,
+                market_exists,
+                now_ms,
+                events,
+                repairs,
+            ),
+            TradeCommand::OrdersSnapshot(snapshot) => {
+                let mut catalog = Vec::with_capacity(snapshot.records.len());
+                for record in snapshot.records {
+                    let hash = state_hash(record.state_rev, &record.desc, &record.state);
+                    catalog.push(OrderCatalogRecord {
+                        order_id: record.order_id,
+                        state_rev: record.state_rev,
+                    });
+                    self.merge_state(
+                        record.order_id,
+                        record.state_rev,
+                        hash,
+                        record.section_mask,
+                        record.state,
+                        Some(record.desc),
+                        market_exists,
+                        now_ms,
+                        events,
+                        repairs,
+                    );
+                }
+                self.process_cold_page(
+                    snapshot.from_uid,
+                    snapshot.range_end_uid,
+                    &catalog,
+                    events,
+                    repairs,
+                );
+                events.push(OrderEvent::Snapshot);
+            }
+            TradeCommand::OrdersCatalog(catalog) => {
+                self.process_cold_page(
+                    catalog.from_uid,
+                    catalog.range_end_uid,
+                    &catalog.records,
+                    events,
+                    repairs,
+                );
+                events.push(OrderEvent::Snapshot);
+            }
+            TradeCommand::OrderNotFound(header) => self.apply_gone(header.uid, events),
+            TradeCommand::OrderTracePoint(mut point) => {
+                point.adjust_time(server_time_delta);
+                if self.mirrors.contains_key(&point.market.base.uid) {
+                    if let Some(order) = self
+                        .order_mut(point.market.base.uid)
+                        .filter(|order| !order.job_is_done)
+                    {
+                        Self::apply_trace_line(order, &point);
+                        events.push(OrderEvent::TracePoint { uid: order.uid });
+                    }
+                }
+            }
+            TradeCommand::CorridorUpdate(corridor) => {
+                let uid = corridor.market.base.uid;
+                if self.mirrors.contains_key(&uid) {
+                    if let Some(order) = self.order_mut(uid).filter(|order| !order.job_is_done) {
+                        order.is_moon_shot = true;
+                        order.corridor_price_down = corridor.price_down;
+                        order.corridor_price_up = corridor.price_up;
+                        events.push(OrderEvent::CorridorChanged(uid));
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
-    fn updated_event(&self, uid: u64) -> Option<OrderEvent> {
-        self.order_arc(uid).map(OrderEvent::Updated)
+    fn ensure_world(&mut self, peer_app_token: u64, events: &mut Vec<OrderEvent>) {
+        if peer_app_token == 0 || peer_app_token == self.world_app_token {
+            return;
+        }
+        for order in self.read.map.values() {
+            events.push(OrderEvent::Removed(Arc::clone(order)));
+        }
+        self.read.map.clear();
+        self.mirrors.clear();
+        self.pending_removals.clear();
+        self.next_pending_removal_ms = None;
+        self.next_replace_timeout_ms = None;
+        self.tombstones.fill(0);
+        self.tombstone_index = 0;
+        self.world_app_token = peer_app_token;
     }
 
-    /// Advance snapshot flag before a `TAllStatuses` item loop.
-    pub(crate) fn begin_snapshot(&mut self) -> u8 {
-        self.current_snapshot_flag = self.current_snapshot_flag.wrapping_add(1);
-        self.current_snapshot_flag
-    }
-
-    /// Apply one inbound `MPC_Order` command and return the resulting event.
-    ///
-    /// This is the main state-transition entry point:
-    /// 1. hard-session epoch reset and shared watermark check;
-    /// 2. full-status-only phase transition gate;
-    /// 3. update or create `Order`;
-    /// 4. `ServerTimeDelta` correction for `TDateTime` fields;
-    /// 5. deferred removal on terminal status / `TOrderNotFound`;
-    /// 6. snapshot flag mechanics (CleanupMissing) through dispatcher-level
-    ///    `TAllStatuses` handling.
-    /// 7. event generation.
-    ///
-    /// Diagnostics/tests keep the ignored reason visible. Normal terminal code
-    /// reads order state and user-facing events only; stale/outgoing packets are
-    /// internal state-machine facts, not UI events.
-    #[cfg(any(test, feature = "diagnostics"))]
-    pub fn apply(&mut self, cmd: TradeCommand) -> (ApplyResult, OrderEvent) {
-        let uid = cmd.uid();
-        let (result, event) = self.apply_at(cmd, 0);
-        (
-            result,
-            event.unwrap_or(OrderEvent::Ignored {
+    /// Attach mirrors that arrived before their market was present locally.
+    /// The protocol replica remains complete while parked; market-list growth
+    /// only materializes its current canonical state for terminal consumers.
+    pub(crate) fn rescan_parked(
+        &mut self,
+        now_ms: i64,
+        market_exists: &dyn Fn(&str) -> bool,
+        events: &mut Vec<OrderEvent>,
+    ) {
+        let parked: Vec<u64> = self
+            .mirrors
+            .iter()
+            .filter(|(uid, mirror)| {
+                !self.read.map.contains_key(uid) && market_exists(&mirror.desc.market_name())
+            })
+            .map(|(uid, _)| *uid)
+            .collect();
+        for uid in parked {
+            let instance_id = self.allocate_instance_id();
+            let Some(mirror) = self.mirrors.get(&uid) else {
+                continue;
+            };
+            let exact_terminal = mirror.is_exact() && mirror.state.is_terminal();
+            let order = Order::from_canonical(
                 uid,
-                reason: result,
-            }),
-        )
-    }
-
-    #[cfg(any(test, feature = "diagnostics"))]
-    pub(crate) fn apply_at(
-        &mut self,
-        cmd: TradeCommand,
-        now_ms: i64,
-    ) -> (ApplyResult, Option<OrderEvent>) {
-        self.apply_at_with_server_token(cmd, now_ms, 0)
-    }
-
-    pub(crate) fn apply_at_with_server_token(
-        &mut self,
-        cmd: TradeCommand,
-        now_ms: i64,
-        server_token: u64,
-    ) -> (ApplyResult, Option<OrderEvent>) {
-        self.sync_tombstone_session(server_token);
-        let uid = cmd.uid();
-        let current_snapshot_flag = self.current_snapshot_flag;
-        let server_time_delta = self.server_time_delta;
-        if command_marks_existing_worker_snapshot_flag(&cmd) {
-            if let Some(entry) = self.order_mut(uid) {
-                entry.snapshot_flag = current_snapshot_flag;
-            }
-        }
-        match cmd {
-            // --- Full status create/update ---
-            TradeCommand::OrderStatus(st) => {
-                let new_order = !self.map.contains_key(&uid);
-                let status = st.epoch_header.status;
-                if new_order && st.from_cache {
-                    return ignored_order_event(uid, ApplyResult::OrderNotFound);
-                }
-                if new_order && self.is_tombstoned(uid) {
-                    return ignored_order_event(uid, ApplyResult::OutOfOrder);
-                }
-                let mut lifecycle_rejected = None;
-                let mut settings_applied = false;
-                let is_done = {
-                    if new_order {
-                        let instance_id = self.allocate_instance_id();
-                        self.map
-                            .insert(uid, Arc::new(Order::from_status(&st, instance_id)));
-                    }
-                    let entry = self.order_mut(uid).expect("order inserted or existed");
-
-                    match Self::accept_server_epoch(
-                        entry,
-                        &st.epoch_header,
-                        ServerEpochCommandKind::FullStatus,
-                        server_token,
-                    ) {
-                        Ok(_) => {
-                            Self::apply_status_inner(entry, &st, server_time_delta, new_order);
-                            Self::apply_full_stops_vstop(entry, &st);
-                            entry.replace_epoch_buy = st.epoch_header.epoch;
-                            entry.replace_epoch_sell = st.epoch_header.epoch;
-                            entry.snapshot_flag = current_snapshot_flag;
-                        }
-                        Err(reason) => {
-                            // The full's lifecycle payload is stale, but its
-                            // independently judged settings may still repair a
-                            // lost stops/VStop echo.
-                            settings_applied = Self::apply_full_stops_vstop(entry, &st);
-                            lifecycle_rejected = Some(reason);
-                        }
-                    }
-                    entry.job_is_done
-                };
-                if let Some(reason) = lifecycle_rejected {
-                    if settings_applied {
-                        return (ApplyResult::Applied, self.updated_event(uid));
-                    }
-                    return ignored_order_event(uid, reason);
-                }
-                if is_done {
-                    self.mark_pending_removal(uid, now_ms, terminal_removal_delay_ms(status), true);
+                &mirror.desc,
+                instance_id,
+                self.route_currency,
+                self.route_platform,
+                &mirror.state,
+            );
+            let order = Arc::new(order);
+            self.read.map.insert(uid, Arc::clone(&order));
+            events.push(OrderEvent::Created(order));
+            if exact_terminal {
+                let delay = if self.read.map[&uid].status == OrderWorkerStatus::SellDone {
+                    SELL_DONE_REMOVAL_GRACE_MS
                 } else {
-                    self.cancel_terminal_removal(uid);
-                }
-
-                if new_order {
-                    (ApplyResult::Applied, self.created_event(uid))
-                } else {
-                    (ApplyResult::Applied, self.updated_event(uid))
-                }
-            }
-
-            // --- Delta-update ---
-            TradeCommand::OrderStatusUpdate(up) => {
-                {
-                    let Some(entry) = self.order_mut(uid) else {
-                        return ignored_order_event(uid, ApplyResult::OrderNotFound);
-                    };
-
-                    if let Err(reason) = Self::accept_server_epoch(
-                        entry,
-                        &up.epoch_header,
-                        ServerEpochCommandKind::Other,
-                        server_token,
-                    ) {
-                        return ignored_order_event(uid, reason);
-                    }
-
-                    if matches!(
-                        up.epoch_header.status,
-                        OrderWorkerStatus::BuySet | OrderWorkerStatus::SellSet
-                    ) {
-                        let target = if up.epoch_header.status == OrderWorkerStatus::SellSet {
-                            &mut entry.sell_order
-                        } else {
-                            &mut entry.buy_order
-                        };
-                        Self::apply_update_data(target, up.update_data, server_time_delta);
-                    }
-
-                    if up.epoch_header.status == OrderWorkerStatus::None {
-                        // Delphi updates vOrder.BuyCondPrice only in the
-                        // pending-worker branch: `(Status = OS_None) and
-                        // IsPending and (vOrder <> nil)`.
-                        if entry.pending_buy_cond_price.is_some() {
-                            entry.pending_buy_cond_price = Some(up.update_data.mean_price);
-                        }
-                    }
-                    let sell_reason = SellReason::from_byte(up.sell_reason_code);
-                    if up.sell_reason_code != 0 && sell_reason != entry.sell_reason {
-                        entry.sell_reason = sell_reason;
-                    }
-                }
-
-                (ApplyResult::Applied, self.updated_event(uid))
-            }
-
-            // --- Replace response ---
-            TradeCommand::OrderReplaceResponse(rr) => {
-                let rr = *rr;
-                let Some(entry) = self.order_mut(uid) else {
-                    return ignored_order_event(uid, ApplyResult::OrderNotFound);
+                    0
                 };
-
-                let fresh_epoch = match Self::accept_server_epoch(
-                    entry,
-                    &rr.epoch_header,
-                    ServerEpochCommandKind::ReplaceResponse,
-                    server_token,
-                ) {
-                    Ok(fresh) => fresh,
-                    Err(reason) => return ignored_order_event(uid, reason),
-                };
-
-                if order_type_uses_buy_side(rr.order_type) {
-                    if fresh_epoch {
-                        Self::apply_update_data(
-                            &mut entry.buy_order,
-                            rr.update_data,
-                            server_time_delta,
-                        );
-                    }
-                    if epoch_is_ok(entry.replace_epoch_buy, rr.epoch_header.epoch) {
-                        entry.replace_epoch_buy = rr.epoch_header.epoch;
-                        if rr.quantity_base > 0.0 {
-                            entry.buy_order.quantity_base = rr.quantity_base;
-                        }
-                    }
-                    if !entry.ack_seeded_buy
-                        || epoch_is_ok(entry.ack_epoch_buy, rr.epoch_header.epoch)
-                    {
-                        entry.ack_seeded_buy = true;
-                        entry.ack_epoch_buy = rr.epoch_header.epoch;
-                        entry.bulk_replace_buy = false;
-                    }
-                } else {
-                    if fresh_epoch {
-                        Self::apply_update_data(
-                            &mut entry.sell_order,
-                            rr.update_data,
-                            server_time_delta,
-                        );
-                    }
-                    if epoch_is_ok(entry.replace_epoch_sell, rr.epoch_header.epoch) {
-                        entry.replace_epoch_sell = rr.epoch_header.epoch;
-                        if rr.quantity_base > 0.0 {
-                            entry.sell_order.quantity_base = rr.quantity_base;
-                        }
-                    }
-                    if !entry.ack_seeded_sell
-                        || epoch_is_ok(entry.ack_epoch_sell, rr.epoch_header.epoch)
-                    {
-                        entry.ack_seeded_sell = true;
-                        entry.ack_epoch_sell = rr.epoch_header.epoch;
-                        entry.bulk_replace_sell = false;
-                    }
-                }
-
-                (ApplyResult::Applied, self.updated_event(uid))
-            }
-
-            // --- Stops update ---
-            TradeCommand::OrderStopsUpdate(su) => {
-                let Some(entry) = self.order_mut(uid) else {
-                    return ignored_order_event(uid, ApplyResult::OrderNotFound);
-                };
-                Self::adopt_server_session(entry, server_token);
-                if entry.stops_seeded && !epoch_is_ok(entry.stops_epoch, su.epoch_header.epoch) {
-                    return ignored_order_event(uid, ApplyResult::OutOfOrder);
-                }
-                entry.stops_seeded = true;
-                entry.stops_epoch = su.epoch_header.epoch;
-                entry.stops = su.stops;
-                (ApplyResult::Applied, Some(OrderEvent::StopsChanged(uid)))
-            }
-
-            // --- VStop update ---
-            TradeCommand::VStopUpdate(vs) => {
-                let Some(entry) = self.order_mut(uid) else {
-                    return ignored_order_event(uid, ApplyResult::OrderNotFound);
-                };
-                Self::adopt_server_session(entry, server_token);
-                if entry.vstop_seeded && !epoch_is_ok(entry.vstop_epoch, vs.epoch_header.epoch) {
-                    return ignored_order_event(uid, ApplyResult::OutOfOrder);
-                }
-                entry.vstop_seeded = true;
-                entry.vstop_epoch = vs.epoch_header.epoch;
-                entry.vstop_on = vs.vstop_on;
-                entry.vstop_fixed = vs.vstop_fixed;
-                entry.vstop_level = vs.vstop_level;
-                entry.vstop_vol = vs.vstop_vol;
-                (ApplyResult::Applied, Some(OrderEvent::VStopChanged(uid)))
-            }
-
-            // --- Corridor update ---
-            TradeCommand::CorridorUpdate(cu) => {
-                let Some(entry) = self.order_mut(uid) else {
-                    return ignored_order_event(uid, ApplyResult::OrderNotFound);
-                };
-                entry.is_moon_shot = true;
-                entry.corridor_price_down = cu.price_down;
-                entry.corridor_price_up = cu.price_up;
-                (ApplyResult::Applied, Some(OrderEvent::CorridorChanged(uid)))
-            }
-
-            // --- Trace point ---
-            TradeCommand::OrderTracePoint(mut tp) => {
-                let Some(entry) = self.order_mut(uid) else {
-                    return ignored_order_event(uid, ApplyResult::OrderNotFound);
-                };
-                tp.adjust_time(server_time_delta);
-                Self::apply_trace_line(entry, &tp);
-                (ApplyResult::Applied, Some(OrderEvent::TracePoint { uid }))
-            }
-
-            // --- Bulk replace notification ---
-            TradeCommand::BulkReplaceNotify(brn) => {
-                let mut affected = Vec::new();
-                for &uid_replaced in &brn.uids {
-                    if let Some(entry) = self.order_mut(uid_replaced) {
-                        if order_type_uses_buy_side(brn.order_type) {
-                            entry.bulk_replace_buy = true;
-                        } else {
-                            entry.bulk_replace_sell = true;
-                        }
-                        entry.replace_sent_time_ms = now_ms.max(1);
-                        affected.push(uid_replaced);
-                    }
-                }
-                if affected.is_empty() {
-                    return ignored_order_event(uid, ApplyResult::OrderNotFound);
-                }
-                (
-                    ApplyResult::Applied,
-                    Some(OrderEvent::BulkReplaced {
-                        order_type: brn.order_type,
-                        uids: affected,
-                    }),
-                )
-            }
-
-            // --- Order not found (server forced remove) ---
-            TradeCommand::OrderNotFound(h) => {
-                let uid = h.market.base.uid;
-                let found = if let Some(entry) = self.order_mut(uid) {
-                    entry.server_forced_remove = true;
-                    entry.cancel_request = true;
-                    true
-                } else {
-                    false
-                };
-                if found {
-                    self.mark_pending_removal(uid, now_ms, 0, false);
-                    (ApplyResult::Applied, self.updated_event(uid))
-                } else {
-                    ignored_order_event(uid, ApplyResult::OrderNotFound)
-                }
-            }
-
-            // --- Dispatcher-level payloads, handled before ProcessCommandOrder ---
-            TradeCommand::AllStatuses(_)
-            | TradeCommand::ClosedSellOrderReport(_)
-            | TradeCommand::ReportRowUpsert(_)
-            | TradeCommand::ReportRowDelete(_)
-            | TradeCommand::ReportSyncRequest(_)
-            | TradeCommand::ReportSchemaRequest(_)
-            | TradeCommand::ReportSchema(_)
-            | TradeCommand::ReportSyncPage(_)
-            | TradeCommand::ReportCheckRowsRequest(_) => {
-                ignored_order_event(uid, ApplyResult::NotApplicable)
-            }
-
-            // --- Client-originated outgoing commands: ignored by state ---
-            TradeCommand::OrderReplace(c) => {
-                self.apply_noop_trade_epoch(uid, &c.epoch_header, server_token)
-            }
-            TradeCommand::OrderCancel(c) => {
-                self.apply_noop_trade_epoch(uid, &c.epoch_header, server_token)
-            }
-            TradeCommand::OrderStatusRequest(h) => {
-                self.apply_noop_trade_epoch(uid, &h, server_token)
-            }
-            TradeCommand::TurnPanicSell(c) => {
-                self.apply_noop_trade_epoch(uid, &c.epoch_header, server_token)
-            }
-            TradeCommand::TradeEpoch(h) => self.apply_noop_trade_epoch(uid, &h, server_token),
-
-            TradeCommand::AllStatusesRequest(_)
-            | TradeCommand::JoinOrders(_)
-            | TradeCommand::SplitOrder(_)
-            | TradeCommand::MoveAllSells(_)
-            | TradeCommand::MoveAllBuys(_)
-            | TradeCommand::DoClosePosition(_)
-            | TradeCommand::DoLimitClosePosition(_)
-            | TradeCommand::DoSplitPosition(_)
-            | TradeCommand::DoMarketSplitPosition(_)
-            | TradeCommand::DoSellOrder(_)
-            | TradeCommand::NewOrder(_)
-            | TradeCommand::SetImmune(_) => ignored_order_event(uid, ApplyResult::NotApplicable),
-
-            // --- Other commands ---
-            TradeCommand::Penalty(_)
-            | TradeCommand::TradeVisual(_)
-            | TradeCommand::BaseMarket(_) => ignored_order_event(uid, ApplyResult::NotApplicable),
-
-            TradeCommand::Unknown { uid, .. } => {
-                ignored_order_event(uid, ApplyResult::NotApplicable)
+                self.mark_pending_removal(uid, now_ms, delay);
             }
         }
     }
 
-    fn apply_noop_trade_epoch(
+    #[allow(clippy::too_many_arguments)]
+    fn merge_state(
         &mut self,
-        uid: u64,
-        header: &TradeEpochHeader,
-        server_token: u64,
-    ) -> (ApplyResult, Option<OrderEvent>) {
-        let Some(entry) = self.order_mut(uid) else {
-            return ignored_order_event(uid, ApplyResult::OrderNotFound);
+        order_id: u64,
+        revision: u64,
+        expected_hash: u32,
+        mask: u16,
+        incoming: CanonicalOrderState,
+        desc: Option<OrderDescription>,
+        market_exists: &dyn Fn(&str) -> bool,
+        now_ms: i64,
+        events: &mut Vec<OrderEvent>,
+        repairs: &mut Vec<OrderRepair>,
+    ) {
+        let is_image = desc.is_some();
+        let is_new = !self.mirrors.contains_key(&order_id);
+        if is_new {
+            if self.is_tombstoned(order_id) {
+                return;
+            }
+            let Some(desc) = desc else {
+                push_repair(repairs, order_id, 0);
+                return;
+            };
+            self.mirrors.insert(order_id, OrderMirror::new(desc));
+        } else if let Some(desc) = desc.as_ref() {
+            if self
+                .mirrors
+                .get(&order_id)
+                .is_some_and(|mirror| mirror.desc != *desc)
+            {
+                log::warn!(target: "moonproto::orders", "drop order image {}: description mismatch", order_id);
+                return;
+            }
+        }
+
+        let (applied_mask, exact) = {
+            let mirror = self.mirrors.get_mut(&order_id).expect("mirror exists");
+            let previous_rev = mirror.replica_rev();
+            if revision > previous_rev {
+                mirror.expected_hash = expected_hash;
+            }
+            let mut applied_mask = 0u16;
+            for section in 0..ORDER_SECTION_COUNT {
+                let carries = is_image || mask & (1 << section) != 0;
+                if carries && revision > mirror.seen_rev[section] {
+                    mirror.state.copy_section_from(&incoming, section);
+                    mirror.seen_rev[section] = revision;
+                    applied_mask |= 1 << section;
+                }
+            }
+            let replica_rev = if applied_mask != 0 {
+                previous_rev.max(revision)
+            } else {
+                previous_rev
+            };
+            let proof_matches =
+                state_hash(replica_rev, &mirror.desc, &mirror.state) == mirror.expected_hash;
+            if proof_matches {
+                mirror.seen_rev.fill(replica_rev);
+            } else {
+                push_repair(repairs, order_id, 0);
+            }
+            let exact = if proof_matches {
+                replica_rev != 0
+            } else {
+                mirror.is_exact()
+            };
+            (applied_mask, exact)
         };
 
-        if let Err(reason) =
-            Self::accept_server_epoch(entry, header, ServerEpochCommandKind::Other, server_token)
-        {
-            return ignored_order_event(uid, reason);
+        let should_attach = !self.read.map.contains_key(&order_id)
+            && self
+                .mirrors
+                .get(&order_id)
+                .is_some_and(|mirror| market_exists(&mirror.desc.market_name()));
+        if applied_mask == 0 && !should_attach {
+            return;
+        }
+        if should_attach {
+            let instance_id = self.allocate_instance_id();
+            let mirror = self.mirrors.get(&order_id).expect("mirror exists");
+            let order = Order::from_canonical(
+                order_id,
+                &mirror.desc,
+                instance_id,
+                self.route_currency,
+                self.route_platform,
+                &mirror.state,
+            );
+            let order = Arc::new(order);
+            self.read.map.insert(order_id, Arc::clone(&order));
+            events.push(OrderEvent::Created(order));
+        } else if applied_mask != 0 {
+            let (mirrors, read) = (&self.mirrors, &mut self.read);
+            let Some(mirror) = mirrors.get(&order_id) else {
+                return;
+            };
+            let Some(entry) = read.map.get_mut(&order_id) else {
+                return;
+            };
+            Arc::make_mut(entry).apply_canonical(&mirror.state, applied_mask);
+            events.push(OrderEvent::Updated(Arc::clone(entry)));
         }
 
-        ignored_order_event(uid, ApplyResult::NotApplicable)
+        if exact
+            && self
+                .read
+                .map
+                .get(&order_id)
+                .is_some_and(|order| order.status.is_terminal())
+        {
+            let delay = if self.read.map[&order_id].status == OrderWorkerStatus::SellDone {
+                SELL_DONE_REMOVAL_GRACE_MS
+            } else {
+                0
+            };
+            self.mark_pending_removal(order_id, now_ms, delay);
+        }
+    }
+
+    fn process_cold_page(
+        &mut self,
+        from_uid: u64,
+        range_end_uid: u64,
+        catalog: &[OrderCatalogRecord],
+        events: &mut Vec<OrderEvent>,
+        repairs: &mut Vec<OrderRepair>,
+    ) {
+        for item in catalog {
+            let Some(mirror) = self.mirrors.get(&item.order_id) else {
+                if !self.is_tombstoned(item.order_id) {
+                    push_repair(repairs, item.order_id, 0);
+                }
+                continue;
+            };
+            if mirror.state.is_terminal() && mirror.is_exact() {
+                continue;
+            }
+            if !mirror.is_exact() {
+                push_repair(repairs, item.order_id, 0);
+            } else if mirror.replica_rev() != item.state_rev {
+                push_repair(repairs, item.order_id, mirror.replica_rev());
+            } else {
+                let (mirrors, read) = (&self.mirrors, &mut self.read);
+                let Some(mirror) = mirrors.get(&item.order_id) else {
+                    continue;
+                };
+                if let Some(entry) = read.map.get_mut(&item.order_id) {
+                    Arc::make_mut(entry).apply_canonical(&mirror.state, ORDER_RECONCILE_MASK);
+                    events.push(OrderEvent::Updated(Arc::clone(entry)));
+                }
+            }
+        }
+
+        for (&uid, mirror) in &self.mirrors {
+            if uid < from_uid || (range_end_uid != 0 && uid > range_end_uid) {
+                continue;
+            }
+            let exact = mirror.is_exact();
+            if mirror.state.is_terminal() && exact {
+                continue;
+            }
+            if catalog
+                .binary_search_by_key(&uid, |record| record.order_id)
+                .is_err()
+            {
+                push_repair(repairs, uid, if exact { mirror.replica_rev() } else { 0 });
+            }
+        }
+    }
+
+    fn apply_gone(&mut self, order_id: u64, events: &mut Vec<OrderEvent>) {
+        let Some(mirror) = self.mirrors.get(&order_id) else {
+            self.record_tombstone(order_id);
+            return;
+        };
+        if mirror.state.is_terminal() {
+            return;
+        }
+        self.mirrors.remove(&order_id);
+        self.pending_removals
+            .retain(|pending| pending.uid != order_id);
+        self.record_tombstone(order_id);
+        if let Some(order) = self.remove_order_arc(order_id) {
+            events.push(OrderEvent::Removed(order));
+        }
     }
 }
 
-fn ignored_order_event(uid: u64, reason: ApplyResult) -> (ApplyResult, Option<OrderEvent>) {
-    #[cfg(any(test, feature = "diagnostics"))]
-    {
-        (reason, Some(OrderEvent::Ignored { uid, reason }))
-    }
-    #[cfg(not(any(test, feature = "diagnostics")))]
-    {
-        let _ = uid;
-        (reason, None)
-    }
+fn push_repair(repairs: &mut Vec<OrderRepair>, order_id: u64, exact_rev: u64) {
+    // Delphi appends repair intents linearly and sends them after releasing the
+    // mirror lock. Duplicate snapshot/proof requests are harmless and cheaper
+    // than an O(R^2) uniqueness scan on a large cold page.
+    repairs.push(OrderRepair {
+        order_id,
+        exact_rev,
+    });
 }
 
 #[cfg(test)]

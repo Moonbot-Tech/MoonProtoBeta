@@ -107,6 +107,7 @@ pub struct Order {
     pub buy_order: ExchangeOrder,
     pub sell_order: ExchangeOrder,
     pub buy_price: f64,
+    pub buy_size: f64,
     pub sell_price: f64,
     pub stops: StopSettings,
     pub vstop_on: bool,
@@ -114,15 +115,17 @@ pub struct Order {
     pub vstop_level: f64,
     pub vstop_vol: f64,
     pub panic_sell: bool,
+    pub panic_sell_auto: bool,
     pub is_moon_shot: bool,
     pub corridor_price_down: f32,
     pub corridor_price_up: f32,
     pub immune_for_clicks: bool,
     pub is_short: bool,
+    pub pending_buy_cond_price: Option<f64>,
     pub sell_reason: SellReason,
+    pub planned_sell_price: f64,
+    pub use_market_stop: bool,
     pub strat_id: u64,
-    pub db_id: i32,
-    pub from_cache: bool,
     pub emulator_mode: bool,
     pub pending_cancel: bool,
     pub bulk_replace_buy: bool,
@@ -130,22 +133,23 @@ pub struct Order {
     pub buy_trace_line: Option<OrderTraceLine>,
     pub sell_trace_line: Option<OrderTraceLine>,
     pub job_is_done: bool,
-    pub cancel_request: bool,
-    pub server_forced_remove: bool,
 }
 ```
 
-`currency` and `platform` are typed route values retained from the server order
-state. Normal code does not write them manually; order actions use them to route
-the action back to the correct market/exchange context.
+`currency` and `platform` are typed session route metadata copied from the
+successful Init/BaseCheck context when the retained row is created. They are
+useful for grouping rows in multi-core terminals. Canonical v4 order packets do
+not carry route bytes, and actions addressed to an existing order use its
+server `uid` rather than these fields.
 
 `buy_order` and `sell_order` are `ExchangeOrder` values. They contain
 exchange-side order values such as
 `actual_price`, `quantity`, `quantity_remaining`, `mean_price`, `leverage`, and
 open/close/create times. `order_type` and `sub_type` are typed values; use
 their `name()` helpers for labels. The local `buy_price` and `sell_price`
-fields are the desired replace prices tracked by the active client, not
-exchange execution prices.
+fields are UI replace drafts for already placed exchange legs, not exchange
+execution prices. While an order is still pending, its canonical trigger is
+`pending_buy_cond_price`.
 
 Order timestamps are wire time values, but raw time fields are not the normal
 terminal API. Use `open_time()`, `close_time()`, and `create_time()` on
@@ -157,14 +161,18 @@ packed-record byte IO are wire details kept inside Active Lib/tests.
 `sell_reason` is a typed `SellReason` value. Use
 `order.sell_reason.description()` for a MoonBot-compatible UI label.
 
+Report-database identity is intentionally absent from the live `Order` row. It
+comes from typed report replication, whose row ids and lifecycle are separate
+from the canonical live-order UID.
+
 Field groups for terminal UI:
 
 | UI area | Read from |
 |---|---|
-| order table identity/routing | `uid`, `market_name`, `currency`, `platform`, `strat_id`, `db_id`, `from_cache`, `emulator_mode`, `is_short` |
-| lifecycle/status columns | `status.name()`, `status.is_terminal()`, `job_is_done`, `cancel_request`, `server_forced_remove` |
+| order table identity/routing | `uid`, `market_name`, `currency`, `platform`, `strat_id`, `emulator_mode`, `is_short` |
+| lifecycle/status columns | `status.name()`, `status.is_terminal()`, `job_is_done` |
 | exchange-side buy/sell details | `buy_order`, `sell_order` (`actual_price`, `mean_price`, `quantity`, `quantity_remaining`, `leverage`, times) |
-| local user intents | `buy_price`, `sell_price`, `pending_cancel`, `bulk_replace_buy`, `bulk_replace_sell`, `immune_for_clicks`, `panic_sell` |
+| local user intents | `buy_price`, `sell_price`, `pending_buy_cond_price`, `pending_cancel`, `bulk_replace_buy`, `bulk_replace_sell`, `immune_for_clicks`, `panic_sell` |
 | stops/VStop editor | `stops`, `vstop_on`, `vstop_fixed`, `vstop_level`, `vstop_vol` |
 | chart overlays | `is_moon_shot`, `corridor_price_down/up`, `buy_trace_line`, `sell_trace_line` |
 
@@ -233,21 +241,21 @@ pub enum OrderEvent {
     Created(Arc<Order>),
     Updated(Arc<Order>),
     Removed(Arc<Order>),
-    BulkReplaced { order_type: OrderType, uids: Vec<u64> },
     TracePoint { uid: u64 },
     CorridorChanged(u64),
-    VStopChanged(u64),
-    StopsChanged(u64),
     Snapshot,
 }
 ```
 
 `order()` returns the order row captured at the moment of `Created`, `Updated`,
-or `Removed`. Use it in event-driven UI code: terminal statuses can move an
-order out of the live snapshot before the application drains the async event
-queue. `changed_uid()` and `removed_uid()` are still available for code that
-only needs identities. `Snapshot` means a full order snapshot was applied and
-the UI should reconcile the whole list.
+or `Removed`. Use it in event-driven UI code: terminal cleanup and a real
+application-world reset can move an order out of the live snapshot before the
+application drains the async event queue. `changed_uid()` and `removed_uid()`
+are still available for code that only needs identities. `TracePoint` and
+`CorridorChanged` are lightweight chart signals; read the updated
+trace/corridor fields from the current retained order. `Snapshot` means a
+canonical snapshot or catalog page was applied and the UI should reconcile the
+whole list.
 
 Low-level ignored/not-applicable telemetry is available only in
 `test`/`diagnostics` builds. Normal terminal code should redraw from retained
@@ -266,28 +274,35 @@ When a sell trace carries a stop line, `OrderTraceLine::stop_price` and
 
 ## Lifecycle Notes
 
-On reconnect, the server sends a fresh order snapshot. MoonProto accepts full
-snapshots only in increasing generation order within the current hard session,
-then emits `OrderEvent::Snapshot` after per-order events. A large older sliced
-snapshot therefore cannot roll retained orders back after a newer snapshot has
-already arrived. Missing tracked orders can trigger follow-up status requests
-automatically.
+The v4 order channel is a canonical replica. A complete order image and a
+partial patch carry one monotonic state revision plus independent revision
+clocks for 13 state sections: phase, flags, targets, exchange execution and
+placement, stops, VStop, and planned sell state. MoonProto applies only
+sections newer than the section already retained. A delayed patch can therefore
+fill a missing section but cannot roll a newer stop, execution, or lifecycle
+section back.
 
-Stops and VStop are independently versioned settings, not order-lifecycle
-transitions. A full order snapshot can recover a lost settings update, while an
-older full snapshot cannot overwrite a newer stop/VStop echo. Likewise, a
-same-phase server full or replace acknowledgement does not overwrite the local
-replace target currently owned by the UI; a real lifecycle phase change seeds
-that target from the new exchange-side state.
+After each newly authorized hard session, Active Lib requests a full canonical
+order snapshot. Later snapshot/catalog pages provide membership reconciliation.
+A row whose revision/hash is incomplete is repaired with an addressed status
+request; an explicit not-found response removes it. This repair is owned by the
+runtime and requires no application polling. `PeerAppToken`, rather than a
+transient transport token, defines the order world, so an ordinary soft rebind
+keeps the same mirror while a real core-world change removes every old retained
+row and starts a new world.
+
+Local replace targets remain UI-owned while an action is in flight. A
+same-phase server update does not overwrite that draft; a real phase change
+materializes the new canonical target.
 
 Terminal order updates are removed after the current receive batch. Sell-done
 orders keep a short grace window so immediately following visual trace packets
 can still attach to the order. Recently completed UIDs are retained for the
-current hard session so a delayed sliced snapshot cannot resurrect a removed
-terminal order.
+current application world so a delayed snapshot/catalog page cannot resurrect
+a removed terminal order.
 
 ## Protocol Data
 
-The crate-internal order wire model and `Orders::apply` path exist for tests and
+The crate-internal order wire model and canonical reducer exist for tests and
 packet replay. Regular applications should use `MoonClient`, snapshots, events,
 and the `client.orders()` / `client.trade()` handles.

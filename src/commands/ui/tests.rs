@@ -77,6 +77,37 @@ fn auto_detect_roundtrip() {
 }
 
 #[test]
+fn news_relay_and_history_match_delphi_wire_layout() {
+    let mut relay = header_bytes(CMD_NEWS_RELAY, 26);
+    relay.push(NEWS_RELAY_KIND_NEWS);
+    relay.extend_from_slice(&3u16.to_le_bytes());
+    relay.extend_from_slice(&[1, 2, 3]);
+    match UICommand::parse(&relay).unwrap() {
+        UICommand::NewsRelay(command) => {
+            assert_eq!(command.kind, NEWS_RELAY_KIND_NEWS);
+            assert_eq!(command.data, vec![1, 2, 3]);
+        }
+        _ => panic!("wrong variant"),
+    }
+
+    let mut history = header_bytes(CMD_NEWS_HISTORY, 27);
+    history.extend_from_slice(&2u16.to_le_bytes());
+    history.extend_from_slice(&2u16.to_le_bytes());
+    history.extend_from_slice(&[10, 11]);
+    history.extend_from_slice(&1u16.to_le_bytes());
+    history.push(12);
+    history.extend_from_slice(&3u16.to_le_bytes());
+    history.extend_from_slice(&[20, 21, 22]);
+    match UICommand::parse(&history).unwrap() {
+        UICommand::NewsHistory(command) => {
+            assert_eq!(command.frames, vec![vec![10, 11], vec![12]]);
+            assert_eq!(command.tags, vec![20, 21, 22]);
+        }
+        _ => panic!("wrong variant"),
+    }
+}
+
+#[test]
 fn update_version_roundtrip() {
     let raw = build_update_version(2, "MoonBot-7.99", true);
     match UICommand::parse(&raw).unwrap() {

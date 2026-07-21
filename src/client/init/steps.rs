@@ -69,7 +69,7 @@ pub(super) fn poll_engine_init_step(
 /// `EventDispatcher::dispatch_into_active` drops domain pushes
 /// (`Order`/`Strat`/`Balance`/`Trades*`/`OrderBook`/`UI`), matching Delphi
 /// `ClientNewData` under `not InitDone`. After a successful bootstrap, the
-/// library sends `TAllStatusesReq`, `TSettingsRequest`,
+/// library sends `TOrderStatusRequest(OrderID=0, ExactRev=0)`, `TSettingsRequest`,
 /// `TStratSnapshot.CreateFromStrats(...)`, `TMMOrdersSubscribeCommand`, and
 /// `TRequestBalanceRefresh`. The dispatcher also answers later server
 /// `TStratSnapshotRequest` commands from the same library-owned strategy list.
@@ -470,7 +470,7 @@ pub(crate) fn send_post_init_resync(
     cfg: &InitConfig,
     result: &mut InitResult,
 ) {
-    client.request_all_statuses(rand::random());
+    client.request_orders_snapshot();
     if let Some(snapshot) = dispatcher.pending_or_local_strategy_snapshot_reply() {
         client.strat_send_snapshot_payload(
             snapshot.server_epoch,

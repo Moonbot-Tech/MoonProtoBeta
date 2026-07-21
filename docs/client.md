@@ -173,8 +173,8 @@ if let Some(snapshot) = client.snapshot() {
 ```
 
 New order and market-level trade actions are user intents too. They are
-marshalled into the runtime owner, which derives the MoonBot route bytes from
-the active session:
+marshalled into the runtime owner, which encodes the selected market in the
+canonical v4 command:
 
 ```rust
 use moonproto::{NewOrderParams, OrderSide};
@@ -367,8 +367,11 @@ client.trade().new_order(NewOrderParams::for_market(
 // Existing-order actions normally use &Order from snapshot.orders().
 ```
 
-The runtime derives `TradeCtx` from `base_currency_code` and `exchange_code`
-learned during Init/BaseCheck. `new_order` also returns `NewOrderTicket`.
+Canonical v4 order commands use market names and server order UIDs rather than
+caller-built route records. The legacy `penalty` helper is the one remaining
+trade action that derives `TradeCtx` from `base_currency_code` and
+`exchange_code` learned during Init/BaseCheck. `new_order` also returns
+`NewOrderTicket`.
 `ticket.client_order_id` is an outbound/local label only: the server does not
 echo it in the typed order stream, and the created order is identified by the
 server `uid`. Normal order tables should read created orders from

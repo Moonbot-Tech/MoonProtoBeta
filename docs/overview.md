@@ -164,6 +164,7 @@ let system_time = trade.time().system_time();
 | `engine_api.md` | Engine RPC wrappers and response parsing |
 | `trade_actions.md` | High-level trading commands |
 | `orders.md` | Order state and order events |
+| `news.md` | Retained/live news and tags JSON |
 | `balances.md` | Account and market balance snapshots |
 | `order_books.md` | Orderbook updates and recovery |
 | `trades.md` | Trades stream and gap recovery |

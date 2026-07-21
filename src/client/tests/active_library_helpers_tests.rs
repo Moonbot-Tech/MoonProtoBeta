@@ -66,7 +66,7 @@ fn connect_and_init_stops_waiting_as_soon_as_auth_done() {
 }
 
 #[test]
-fn only_strategy_handshake_commands_are_allowed_before_domain_ready() {
+fn only_required_startup_payloads_are_allowed_before_domain_ready() {
     let client = Client::new(dummy_cfg());
 
     assert!(engine_method_allowed_before_domain_ready(
@@ -101,6 +101,18 @@ fn only_strategy_handshake_commands_are_allowed_before_domain_ready() {
     assert!(
         incoming_allowed_before_domain_ready(Command::UI, &[22]),
         "TKernelLicenseStateCommand is an initial server state fact and must not be dropped before domain_ready"
+    );
+    assert!(
+        incoming_allowed_before_domain_ready(Command::UI, &[26]),
+        "live news may arrive while the one-shot SrvConnect history is still in flight"
+    );
+    assert!(
+        incoming_allowed_before_domain_ready(Command::UI, &[27]),
+        "TNewsHistoryCommand is sent once from SrvConnect and must not be dropped before domain_ready"
+    );
+    assert!(
+        !incoming_allowed_before_domain_ready(Command::UI, &[1]),
+        "regular UI state must remain gated until domain_ready"
     );
     assert!(!incoming_allowed_before_domain_ready(
         Command::Strat,

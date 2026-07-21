@@ -6,8 +6,8 @@ use super::*;
 impl UICommand {
     /// Parse a TBaseUICommand payload (after MPC_UI dispatch in data_read_int).
     /// Wire-format: `cmd_id:u8 + ver:u16 + UID:u64 + class-specific`.
-    /// Version gate: ver > 3 -> [`UICommand::Skipped`], matching Delphi
-    /// registry `FSkipped`.
+    /// A command newer than the shared v4 registry is skipped, matching
+    /// Delphi registry `FSkipped`.
     #[doc(hidden)]
     pub fn parse(payload: &[u8]) -> Option<Self> {
         Self::parse_with_client_settings_fallback(payload, None)
@@ -327,6 +327,26 @@ impl UICommand {
                 uid,
                 active: read_bool_zero_tail(payload, &mut pos),
             })),
+
+            CMD_NEWS_RELAY => {
+                let kind = read_u8_zero_tail(payload, &mut pos);
+                let len = read_u16_zero_tail(payload, &mut pos) as usize;
+                let data = read_bytes_zero_tail(payload, &mut pos, len)?;
+                Some(UICommand::NewsRelay(NewsRelayCommand { kind, data }))
+            }
+
+            CMD_NEWS_HISTORY => {
+                let count = read_u16_zero_tail(payload, &mut pos) as usize;
+                let mut frames = Vec::new();
+                frames.try_reserve(count).ok()?;
+                for _ in 0..count {
+                    let len = read_u16_zero_tail(payload, &mut pos) as usize;
+                    frames.push(read_bytes_zero_tail(payload, &mut pos, len)?);
+                }
+                let tags_len = read_u16_zero_tail(payload, &mut pos) as usize;
+                let tags = read_bytes_zero_tail(payload, &mut pos, tags_len)?;
+                Some(UICommand::NewsHistory(NewsHistoryCommand { frames, tags }))
+            }
 
             _ => Some(UICommand::Unknown { cmd_id, uid }),
         }
@@ -657,6 +677,14 @@ fn read_u16_zero_tail(data: &[u8], pos: &mut usize) -> u16 {
     let mut bytes = [0u8; 2];
     read_into_prefix(data, pos, &mut bytes);
     u16::from_le_bytes(bytes)
+}
+
+fn read_bytes_zero_tail(data: &[u8], pos: &mut usize, len: usize) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    out.try_reserve_exact(len).ok()?;
+    out.resize(len, 0);
+    read_into_prefix(data, pos, &mut out);
+    Some(out)
 }
 
 fn read_u32_zero_tail(data: &[u8], pos: &mut usize) -> u32 {

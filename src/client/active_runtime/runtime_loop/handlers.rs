@@ -168,7 +168,7 @@ pub(super) fn handle_command(
             false
         }
         RuntimeCommand::OrderSnapshotRefresh => {
-            client.request_all_statuses(rand::random());
+            client.request_orders_snapshot();
             false
         }
         RuntimeCommand::TransferAssetsRefresh => {
@@ -329,12 +329,13 @@ pub(super) fn handle_command(
             }
             result
         }
-        RuntimeCommand::TradeAction(kind) => {
-            if let Err(err) = handle_trade_action(client, dispatcher, kind) {
+        RuntimeCommand::TradeAction(kind) => match handle_trade_action(client, dispatcher, kind) {
+            Ok(changed) => changed,
+            Err(err) => {
                 log::warn!(target: "moonproto::active_runtime", "trade intent rejected: {err}");
+                false
             }
-            false
-        }
+        },
     }
 }
 
@@ -659,12 +660,7 @@ fn handle_order_action(
         RuntimeCommandKind::TurnOrderPanicSell { uid, turn_on } => {
             client.turn_tracked_order_panic_sell(dispatcher.orders_mut(), *uid, *turn_on)
         }
-        RuntimeCommandKind::RequestOrderStatus { uid } => {
-            let Some(order) = dispatcher.orders().get(*uid).cloned() else {
-                return false;
-            };
-            client.request_tracked_order_status(&order)
-        }
+        RuntimeCommandKind::RequestOrderStatus { uid } => client.request_tracked_order_status(*uid),
         RuntimeCommandKind::SwitchPanicSellByMarket {
             market_name,
             turn_on,
@@ -713,67 +709,94 @@ pub(super) fn handle_trade_action(
             params,
             request_uid,
         } => {
-            let ctx = client.trade_ctx(request_uid)?;
-            Ok(client.new_order(
-                ctx,
+            client.new_order(
+                request_uid,
                 &params.market,
                 params.side.is_short(),
                 params.price,
                 params.strategy_id.unwrap_or(0),
                 params.size,
-            ))
+                params.planned_sell_price,
+                params.use_market_stop,
+            );
+            Ok(false)
         }
         RuntimeTradeCommandKind::JoinOrders { market_name, side } => {
-            let ctx = client.random_trade_ctx()?;
-            Ok(client.join_orders(ctx, &market_name, side.is_short()))
+            client.join_orders(random_nonzero_u64(), &market_name, side.is_short());
+            Ok(false)
         }
         RuntimeTradeCommandKind::SplitOrder(params) => {
-            let ctx = client.random_trade_ctx()?;
-            Ok(client.split_order(
-                ctx,
-                &params.market,
+            client.split_order(
+                random_nonzero_u64(),
+                params.order.uid(),
                 params.parts,
                 params.is_strategy_piece(),
                 params.sells_strategy_piece(),
-            ))
+            );
+            Ok(false)
         }
         RuntimeTradeCommandKind::MoveAllSells {
             market_name,
             params,
         } => {
-            let ctx = client.random_trade_ctx()?;
-            Ok(client.move_all_sells(dispatcher.orders(), ctx, &market_name, params))
+            client.move_all_sells(dispatcher.orders(), &market_name, params);
+            Ok(false)
         }
         RuntimeTradeCommandKind::MoveAllBuys {
             market_name,
             params,
         } => {
-            let ctx = client.random_trade_ctx()?;
-            Ok(client.move_all_buys(dispatcher.orders(), ctx, &market_name, params))
+            client.move_all_buys(dispatcher.orders(), &market_name, params);
+            Ok(false)
         }
         RuntimeTradeCommandKind::ClosePosition(params) => {
-            let ctx = client.random_trade_ctx()?;
-            Ok(client.do_close_position(ctx, &params.market, params.uses_market_order()))
+            client.do_close_position(
+                random_nonzero_u64(),
+                &params.market,
+                params.uses_market_order(),
+            );
+            Ok(false)
         }
         RuntimeTradeCommandKind::LimitClosePosition { market_name, side } => {
-            let ctx = client.random_trade_ctx()?;
-            Ok(client.do_limit_close_position(ctx, &market_name, side.is_short()))
+            client.do_limit_close_position(random_nonzero_u64(), &market_name, side.is_short());
+            Ok(false)
         }
         RuntimeTradeCommandKind::SplitPosition { market_name, side } => {
-            let ctx = client.random_trade_ctx()?;
-            Ok(client.do_split_position(ctx, &market_name, side.is_short()))
+            client.do_split_position(random_nonzero_u64(), &market_name, side.is_short());
+            Ok(false)
         }
         RuntimeTradeCommandKind::SellOrder(params) => {
-            let ctx = client.random_trade_ctx()?;
-            Ok(client.do_sell_order(ctx, &params.market, params.price, params.size))
+            client.do_sell_order(
+                random_nonzero_u64(),
+                &params.market,
+                params.price,
+                params.size,
+            );
+            Ok(false)
         }
         RuntimeTradeCommandKind::MarketSplitPosition { market_name, side } => {
-            let ctx = client.random_trade_ctx()?;
-            Ok(client.do_market_split_position(ctx, &market_name, side.is_short()))
+            client.do_market_split_position(random_nonzero_u64(), &market_name, side.is_short());
+            Ok(false)
         }
         RuntimeTradeCommandKind::Penalty { market_name } => {
             let ctx = client.random_trade_ctx()?;
-            Ok(client.penalty(ctx, &market_name))
+            client.penalty(ctx, &market_name);
+            Ok(false)
+        }
+        RuntimeTradeCommandKind::PanicSellAll => {
+            if !client.panic_sell_all(random_nonzero_u64()) {
+                return Ok(false);
+            }
+            Ok(dispatcher.orders_mut().mark_panic_sell_all())
+        }
+    }
+}
+
+fn random_nonzero_u64() -> u64 {
+    loop {
+        let value = rand::random::<u64>();
+        if value != 0 {
+            return value;
         }
     }
 }

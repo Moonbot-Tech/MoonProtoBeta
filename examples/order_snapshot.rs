@@ -51,13 +51,12 @@ fn main() {
     println!("[orders] count={}", orders.len());
     for order in orders.iter().take(20) {
         println!(
-            "[order] uid={} market={} status={:?} side={} strat={} from_cache={} vstop={}",
+            "[order] uid={} market={} status={:?} side={} strat={} vstop={}",
             order.uid,
             order.market_name,
             order.status,
             if order.is_short { "short" } else { "long" },
             order.strat_id,
-            order.from_cache,
             order.vstop_on,
         );
     }

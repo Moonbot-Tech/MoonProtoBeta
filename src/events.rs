@@ -37,19 +37,20 @@ use crate::commands::engine_api::{
     ServerInfo,
 };
 use crate::commands::market::ExchangeCode;
-use crate::commands::trade::{OrderType, TradeCtx};
+use crate::commands::trade::OrderType;
 #[cfg(test)]
 use crate::commands::ui::ClientSettingsCommand;
 use crate::protocol::Command;
 use crate::state::eps::EpsProfile;
 use crate::state::{
     AccountEvent, AccountState, BalanceEvent, BalancesState, Candle5mRow, ChartAlertsState,
-    ChartTextState, MarketDerivedSnapshot, MarketHistoryCandlesSnapshot, MarketHistoryHandle,
-    MarketHistoryReaders, MarketHistorySizing, MarketHistoryWorker, MarketsEvent, MarketsState,
-    OrderBookControl, OrderBookEvent, OrderBooks, OrderEvent, Orders, ReportControl,
-    ReportReplicationState, ReportSchema, ReportSyncRequest, ReportSyncTicket,
-    RollingTradeVolumeSnapshot, SettingsEvent, SettingsState, StratEvent, StratsState,
-    TradeStorageScope, TradesEvent, TradesState, TransferAssetsEvent, TransferAssetsState,
+    ChartTextState, KernelHealth, MarketDerivedSnapshot, MarketHistoryCandlesSnapshot,
+    MarketHistoryHandle, MarketHistoryReaders, MarketHistorySizing, MarketHistoryWorker,
+    MarketsEvent, MarketsState, NewsState, OrderBookControl, OrderBookEvent, OrderBooks,
+    OrderEvent, OrderRepair, OrderState, Orders, ReportControl, ReportReplicationState,
+    ReportSchema, ReportSyncRequest, ReportSyncTicket, RollingTradeVolumeSnapshot, SettingsEvent,
+    SettingsState, StratEvent, StratsState, TradeStorageScope, TradesEvent, TradesState,
+    TransferAssetsEvent, TransferAssetsState,
 };
 use std::ops::{Deref, DerefMut};
 
@@ -68,11 +69,11 @@ mod ui;
 
 pub(crate) use active::{ActiveAction, ActiveDispatchContext};
 pub use snapshot::MoonStateSnapshot;
+pub(crate) use types::StrategySnapshotReply;
 pub use types::{
     ArbEvent, ClosedSellOrderReportEvent, DetectEvent, DetectWatcherRow, EngineActionEvent,
     EngineActionKind, Event, LiveCandleEvent, ServerLogEvent, WatcherFillEvent, WatcherFillsEvent,
 };
-pub(crate) use types::{MissingOrderStatusRequest, StrategySnapshotReply};
 
 fn copy_max_leverage_from_markets_list(info: &ServerInfo) -> bool {
     info.exchange_code == Some(ExchangeCode::FGate)
@@ -130,7 +131,7 @@ impl<T: Clone> CowState<T> {
 /// The active runtime owns this object. Applications see only typed events and
 /// immutable [`MoonStateSnapshot`] copies published by [`crate::MoonClient`].
 pub(crate) struct EventDispatcher {
-    pub(crate) orders: CowState<Orders>,
+    pub(crate) orders: OrderState,
     pub(crate) reports: ReportReplicationState,
     pub(crate) order_books: CowState<OrderBooks>,
     pub(crate) trades: CowState<TradesState>,
@@ -143,6 +144,8 @@ pub(crate) struct EventDispatcher {
     pub(crate) markets: CowState<MarketsState>,
     pub(crate) chart_alerts: CowState<ChartAlertsState>,
     pub(crate) chart_text: CowState<ChartTextState>,
+    pub(crate) kernel_health: KernelHealth,
+    pub(crate) news: CowState<NewsState>,
     /// Session identity from `emk_BaseCheck`/`emk_AuthCheck`, pushed by the active
     /// runtime after Init so the published snapshot carries server/account info.
     /// Delphi keeps these in the engine's BaseCheck/AuthCheck state; multi-server
@@ -160,11 +163,10 @@ pub(crate) struct EventDispatcher {
     /// orderbook sequence counters from the previous server session can look
     /// like fresh gaps in the first seconds after reconnect.
     last_known_server_token: u64,
-    /// Strict `TAllStatuses.UID` generation within one hard session. Large
-    /// sliced snapshots may arrive out of order and must not roll retained
-    /// orders back after a newer snapshot was already applied.
-    orders_snapshot_session_token: u64,
-    last_orders_snapshot_generation: u64,
+    /// Application-world identity. Unlike `ServerToken`, this changes only on
+    /// a primary session/server-process boundary and therefore owns order
+    /// mirrors and tombstones across ordinary reconnect/rebind.
+    last_known_peer_app_token: u64,
     /// Delphi `Bworks.pas LastAddedNewMarket` analogue for active-lib
     /// `NewMarketFound -> GetMarketsList` auto refresh.
     last_markets_list_refresh_ms: i64,
@@ -211,6 +213,8 @@ pub(crate) struct EventDispatcher {
     /// Internal report follow-up controls (schema-unblocked sync and completed
     /// subscription watermark).
     report_controls: Vec<ReportControl>,
+    /// Addressed repair requests produced by the canonical order reducer.
+    order_repairs: Vec<OrderRepair>,
     /// Optional retained-history writer. The dispatcher only queues typed
     /// batches into this handle; the worker owns `MarketHistoryStore`.
     market_history: Option<MarketHistoryHandle>,
@@ -244,7 +248,7 @@ pub(crate) struct EventDispatcher {
 impl Default for EventDispatcher {
     fn default() -> Self {
         Self {
-            orders: CowState::default(),
+            orders: OrderState::default(),
             reports: ReportReplicationState::default(),
             order_books: CowState::default(),
             trades: CowState::default(),
@@ -257,12 +261,13 @@ impl Default for EventDispatcher {
             markets: CowState::default(),
             chart_alerts: CowState::default(),
             chart_text: CowState::default(),
+            kernel_health: KernelHealth::default(),
+            news: CowState::default(),
             session_server_info: std::sync::Arc::new(ServerInfo::default()),
             session_auth_info: None,
             local_strategy_epoch: 0,
             last_known_server_token: 0,
-            orders_snapshot_session_token: 0,
-            last_orders_snapshot_generation: 0,
+            last_known_peer_app_token: 0,
             last_markets_list_refresh_ms: 0,
             force_markets_list_refresh: false,
             trades_server_token: 0,
@@ -274,6 +279,7 @@ impl Default for EventDispatcher {
             order_book_events: Vec::new(),
             order_book_controls: Vec::new(),
             report_controls: Vec::new(),
+            order_repairs: Vec::new(),
             market_history: None,
             owned_market_history: None,
             market_history_auto_enabled: true,
@@ -344,7 +350,7 @@ impl EventDispatcher {
     ///
     /// It is updated automatically when order-channel payloads are dispatched.
     pub(crate) fn orders(&self) -> &Orders {
-        &self.orders
+        self.orders.read_model()
     }
 
     pub(crate) fn report_schema(&self) -> Option<&Arc<ReportSchema>> {
@@ -371,11 +377,8 @@ impl EventDispatcher {
         request_uid
     }
 
-    pub(crate) fn retry_active_report_page(
-        &mut self,
-        request_uid: u64,
-    ) -> Option<ReportSyncRequest> {
-        self.reports.retry_active_page(request_uid)
+    pub(crate) fn retry_active_report_page(&mut self) -> Option<(u64, ReportSyncRequest)> {
+        self.reports.retry_active_page()
     }
 
     pub(crate) fn report_waiting_for_page_apply(&self) -> bool {
@@ -418,30 +421,8 @@ impl EventDispatcher {
     /// exposed for outgoing actions such as `Client::set_immune`, where Delphi
     /// mutates the local worker before sending a command to the server.
     #[doc(hidden)]
-    pub(crate) fn orders_mut(&mut self) -> &mut Orders {
+    pub(crate) fn orders_mut(&mut self) -> &mut OrderState {
         &mut self.orders
-    }
-
-    /// Build Delphi `CleanupMissingWorkers` follow-up requests for raw
-    /// dispatcher users after `OrderEvent::Snapshot`.
-    ///
-    /// The active client path consumes the same helper internally and sends the
-    /// returned `TOrderStatusRequest`s automatically. Raw `dispatch_into` has no
-    /// `Client` handle by design, so the caller must decide whether to send
-    /// them through `Client::request_order_status`.
-    pub(crate) fn missing_order_status_requests_after_snapshot(
-        &self,
-    ) -> Vec<MissingOrderStatusRequest> {
-        self.orders
-            .missing_after_snapshot()
-            .into_iter()
-            .filter_map(|uid| {
-                self.orders.get(uid).map(|order| MissingOrderStatusRequest {
-                    ctx: order.trade_ctx(),
-                    market_name: order.market_name.clone(),
-                })
-            })
-            .collect()
     }
 
     pub(crate) fn drain_deferred_order_removals_due(&mut self, now_ms: i64, out: &mut Vec<Event>) {

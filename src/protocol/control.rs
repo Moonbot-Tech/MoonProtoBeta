@@ -8,7 +8,10 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 use crate::transport::CLIENT_HDR_SIZE;
 
 pub(crate) const PING_SIZE: usize = std::mem::size_of::<WirePing>();
-const _: [(); 54] = [(); PING_SIZE];
+const _: [(); 57] = [(); PING_SIZE];
+pub(crate) const PING_MEMORY_INFO_SIZE: usize = std::mem::size_of::<WirePingMemoryInfo>();
+const _: [(); 5] = [(); PING_MEMORY_INFO_SIZE];
+pub(crate) const PING_FLAG_MEMORY_INFO: u8 = 1;
 pub(crate) const SIZE_TEST_SIZE: usize = std::mem::size_of::<WireSizeTestData>();
 const _: [(); 6] = [(); SIZE_TEST_SIZE];
 pub(crate) const PROBE_MTU_SIZE: usize = std::mem::size_of::<WireProbeMtu>();
@@ -30,6 +33,31 @@ struct WirePing {
     rsq: u8,
     ack_start: LeU64,
     ack_session: LeU32,
+    moment_cpu: u8,
+    total_cpu: u8,
+    flags: u8,
+}
+
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+struct WirePingMemoryInfo {
+    used_memory_mb: LeU16,
+    free_physical_memory_mb: LeU16,
+    cores: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PingMemoryInfo {
+    pub(crate) used_memory_mb: u16,
+    pub(crate) free_physical_memory_mb: u16,
+    pub(crate) cores: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PingTelemetry {
+    pub(crate) moment_cpu_percent: u8,
+    pub(crate) total_cpu_percent: u8,
+    pub(crate) memory: Option<PingMemoryInfo>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -42,6 +70,10 @@ pub(crate) struct PingFrame {
     pub overheat: u8,
     pub rsq: u8,
     pub ack_session: u32,
+    pub moment_cpu_percent: u8,
+    pub total_cpu_percent: u8,
+    pub memory: Option<PingMemoryInfo>,
+    pub ack_words_offset: usize,
 }
 
 impl PingFrame {
@@ -50,6 +82,26 @@ impl PingFrame {
             return None;
         }
         let wire = WirePing::read_from_bytes(&data[..PING_SIZE]).ok()?;
+        let mut ack_words_offset = PING_SIZE;
+        let memory = if wire.flags & PING_FLAG_MEMORY_INFO != 0 {
+            if data.len() >= ack_words_offset + PING_MEMORY_INFO_SIZE {
+                let memory = WirePingMemoryInfo::read_from_bytes(
+                    &data[ack_words_offset..ack_words_offset + PING_MEMORY_INFO_SIZE],
+                )
+                .ok()?;
+                ack_words_offset += PING_MEMORY_INFO_SIZE;
+                Some(PingMemoryInfo {
+                    used_memory_mb: memory.used_memory_mb.get(),
+                    free_physical_memory_mb: memory.free_physical_memory_mb.get(),
+                    cores: memory.cores,
+                })
+            } else {
+                ack_words_offset = data.len();
+                None
+            }
+        } else {
+            None
+        };
         Some(Self {
             time: wire.time.get(),
             initial_time: wire.initial_time.get(),
@@ -59,6 +111,10 @@ impl PingFrame {
             overheat: wire.overheat,
             rsq: wire.rsq,
             ack_session: wire.ack_session.get(),
+            moment_cpu_percent: wire.moment_cpu,
+            total_cpu_percent: wire.total_cpu,
+            memory,
+            ack_words_offset,
         })
     }
 
@@ -73,7 +129,13 @@ impl PingFrame {
         total_recv_bytes: u64,
         ack_start: u64,
         ack_session: u32,
+        telemetry: PingTelemetry,
     ) -> Vec<u8> {
+        let flags = if telemetry.memory.is_some() {
+            PING_FLAG_MEMORY_INFO
+        } else {
+            0
+        };
         let wire = WirePing {
             time: LeF64::new(corrected_now_dt),
             initial_time: LeF64::new(self.initial_time),
@@ -86,8 +148,20 @@ impl PingFrame {
             rsq: self.rsq,
             ack_start: LeU64::new(ack_start),
             ack_session: LeU32::new(ack_session),
+            moment_cpu: telemetry.moment_cpu_percent,
+            total_cpu: telemetry.total_cpu_percent,
+            flags,
         };
-        wire.as_bytes().to_vec()
+        let mut out = wire.as_bytes().to_vec();
+        if let Some(memory) = telemetry.memory {
+            let memory = WirePingMemoryInfo {
+                used_memory_mb: LeU16::new(memory.used_memory_mb),
+                free_physical_memory_mb: LeU16::new(memory.free_physical_memory_mb),
+                cores: memory.cores,
+            };
+            out.extend_from_slice(memory.as_bytes());
+        }
+        out
     }
 }
 
@@ -191,8 +265,9 @@ mod tests {
 
     #[test]
     fn service_records_have_delphi_sizes() {
-        assert_eq!(std::mem::size_of::<WirePing>(), 54);
-        assert_eq!(PING_SIZE, 54);
+        assert_eq!(std::mem::size_of::<WirePing>(), 57);
+        assert_eq!(PING_SIZE, 57);
+        assert_eq!(std::mem::size_of::<WirePingMemoryInfo>(), 5);
         assert_eq!(std::mem::size_of::<WireSizeTestData>(), 6);
         assert_eq!(SIZE_TEST_SIZE, 6);
         assert_eq!(std::mem::size_of::<WireProbeMtu>(), 5);
@@ -225,5 +300,96 @@ mod tests {
         assert_eq!(&ack[0..2], &0xAABBu16.to_le_bytes());
         assert_eq!(ack[2], 1);
         assert_eq!(&ack[3..5], &((CLIENT_HDR_SIZE + 7) as u16).to_le_bytes());
+    }
+
+    #[test]
+    fn ping_memory_profile_precedes_ack_words() {
+        let wire = WirePing {
+            time: LeF64::new(1.0),
+            initial_time: LeF64::new(2.0),
+            trip_delay: LeI32::new(3),
+            pmtu: LeU16::new(1200),
+            global_timing_orders: LeU16::new(4),
+            overheat: 5,
+            total_sent_bytes: LeU64::new(6),
+            total_recv_bytes: LeU64::new(7),
+            rsq: 8,
+            ack_start: LeU64::new(9),
+            ack_session: LeU32::new(10),
+            moment_cpu: 11,
+            total_cpu: 12,
+            flags: PING_FLAG_MEMORY_INFO,
+        };
+        let memory = WirePingMemoryInfo {
+            used_memory_mb: LeU16::new(1234),
+            free_physical_memory_mb: LeU16::new(5678),
+            cores: 24,
+        };
+        let ack_word = 0x8877_6655_4433_2211u64;
+        let mut payload = wire.as_bytes().to_vec();
+        payload.extend_from_slice(memory.as_bytes());
+        payload.extend_from_slice(&ack_word.to_le_bytes());
+
+        let ping = PingFrame::read(&payload).expect("valid v4 Ping");
+        assert_eq!(ping.ack_words_offset, PING_SIZE + PING_MEMORY_INFO_SIZE);
+        assert_eq!(
+            ping.memory,
+            Some(PingMemoryInfo {
+                used_memory_mb: 1234,
+                free_physical_memory_mb: 5678,
+                cores: 24,
+            })
+        );
+        assert_eq!(
+            u64::from_le_bytes(
+                payload[ping.ack_words_offset..ping.ack_words_offset + 8]
+                    .try_into()
+                    .unwrap()
+            ),
+            ack_word
+        );
+    }
+
+    #[test]
+    fn ping_response_overwrites_peer_telemetry_with_local_profile() {
+        let wire = WirePing {
+            time: LeF64::new(1.0),
+            initial_time: LeF64::new(2.0),
+            trip_delay: LeI32::new(3),
+            pmtu: LeU16::new(1200),
+            global_timing_orders: LeU16::new(4),
+            overheat: 5,
+            total_sent_bytes: LeU64::new(6),
+            total_recv_bytes: LeU64::new(7),
+            rsq: 8,
+            ack_start: LeU64::new(9),
+            ack_session: LeU32::new(10),
+            moment_cpu: 90,
+            total_cpu: 91,
+            flags: 0,
+        };
+        let ping = PingFrame::read(wire.as_bytes()).unwrap();
+        let response = ping.response_bytes(
+            3.0,
+            100,
+            200,
+            300,
+            400,
+            PingTelemetry {
+                moment_cpu_percent: 17,
+                total_cpu_percent: 23,
+                memory: Some(PingMemoryInfo {
+                    used_memory_mb: 345,
+                    free_physical_memory_mb: 678,
+                    cores: 16,
+                }),
+            },
+        );
+
+        assert_eq!(response.len(), PING_SIZE + PING_MEMORY_INFO_SIZE);
+        let echoed = PingFrame::read(&response).unwrap();
+        assert_eq!(echoed.moment_cpu_percent, 17);
+        assert_eq!(echoed.total_cpu_percent, 23);
+        assert_eq!(echoed.memory.unwrap().cores, 16);
     }
 }

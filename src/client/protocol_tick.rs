@@ -293,9 +293,8 @@ impl ProtocolCore<'_> {
                             .load(Ordering::Relaxed),
                     ) < crate::client::domain_report::REPORT_RESPONSE_TIMEOUT_MS;
                 if !response_wait_active {
-                    let request_uid = Client::next_report_request_uid();
-                    if let Some(active_request) =
-                        mode.dispatcher.retry_active_report_page(request_uid)
+                    if let Some((request_uid, active_request)) =
+                        mode.dispatcher.retry_active_report_page()
                     {
                         self.client.set_report_sync_intent(active_request);
                         self.client

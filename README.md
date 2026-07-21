@@ -30,10 +30,6 @@
 
 MoonProto is the live client-side bridge to a MoonBot core. The core remains the execution engine — it connects to exchanges and owns orders, strategies, risk logic, balances, and authoritative trading state. MoonProto keeps your terminal or tool connected to that core: transport, authorization, reconnect, subscriptions, retained state, events, and typed user intents.
 
-> **Core compatibility:** this SDK revision requires a MoonBot core build dated
-> **2026-07-16 or newer**. Earlier cores use the previous positional order-snapshot
-> wire format and are not compatible with this revision.
-
 <p align="center">
   <img src="assets/architecture.svg" width="820" alt="Your trading UI / dashboard / control tool talks to the MoonProto Rust library, which talks to a MoonBot core (MoonProto enabled), which owns exchange accounts, orders, strategies, and balances.">
 </p>
@@ -55,7 +51,7 @@ Because MoonProto already owns the runtime, a terminal normally does **not** cre
 Application code usually works with:
 
 - **`MoonClient`** — the connection/runtime owner.
-- **Snapshots and events** — current markets, balances, orders, trades, orderbooks, candles, strategies, settings, and UI/chart facts.
+- **Snapshots and events** — current markets, balances, orders, trades, orderbooks, candles, strategies, settings, news/tags, core health, and UI/chart facts.
 - **Typed intents** — subscribe, place / cancel / move order, refresh assets, update settings.
 
 Internally, the crate contains the transport modes V0/V1/V2, handshake / authorization / reconnect / liveness handling, reliable sliced datagrams with ACK/retry over UDP, typed binary command parsers and builders, the retained read-model state, and the owned runtime session API.
@@ -176,6 +172,7 @@ Public API notes live in [`docs/`](docs). Start here:
 | [events](docs/events.md) · [lifecycle](docs/lifecycle.md) | Events, snapshots, and session lifecycle. |
 | [markets](docs/markets.md) · [trades](docs/trades.md) · [order_books](docs/order_books.md) | Market data read-models. |
 | [orders](docs/orders.md) · [candles](docs/candles.md) · [reports](docs/reports.md) | Orders, candle history, reports. |
+| [news](docs/news.md) | Retained/live news JSON and the tags catalog. |
 | [engine_api](docs/engine_api.md) · [strats](docs/strats.md) | Server/exchange mutations and strategies. |
 | [time](docs/time.md) · [multi_server](docs/multi_server.md) | Clock handling and multi-server setups. |
 

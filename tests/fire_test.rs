@@ -86,11 +86,12 @@ use moonproto::Command;
 use moonproto::{
     parse_key_info, ClientConfig, ClientSettingsCommand, ConnectConfig, DeepHistoryKind,
     EngineMethod, EngineResponse, ExchangeKind, ExchangeOrder, FieldValue, ImportedKeys,
-    InitConfig, InitialStrategies, LifecycleEvent, MoonClient, MoonShotStrategy, MoonStateSnapshot,
-    MoonTime, OrderWorkerStatus, ProfitStateCommand, ProtocolMetricsSnapshot, ReportEvent,
-    ReportHistoryDepth, ReportRow, ReportSchema, ReportSyncComplete, ReportSyncRequest,
-    ReportValue, StrategyDynamicPicklist, StrategyFieldLayout, StrategyFieldUiKind, StrategyFields,
-    StrategyKind, StrategySchema, StrategySnapshot, TradesStreamMode, TransportMode,
+    InitConfig, InitialStrategies, KernelHealth, LifecycleEvent, MoonClient, MoonShotStrategy,
+    MoonStateSnapshot, MoonTime, NewsEvent, OrderWorkerStatus, ProfitStateCommand,
+    ProtocolMetricsSnapshot, ReportEvent, ReportHistoryDepth, ReportRow, ReportSchema,
+    ReportSyncComplete, ReportSyncRequest, ReportValue, StrategyDynamicPicklist,
+    StrategyFieldLayout, StrategyFieldUiKind, StrategyFields, StrategyKind, StrategySchema,
+    StrategySnapshot, TradesStreamMode, TransportMode,
 };
 
 const DEFAULT_FIRETEST_ERR_EMU_PERCENT: u8 = 10;
@@ -476,6 +477,15 @@ struct SessionStats {
     kernel_license_state: Option<KernelLicenseProbe>,
     profit_state_events: u64,
     profit_state: Option<ProfitStateCommand>,
+    kernel_health_events: u64,
+    kernel_health: Option<KernelHealth>,
+    news_history_events: u64,
+    news_history_count: usize,
+    news_history_tags_seen: bool,
+    news_live_events: u64,
+    news_tags_events: u64,
+    news_snapshot_count: usize,
+    news_tags_present: bool,
     strategy_events: u64,
     strategy_snapshot_events: u64,
     strategy_schema_events: u64,
@@ -497,7 +507,6 @@ struct SessionStats {
     market_invariant_error: Option<String>,
     order_events: u64,
     order_event_kinds: HashMap<&'static str, u64>,
-    order_uid_by_request: HashMap<u64, u64>,
     order_status_by_uid: HashMap<u64, OrderWorkerStatus>,
     order_market_by_uid: HashMap<u64, String>,
     order_sell_reason_by_uid: HashMap<u64, String>,
@@ -552,6 +561,15 @@ impl Clone for SessionStats {
             kernel_license_state: self.kernel_license_state,
             profit_state_events: self.profit_state_events,
             profit_state: self.profit_state,
+            kernel_health_events: self.kernel_health_events,
+            kernel_health: self.kernel_health,
+            news_history_events: self.news_history_events,
+            news_history_count: self.news_history_count,
+            news_history_tags_seen: self.news_history_tags_seen,
+            news_live_events: self.news_live_events,
+            news_tags_events: self.news_tags_events,
+            news_snapshot_count: self.news_snapshot_count,
+            news_tags_present: self.news_tags_present,
             strategy_events: self.strategy_events,
             strategy_snapshot_events: self.strategy_snapshot_events,
             strategy_schema_events: self.strategy_schema_events,
@@ -573,7 +591,6 @@ impl Clone for SessionStats {
             market_invariant_error: self.market_invariant_error.clone(),
             order_events: self.order_events,
             order_event_kinds: self.order_event_kinds.clone(),
-            order_uid_by_request: self.order_uid_by_request.clone(),
             order_status_by_uid: self.order_status_by_uid.clone(),
             order_market_by_uid: self.order_market_by_uid.clone(),
             order_sell_reason_by_uid: self.order_sell_reason_by_uid.clone(),
@@ -644,7 +661,7 @@ impl SessionStats {
                     missing
                 )
             });
-        format!(
+        let base = format!(
             "connected_now={} fresh={} again={} reconnecting={} disconnected={} server_events={} engine={} raw={} logs={} settings={} lev_manage_events={} runtime_state_events={} runtime_state={:?} kernel_license_events={} kernel_license={:?} profit_state_events={} profit_state={:?} strats={} strat_snapshots={} schema_events={} schema_kinds={} schema_fields={} strat_runtime_events={} strategies_running={:?} strategy_rows={} markets={} trades={} target_trade_packets={} books={} target_book_full={} target_book_update={} market_probe=[{}] order_events={} balances={} transfer_assets={} mask={:#05b} failures={} coin_card_events={} updates={} failures={} last_count={} parse_failed={}{} candles={} retained_candles_5m={} newest_age_s={:?}",
             self.connected_now,
             self.connected_fresh,
@@ -692,6 +709,18 @@ impl SessionStats {
             candles,
             self.retained_candles_5m,
             self.retained_candles_5m_newest_age_s,
+        );
+        format!(
+            "{base} kernel_health_events={} kernel_health={:?} news_history_events={} news_history_count={} news_history_tags={} news_live={} news_tags_events={} news_retained={} news_tags_present={}",
+            self.kernel_health_events,
+            self.kernel_health,
+            self.news_history_events,
+            self.news_history_count,
+            self.news_history_tags_seen,
+            self.news_live_events,
+            self.news_tags_events,
+            self.news_snapshot_count,
+            self.news_tags_present,
         )
     }
 
@@ -987,6 +1016,12 @@ impl Session {
             .kernel_license_state
             .map(KernelLicenseProbe::from);
         st.profit_state = snapshot.settings().profit_state;
+        let health = snapshot.kernel_health();
+        if health != KernelHealth::default() {
+            st.kernel_health = Some(health);
+        }
+        st.news_snapshot_count = snapshot.news().len();
+        st.news_tags_present = snapshot.news().tags_json().is_some();
         st.strategies_running = snapshot.strats().strategies_running();
         if let Some(state) = snapshot.markets().trade_state(&st.market) {
             if state.last_trade_price > 0.0 {
@@ -3053,11 +3088,28 @@ fn record_event(
         Event::Arb(arb) => {
             log_server_event(&st, event_no, format!("Arb {}", arb_summary(arb)));
         }
+        Event::KernelHealth(health) => {
+            st.kernel_health_events += 1;
+            st.kernel_health = Some(*health);
+            log_server_event(&st, event_no, format!("KernelHealth {health:?}"));
+        }
+        Event::News(event) => {
+            match event {
+                NewsEvent::Received { .. } => st.news_live_events += 1,
+                NewsEvent::TagsUpdated { .. } => st.news_tags_events += 1,
+                NewsEvent::HistoryApplied {
+                    news_count,
+                    tags_included,
+                } => {
+                    st.news_history_events += 1;
+                    st.news_history_count = st.news_history_count.max(*news_count);
+                    st.news_history_tags_seen |= *tags_included;
+                }
+            }
+            log_server_event(&st, event_no, format!("News {event:?}"));
+        }
         Event::ServerLog(log) => {
             st.server_logs += 1;
-            if let Some((request_uid, server_uid)) = parse_new_order_log_mapping(&log.msg) {
-                st.order_uid_by_request.insert(request_uid, server_uid);
-            }
             log_server_event(
                 &st,
                 event_no,
@@ -3152,26 +3204,11 @@ fn order_event_kind(ev: &OrderEvent) -> &'static str {
         OrderEvent::Created(_) => "Created",
         OrderEvent::Updated(_) => "Updated",
         OrderEvent::Removed(_) => "Removed",
-        OrderEvent::BulkReplaced { .. } => "BulkReplaced",
         OrderEvent::TracePoint { .. } => "TracePoint",
         OrderEvent::CorridorChanged(_) => "CorridorChanged",
-        OrderEvent::VStopChanged(_) => "VStopChanged",
-        OrderEvent::StopsChanged(_) => "StopsChanged",
         OrderEvent::Snapshot => "Snapshot",
         OrderEvent::Ignored { .. } => "Ignored",
     }
-}
-
-fn parse_new_order_log_mapping(msg: &str) -> Option<(u64, u64)> {
-    let request_marker = "request <";
-    let arrow_marker = "=> <";
-    let req_start = msg.find(request_marker)? + request_marker.len();
-    let req_end = msg[req_start..].find('>')? + req_start;
-    let arrow_start = msg[req_end..].find(arrow_marker)? + req_end + arrow_marker.len();
-    let server_end = msg[arrow_start..].find('>')? + arrow_start;
-    let request_uid = msg[req_start..req_end].trim().parse::<u64>().ok()?;
-    let server_uid = msg[arrow_start..server_end].trim().parse::<u64>().ok()?;
-    Some((request_uid, server_uid))
 }
 
 fn record_strategy_snapshot(
@@ -3619,9 +3656,24 @@ fn has_initial_health(st: &SessionStats) -> bool {
         && st.strategy_schema_events > 0
         && st.strategy_schema_kinds > 0
         && st.strategy_schema_fields > 0
+        && st.kernel_health_events > 0
+        && st.kernel_health.is_some_and(kernel_health_is_complete)
+        && st.news_history_events > 0
+        && st.news_history_count > 0
+        && st.news_history_tags_seen
+        && st.news_snapshot_count > 0
+        && st.news_tags_present
         && st.trades_apply > 0
         && st.orderbook_apply > 0
         && st.parse_failed == 0
+}
+
+fn kernel_health_is_complete(health: KernelHealth) -> bool {
+    health.process_cpu_percent <= 100
+        && health.system_cpu_percent <= 100
+        && health.used_memory_mb.is_some()
+        && health.free_physical_memory_mb.is_some()
+        && health.logical_cpu_count.is_some_and(|cores| cores > 0)
 }
 
 fn has_transfer_assets_refresh(st: &SessionStats) -> bool {
@@ -4380,6 +4432,13 @@ struct MoonClientPathStats {
     first_retained_history_at_s: Option<f64>,
     runtime_state_events: u64,
     runtime_state: Option<RuntimeStateProbe>,
+    kernel_health_events: u64,
+    kernel_health: Option<KernelHealth>,
+    news_history_events: u64,
+    news_history_count: usize,
+    news_history_tags_seen: bool,
+    news_snapshot_count: usize,
+    news_tags_present: bool,
     init_step_at_s: HashMap<&'static str, f64>,
     engine_method_counts: HashMap<u8, u64>,
     engine_method_first_at_s: HashMap<u8, f64>,
@@ -4556,6 +4615,18 @@ impl MoonClientPathStats {
             Event::Settings(SettingsEvent::RuntimeStateUpdated) => {
                 self.runtime_state_events += 1;
             }
+            Event::KernelHealth(health) => {
+                self.kernel_health_events += 1;
+                self.kernel_health = Some(*health);
+            }
+            Event::News(NewsEvent::HistoryApplied {
+                news_count,
+                tags_included,
+            }) => {
+                self.news_history_events += 1;
+                self.news_history_count = self.news_history_count.max(*news_count);
+                self.news_history_tags_seen |= *tags_included;
+            }
             _ => {}
         }
     }
@@ -4566,6 +4637,12 @@ impl MoonClientPathStats {
         target_market: &str,
         elapsed_s: f64,
     ) {
+        let health = snapshot.kernel_health();
+        if health != KernelHealth::default() {
+            self.kernel_health = Some(health);
+        }
+        self.news_snapshot_count = snapshot.news().len();
+        self.news_tags_present = snapshot.news().tags_json().is_some();
         let Some(market) = snapshot.markets().get(target_market) else {
             return;
         };
@@ -4655,6 +4732,13 @@ impl MoonClientPathStats {
         self.strategy_snapshot_events > 0
             && self.lifecycle_connected
             && self.lifecycle_ready
+            && self.kernel_health_events > 0
+            && self.kernel_health.is_some_and(kernel_health_is_complete)
+            && self.news_history_events > 0
+            && self.news_history_count > 0
+            && self.news_history_tags_seen
+            && self.news_snapshot_count > 0
+            && self.news_tags_present
             && self.strategy_schema_events > 0
             && self.strategy_schema_kinds > 0
             && self.strategy_schema_fields > 0
@@ -4699,7 +4783,7 @@ impl MoonClientPathStats {
                 .copied()
         };
         let init_at = |step: &'static str| self.init_step_at_s.get(step).copied();
-        format!(
+        let base = format!(
             "phase connected_at={:?}s ready_at={:?}s init_step BaseCheck={:?}s AuthCheck={:?}s GetMarketsList={:?}s GetMarketsIndexes={:?}s UpdateMarketsList={:?}s StrategySchema={:?}s PostInitFlush={:?}s StartupSnapshot={:?}s StartupEvents={:?}s engine_event_at BaseCheck={:?}s AuthCheck={:?}s GetMarketsList={:?}s GetMarketsIndexes={:?}s UpdateMarketsList={:?}s SubscribeAllTrades={:?}s SubscribeOrderBook={:?}s schema_event_at={:?}s price_at={:?}s trade_at={:?}s book_at={:?}s retained_at={:?}s transfer_done_at={:?}s coin_card_at={:?}s candles_ready_at={:?}s lifecycle connected={} ready={} runtime_state_events={} runtime_state={:?} methods BaseCheck={} AuthCheck={} GetMarketsList={} GetMarketsIndexes={} UpdateMarketsList={} SubscribeAllTrades={} SubscribeOrderBook={} strats={} schemas={} schema_kinds={} schema_fields={} trades={} books={} full={} update={} bid={:?} ask={:?} trade={:?} market_price={:?} transfer_mask={:#05b} transfer_done={} transfer_fail={} coin_card_updates={} coin_card_count={} candles_ready={} candles_markets={} candles_rows={} retained_candles_5m={} newest_age_s={:?} retained_last={} retained_trades={}/{} derived_vol_1m={:.4} derived_vol_5m={:.4} candle_vol_1h={:.4} parse_failed={} err={}",
             self.lifecycle_connected_at_s,
             self.lifecycle_ready_at_s,
@@ -4768,6 +4852,16 @@ impl MoonClientPathStats {
             self.derived_candle_vol_1h,
             self.parse_failed,
             self.market_invariant_error.as_deref().unwrap_or("none")
+        );
+        format!(
+            "{base} kernel_health_events={} kernel_health={:?} news_history_events={} news_history_count={} news_history_tags={} news_retained={} news_tags_present={}",
+            self.kernel_health_events,
+            self.kernel_health,
+            self.news_history_events,
+            self.news_history_count,
+            self.news_history_tags_seen,
+            self.news_snapshot_count,
+            self.news_tags_present,
         )
     }
 }
@@ -4905,6 +4999,21 @@ fn run_moonclient_public_smoke(
         healthy,
         "FIRETEST {label}: MoonClient public path did not reach health within startup={startup_timeout:?} + stream_after_ready={stream_after_ready:?}: {}",
         stats.summary()
+    );
+    let health = stats
+        .kernel_health
+        .expect("healthy MoonClient path must retain kernel telemetry");
+    println!(
+        "OK: FIRETEST {label}: kernel CPU process={}%, system={}%, memory used={}MB free={}MB cores={}",
+        health.process_cpu_percent,
+        health.system_cpu_percent,
+        health.used_memory_mb.unwrap(),
+        health.free_physical_memory_mb.unwrap(),
+        health.logical_cpu_count.unwrap()
+    );
+    println!(
+        "OK: FIRETEST {label}: news history={} retained={} tags_present={}",
+        stats.news_history_count, stats.news_snapshot_count, stats.news_tags_present
     );
     let metrics = client.protocol_metrics_snapshot();
     println!(
@@ -5449,36 +5558,64 @@ fn market_live_ask(session: &Session, market: &str) -> Option<f64> {
         })
 }
 
-fn order_uid_for_request_or_new_market(
-    st: &SessionStats,
+fn matching_new_order_uids(
+    session: &Session,
     before_uids: &[u64],
-    request_uid: u64,
     market: &str,
-) -> Option<u64> {
-    (request_uid != 0)
-        .then(|| st.order_uid_by_request.get(&request_uid).copied())
-        .flatten()
-        .or_else(|| {
-            st.order_status_by_uid.iter().find_map(|(uid, _)| {
-                (!before_uids.contains(uid)
-                    && st
-                        .order_market_by_uid
-                        .get(uid)
-                        .map(|seen| seen == market)
-                        .unwrap_or(false))
-                .then_some(*uid)
-            })
+    is_short: bool,
+    requested_price: f64,
+    requested_size_usd: f64,
+    emulator_mode: bool,
+) -> Vec<u64> {
+    // OrdersProto does not echo the outbound request UID. Match this test-owned
+    // order by the canonical facts that the public snapshot actually exposes.
+    let price_tolerance = (requested_price.abs() * 0.001).max(EPS);
+    let size_tolerance = (requested_size_usd.abs() * 0.25).max(EPS);
+    session
+        .state_snapshot()
+        .orders()
+        .iter()
+        .filter(|order| {
+            if before_uids.contains(&order.uid)
+                || order.market_name != market
+                || order.is_short != is_short
+                || order.strat_id != 0
+                || order.emulator_mode != emulator_mode
+            {
+                return false;
+            }
+            let observed_price = if order.buy_price > EPS {
+                order.buy_price
+            } else {
+                order.pending_buy_cond_price.unwrap_or_default()
+            };
+            (observed_price - requested_price).abs() <= price_tolerance
+                && (order.buy_size - requested_size_usd).abs() <= size_tolerance
         })
+        .map(|order| order.uid)
+        .collect()
 }
 
 fn cancel_if_known(
     session: &mut Session,
     before_uids: &[u64],
-    request_uid: u64,
     market: &str,
+    price: f64,
+    emulator_mode: bool,
 ) -> Option<u64> {
-    let st = session.snapshot();
-    let uid = order_uid_for_request_or_new_market(&st, before_uids, request_uid, market)?;
+    let candidates = matching_new_order_uids(
+        session,
+        before_uids,
+        market,
+        false,
+        price,
+        FIRETEST_ORDER_SIZE_USD,
+        emulator_mode,
+    );
+    let [uid] = candidates.as_slice() else {
+        return None;
+    };
+    let uid = *uid;
     if session.cancel_order(uid) {
         println!("FIRETEST real order cancel: cleanup cancel queued uid={uid}");
     } else {
@@ -6164,8 +6301,21 @@ fn run_real_order_cancel_gate_body(a: &mut Session, b: &mut Session) {
         b.pump(PUMP_SLICE);
         let st = a.snapshot();
         if server_uid.is_none() {
-            server_uid =
-                order_uid_for_request_or_new_market(&st, &before_uids, request_uid, market);
+            let candidates = matching_new_order_uids(
+                a,
+                &before_uids,
+                market,
+                false,
+                price,
+                FIRETEST_ORDER_SIZE_USD,
+                false,
+            );
+            assert!(
+                candidates.len() <= 1,
+                "FireTest real order cancel: ambiguous matching {market} orders {candidates:?}; new_market_orders=[{}]",
+                describe_new_market_orders(a, &before_uids, market)
+            );
+            server_uid = candidates.first().copied();
         }
         if let Some(uid) = server_uid {
             let local_status = st.order_status_by_uid.get(&uid).copied();
@@ -6203,7 +6353,7 @@ fn run_real_order_cancel_gate_body(a: &mut Session, b: &mut Session) {
     }
 
     let Some(server_uid) = server_uid else {
-        let _ = cancel_if_known(a, &before_uids, request_uid, market);
+        let _ = cancel_if_known(a, &before_uids, market, price, false);
         panic!(
             "FireTest real order cancel: server order uid for {market} did not arrive within {:?}",
             FIRETEST_REAL_BALANCE_ORDER_TIMEOUT
@@ -6751,6 +6901,23 @@ fn describe_session_order(session: &Session, uid: u64) -> String {
         .unwrap_or_else(|| format!("uid={uid} <not present in snapshot>"))
 }
 
+fn describe_new_market_orders(session: &Session, before_uids: &[u64], market: &str) -> String {
+    let Some(snapshot) = session.maybe_state_snapshot() else {
+        return "<snapshot unavailable>".to_owned();
+    };
+    let rows = snapshot
+        .orders()
+        .iter()
+        .filter(|order| !before_uids.contains(&order.uid) && order.market_name == market)
+        .map(format_order_for_debug)
+        .collect::<Vec<_>>();
+    if rows.is_empty() {
+        "<none>".to_owned()
+    } else {
+        rows.join(" | ")
+    }
+}
+
 fn replace_local_effect_seen(
     order: &Order,
     status_before: OrderWorkerStatus,
@@ -6863,30 +7030,39 @@ fn run_order_lifecycle_gate_body(
             a,
             b,
             cfg.connect_timeout,
-            "order server tag/new status",
+            "order canonical state",
             |a, _| {
-                let st = a.snapshot();
-                st.order_uid_by_request.contains_key(&request_uid)
-                    || a.state_snapshot().orders().iter().any(|order| {
-                        !before_uids.contains(&order.uid) && order.market_name == cfg.market
-                    })
+                !matching_new_order_uids(
+                    a,
+                    &before_uids,
+                    &cfg.market,
+                    false,
+                    initial_price,
+                    FIRETEST_ORDER_SIZE_USD,
+                    true,
+                )
+                .is_empty()
             }
         ),
-        "new order did not produce server tag/status within {:?}",
+        "new order did not produce canonical state within {:?}",
         cfg.connect_timeout
     );
-    let st = a.snapshot();
-    let server_uid = st
-        .order_uid_by_request
-        .get(&request_uid)
-        .copied()
-        .or_else(|| {
-            a.state_snapshot().orders().iter().find_map(|order| {
-                (!before_uids.contains(&order.uid) && order.market_name == cfg.market)
-                    .then_some(order.uid)
-            })
-        })
-        .expect("order server uid must be known after gate");
+    let candidates = matching_new_order_uids(
+        a,
+        &before_uids,
+        &cfg.market,
+        false,
+        initial_price,
+        FIRETEST_ORDER_SIZE_USD,
+        true,
+    );
+    assert_eq!(
+        candidates.len(),
+        1,
+        "order canonical-state correlation must be unique; candidates={candidates:?} new_market_orders=[{}]",
+        describe_new_market_orders(a, &before_uids, &cfg.market)
+    );
+    let server_uid = candidates[0];
 
     assert!(
         pump_pair_until(a, b, cfg.wait, "order waiting buy status", |a, _| {
@@ -6895,8 +7071,11 @@ fn run_order_lifecycle_gate_body(
                 Some(OrderWorkerStatus::None | OrderWorkerStatus::BuySet)
             )
         }),
-        "new order uid={} did not stay in waiting buy status",
-        server_uid
+        "new order uid={} did not stay in waiting buy status; correlation=canonical-state current_status={:?} selected=[{}] new_market_orders=[{}]",
+        server_uid,
+        a.snapshot().order_status_by_uid.get(&server_uid).copied(),
+        describe_session_order(a, server_uid),
+        describe_new_market_orders(a, &before_uids, &cfg.market)
     );
 
     let status_before_replace = a
@@ -7232,6 +7411,23 @@ fn fire_test_active_library_health() {
     );
     let a_initial = a.snapshot();
     let b_initial = b.snapshot();
+    for stats in [&a_initial, &b_initial] {
+        let health = stats
+            .kernel_health
+            .expect("initial health must retain kernel telemetry");
+        println!(
+            "OK: FIRETEST {}: kernel CPU process={}%, system={}%, memory used={}MB free={}MB cores={}; news history={} retained={} tags_present={}",
+            stats.label,
+            health.process_cpu_percent,
+            health.system_cpu_percent,
+            health.used_memory_mb.unwrap(),
+            health.free_physical_memory_mb.unwrap(),
+            health.logical_cpu_count.unwrap(),
+            stats.news_history_count,
+            stats.news_snapshot_count,
+            stats.news_tags_present
+        );
+    }
     if a_initial.lev_manage_events == 0 || b_initial.lev_manage_events == 0 {
         println!(
             "FIRETEST NOTE initial health: LevManage was not observed on both clients (A={} B={}); live market/trades/orderbook health does not depend on this optional SrvConnect UI extension",

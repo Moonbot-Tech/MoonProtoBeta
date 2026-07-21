@@ -79,12 +79,11 @@ fn main() {
     };
 
     println!(
-        "[target] uid={} market={} status={:?} side={} from_cache={}",
+        "[target] uid={} market={} status={:?} side={}",
         order.uid,
         order.market_name,
         order.status,
         if order.is_short { "short" } else { "long" },
-        order.from_cache,
     );
 
     if !send {

@@ -16,9 +16,6 @@ impl Client {
                 crate::events::ActiveAction::RequestUpdateMarketsList => {
                     self.send_api_request(&crate::commands::engine_request::update_markets_list());
                 }
-                crate::events::ActiveAction::RequestOrderSnapshot => {
-                    self.request_all_statuses(rand::random());
-                }
                 crate::events::ActiveAction::RequestStrategySchema => {
                     self.strat_schema_request();
                 }
@@ -46,11 +43,11 @@ impl Client {
                         &data,
                     );
                 }
-                crate::events::ActiveAction::RequestOrderStatus { ctx, market_name } => {
-                    self.request_order_status(ctx, &market_name);
-                }
-                crate::events::ActiveAction::OrderCancel { request } => {
-                    self.send_order_cancel_request(request);
+                crate::events::ActiveAction::RequestOrderStatus {
+                    order_id,
+                    exact_rev,
+                } => {
+                    self.request_order_status(order_id, exact_rev);
                 }
                 crate::events::ActiveAction::TradesResend { payload } => {
                     self.send_api_request(&payload);

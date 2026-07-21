@@ -313,8 +313,8 @@ impl CoinCardCandlesTicket {
 
 /// User-facing VStop settings for one tracked order.
 ///
-/// The runtime derives the current order status and route from live `Orders`
-/// before sending. This type only describes the UI intent.
+/// The runtime resolves the server order UID and current status from live
+/// `Orders` before sending. This type only describes the UI intent.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VStopParams {
     pub(crate) enabled: bool,
@@ -391,20 +391,20 @@ mod tests {
 
     #[test]
     fn split_order_params_hide_wire_flags_behind_intents() {
-        let normal = SplitOrderParams::new("BTCUSDT", 3);
-        assert_eq!(normal.market, "BTCUSDT");
+        let normal = SplitOrderParams::new(101, 3);
+        assert_eq!(normal.order.uid(), 101);
         assert_eq!(normal.parts, 3);
         assert!(!normal.is_strategy_piece());
         assert!(!normal.sells_strategy_piece());
 
-        let piece = SplitOrderParams::strategy_piece("ETHUSDT", 2);
-        assert_eq!(piece.market, "ETHUSDT");
+        let piece = SplitOrderParams::strategy_piece(102, 2);
+        assert_eq!(piece.order.uid(), 102);
         assert_eq!(piece.parts, 2);
         assert!(piece.is_strategy_piece());
         assert!(!piece.sells_strategy_piece());
 
-        let piece_sell = SplitOrderParams::strategy_piece_and_sell("SOLUSDT", 2);
-        assert_eq!(piece_sell.market, "SOLUSDT");
+        let piece_sell = SplitOrderParams::strategy_piece_and_sell(103, 2);
+        assert_eq!(piece_sell.order.uid(), 103);
         assert_eq!(piece_sell.parts, 2);
         assert!(piece_sell.is_strategy_piece());
         assert!(piece_sell.sells_strategy_piece());
@@ -438,7 +438,7 @@ pub enum MoonClientError {
     RequestTimeout,
     /// A one-shot runtime request channel was closed.
     RequestDisconnected,
-    /// Session route fields required by market-level trade actions are missing.
+    /// Session route fields required by the legacy penalty action are missing.
     TradeContext(TradeContextError),
     /// Retained state required to build a high-level command is not ready yet.
     StateUnavailable(&'static str),
@@ -543,6 +543,36 @@ pub enum OrderSide {
     Short,
 }
 
+/// Existing order selected by application code for an order-scoped action.
+///
+/// Callers can pass either the server order UID or a borrowed immutable
+/// [`crate::state::Order`] from a snapshot. The runtime resolves the current
+/// live order before applying an optimistic local change and sending the
+/// matching protocol command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct OrderTarget {
+    uid: u64,
+}
+
+impl OrderTarget {
+    /// Server order UID.
+    pub const fn uid(self) -> u64 {
+        self.uid
+    }
+}
+
+impl From<u64> for OrderTarget {
+    fn from(uid: u64) -> Self {
+        Self { uid }
+    }
+}
+
+impl From<&crate::state::Order> for OrderTarget {
+    fn from(order: &crate::state::Order) -> Self {
+        Self { uid: order.uid }
+    }
+}
+
 impl OrderSide {
     pub const fn is_short(self) -> bool {
         matches!(self, Self::Short)
@@ -558,6 +588,10 @@ pub struct NewOrderParams {
     pub size: f64,
     /// `None` sends `StratID=0`.
     pub strategy_id: Option<u64>,
+    /// Optional planned sell target stored with the new order.
+    pub planned_sell_price: f64,
+    /// Ask the core to use market-stop semantics for this order.
+    pub use_market_stop: bool,
 }
 
 impl NewOrderParams {
@@ -568,6 +602,8 @@ impl NewOrderParams {
             price,
             size,
             strategy_id: None,
+            planned_sell_price: 0.0,
+            use_market_stop: false,
         }
     }
 
@@ -589,6 +625,16 @@ impl NewOrderParams {
         self.strategy_id = Some(strategy_id);
         self
     }
+
+    pub fn with_planned_sell_price(mut self, planned_sell_price: f64) -> Self {
+        self.planned_sell_price = planned_sell_price;
+        self
+    }
+
+    pub fn with_market_stop(mut self, use_market_stop: bool) -> Self {
+        self.use_market_stop = use_market_stop;
+        self
+    }
 }
 
 /// Client-side ticket returned when a new-order intent is queued.
@@ -607,10 +653,10 @@ pub struct NewOrderTicket {
     pub request_uid: u64,
 }
 
-/// User-facing parameters for splitting the selected sell order.
-#[derive(Debug, Clone)]
+/// User-facing parameters for splitting one selected order.
+#[derive(Debug, Clone, Copy)]
 pub struct SplitOrderParams {
-    pub market: String,
+    pub order: OrderTarget,
     pub parts: i32,
     split_small: bool,
     split_small_sell: bool,
@@ -618,14 +664,14 @@ pub struct SplitOrderParams {
 
 impl SplitOrderParams {
     /// Split the selected sell order into `parts`.
-    pub fn new(market: impl Into<String>, parts: i32) -> Self {
-        Self::equal_parts(market, parts)
+    pub fn new(order: impl Into<OrderTarget>, parts: i32) -> Self {
+        Self::equal_parts(order, parts)
     }
 
     /// Split the selected sell order into `parts`.
-    pub fn equal_parts(market: impl Into<String>, parts: i32) -> Self {
+    pub fn equal_parts(order: impl Into<OrderTarget>, parts: i32) -> Self {
         Self {
-            market: market.into(),
+            order: order.into(),
             parts,
             split_small: false,
             split_small_sell: false,
@@ -636,9 +682,9 @@ impl SplitOrderParams {
     ///
     /// MoonBot may replace `parts` with the strategy piece size before creating
     /// the new order.
-    pub fn strategy_piece(market: impl Into<String>, parts: i32) -> Self {
+    pub fn strategy_piece(order: impl Into<OrderTarget>, parts: i32) -> Self {
         Self {
-            market: market.into(),
+            order: order.into(),
             parts,
             split_small: true,
             split_small_sell: false,
@@ -646,36 +692,13 @@ impl SplitOrderParams {
     }
 
     /// Split a strategy-defined small piece and route that piece into sell.
-    pub fn strategy_piece_and_sell(market: impl Into<String>, parts: i32) -> Self {
+    pub fn strategy_piece_and_sell(order: impl Into<OrderTarget>, parts: i32) -> Self {
         Self {
-            market: market.into(),
+            order: order.into(),
             parts,
             split_small: true,
             split_small_sell: true,
         }
-    }
-
-    /// Build equal-parts split params for a retained selected market.
-    pub fn for_market(market: &crate::state::MarketHandle, parts: i32) -> Self {
-        Self::new(market.name(), parts)
-    }
-
-    /// Build equal-parts split params for a retained selected market.
-    pub fn equal_parts_for_market(market: &crate::state::MarketHandle, parts: i32) -> Self {
-        Self::equal_parts(market.name(), parts)
-    }
-
-    /// Build small-piece split params for a retained selected market.
-    pub fn strategy_piece_for_market(market: &crate::state::MarketHandle, parts: i32) -> Self {
-        Self::strategy_piece(market.name(), parts)
-    }
-
-    /// Build small-piece-and-sell split params for a retained selected market.
-    pub fn strategy_piece_and_sell_for_market(
-        market: &crate::state::MarketHandle,
-        parts: i32,
-    ) -> Self {
-        Self::strategy_piece_and_sell(market.name(), parts)
     }
 
     pub const fn is_strategy_piece(&self) -> bool {

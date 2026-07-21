@@ -12,15 +12,9 @@ use crate::commands::strat::{
     build_snapshot_request, DetectSignalCommand, StratCommand, StratSchema, DETECT_KIND_ALERT,
     DETECT_KIND_ROW,
 };
-use crate::commands::trade::trace_flags;
-use crate::commands::trade::{
-    build_all_statuses_request, BaseCommandHeader, BulkReplaceNotify, MarketCommandHeader,
-    OrderCompact, OrderStatus, OrderStatusUpdate, OrderTracePoint, OrderType, OrderUpdateData,
-    OrderWorkerStatus, SetImmuneCommand, StopSettings, TradeCommand, TradeCtx, TradeEpochHeader,
-};
+use crate::commands::trade::OrderType;
 use crate::commands::ui::{build_lev_manage, LevManage};
 use crate::state::history::DELPHI_MSECS_PER_DAY;
-use crate::state::orders::OrderCancelSend;
 use crate::state::OrderBookKind;
 
 static SERVER_TIME_DELTA_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -47,6 +41,20 @@ fn deflate_raw(data: &[u8]) -> Vec<u8> {
 
     let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(data).unwrap();
+    encoder.finish().unwrap()
+}
+
+fn gzip_news_frame(json: &str) -> Vec<u8> {
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+    use std::io::Write;
+
+    let mut raw = Vec::new();
+    raw.extend_from_slice(&1u16.to_le_bytes());
+    raw.extend_from_slice(&(json.len() as u16).to_le_bytes());
+    raw.extend_from_slice(json.as_bytes());
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+    encoder.write_all(&raw).unwrap();
     encoder.finish().unwrap()
 }
 
@@ -115,15 +123,6 @@ fn order_book_payload(market_index: u16) -> Vec<u8> {
     order_book_payload_with(market_index, 1, true)
 }
 
-fn empty_all_statuses_payload(uid: u64) -> Vec<u8> {
-    let mut out = Vec::with_capacity(15);
-    out.push(8);
-    out.extend_from_slice(&3u16.to_le_bytes());
-    out.extend_from_slice(&uid.to_le_bytes());
-    out.extend_from_slice(&0i32.to_le_bytes());
-    out
-}
-
 fn old_v1_client_settings_without_soft_tail(uid: u64) -> Vec<u8> {
     let mut out = Vec::new();
     out.push(1); // TClientSettingsCommand
@@ -174,49 +173,6 @@ fn app_queue_keeps_all_events_and_records_max_len_without_drop_policy() {
         128,
         "smaller later pushes must not reset the observed max"
     );
-}
-
-fn all_statuses_payload(uid: u64, orders: &[OrderStatus]) -> Vec<u8> {
-    let mut out = Vec::new();
-    BaseCommandHeader {
-        cmd_id: 8,
-        ver: 3,
-        uid,
-    }
-    .write(&mut out);
-    out.extend_from_slice(&(orders.len() as i32).to_le_bytes());
-    for st in orders {
-        st.epoch_header.write(
-            &mut out,
-            st.epoch_header.market.currency,
-            st.epoch_header.market.platform,
-        );
-        st.buy_order.write_to(&mut out);
-        st.sell_order.write_to(&mut out);
-        st.stops.write_to(&mut out);
-        out.extend_from_slice(&st.strat_id.to_le_bytes());
-        out.push(st.is_short as u8);
-        out.extend_from_slice(&st.db_id.to_le_bytes());
-        out.push(st.from_cache as u8);
-        out.push(st.emulator_mode as u8);
-        out.push(st.immune_for_clicks as u8);
-        let mut vstop_flags = 0u8;
-        if st.vstop_on {
-            vstop_flags |= 1;
-        }
-        if st.vstop_fixed {
-            vstop_flags |= 2;
-        }
-        if st.vstop_level != 0.0 || st.vstop_vol != 0.0 {
-            vstop_flags |= 4;
-        }
-        out.push(vstop_flags);
-        if vstop_flags & 4 != 0 {
-            out.extend_from_slice(&st.vstop_level.to_le_bytes());
-            out.extend_from_slice(&st.vstop_vol.to_le_bytes());
-        }
-    }
-    out
 }
 
 #[test]
@@ -777,123 +733,6 @@ fn api_get_markets_list_uses_response_ver() {
     );
 }
 
-fn order_status_for_test(
-    uid: u64,
-    market_name: &str,
-    currency: u8,
-    platform: u8,
-    status: OrderWorkerStatus,
-) -> OrderStatus {
-    OrderStatus {
-        epoch_header: TradeEpochHeader {
-            market: MarketCommandHeader {
-                base: BaseCommandHeader {
-                    cmd_id: 4,
-                    ver: 3,
-                    uid,
-                },
-                currency,
-                platform,
-                market_name: market_name.to_string(),
-            },
-            epoch: 1,
-            status,
-        },
-        buy_order: OrderCompact::default(),
-        sell_order: OrderCompact::default(),
-        stops: StopSettings::default(),
-        strat_id: 0,
-        is_short: false,
-        db_id: 0,
-        from_cache: false,
-        emulator_mode: false,
-        immune_for_clicks: false,
-        vstop_on: false,
-        vstop_fixed: false,
-        vstop_level: 0.0,
-        vstop_vol: 0.0,
-    }
-}
-
-#[test]
-fn dispatcher_routes_order_to_orders_state() {
-    let mut d = EventDispatcher::new();
-    seed_event_markets(&mut d, &["BTCUSDT"]);
-    let uid = 0x123;
-    let status = order_status_for_test(uid, "BTCUSDT", 7, 9, OrderWorkerStatus::BuySet);
-    let payload = all_statuses_payload(0x55, &[status]);
-    let events = d.dispatch(Command::Order, &payload, 1000);
-    assert!(events.iter().any(|ev| matches!(ev, Event::Order(_))));
-    assert!(d.orders.get(uid).is_some());
-}
-
-#[test]
-fn dispatcher_snapshot_is_immutable_after_later_domain_mutation() {
-    let mut d = EventDispatcher::new();
-    seed_event_markets(&mut d, &["BTCUSDT"]);
-
-    let before = d.snapshot();
-    let uid = 0x123;
-    let status = order_status_for_test(uid, "BTCUSDT", 7, 9, OrderWorkerStatus::BuySet);
-    let payload = all_statuses_payload(0x55, &[status]);
-    let _ = d.dispatch(Command::Order, &payload, 1000);
-
-    assert!(
-        before.orders().is_empty(),
-        "published snapshots must be immutable even when the live dispatcher mutates the same domain later"
-    );
-    assert!(
-        d.snapshot().orders().get(uid).is_some(),
-        "live dispatcher must still publish the later domain mutation"
-    );
-}
-
-#[test]
-fn stale_orders_snapshot_generation_is_dropped_before_apply() {
-    let mut d = EventDispatcher::new();
-    seed_event_markets(&mut d, &["BTCUSDT"]);
-    d.last_known_server_token = 0xAAAA;
-
-    let mut first = order_status_for_test(0x123, "BTCUSDT", 7, 9, OrderWorkerStatus::BuySet);
-    first.buy_order.actual_price = 100.0;
-    let _ = d.dispatch(Command::Order, &all_statuses_payload(10, &[first]), 1000);
-
-    let mut newer = order_status_for_test(0x123, "BTCUSDT", 7, 9, OrderWorkerStatus::BuySet);
-    newer.epoch_header.epoch = 2;
-    newer.buy_order.actual_price = 200.0;
-    let _ = d.dispatch(Command::Order, &all_statuses_payload(12, &[newer]), 1001);
-
-    let mut stale = order_status_for_test(0x123, "BTCUSDT", 7, 9, OrderWorkerStatus::BuySet);
-    stale.epoch_header.epoch = 3;
-    stale.buy_order.actual_price = 300.0;
-    let events = d.dispatch(Command::Order, &all_statuses_payload(11, &[stale]), 1002);
-
-    assert!(events.is_empty());
-    assert_eq!(d.orders.get(0x123).unwrap().buy_order.actual_price, 200.0);
-}
-
-#[test]
-fn orders_snapshot_generation_restarts_with_new_server_token() {
-    let mut d = EventDispatcher::new();
-    seed_event_markets(&mut d, &["BTCUSDT"]);
-    d.last_known_server_token = 0xAAAA;
-    let first = order_status_for_test(0x123, "BTCUSDT", 7, 9, OrderWorkerStatus::BuySet);
-    let _ = d.dispatch(Command::Order, &all_statuses_payload(100, &[first]), 1000);
-
-    d.last_known_server_token = 0xBBBB;
-    let mut fresh = order_status_for_test(0x123, "BTCUSDT", 7, 9, OrderWorkerStatus::SellSet);
-    fresh.epoch_header.epoch = 1;
-    let events = d.dispatch(Command::Order, &all_statuses_payload(1, &[fresh]), 1001);
-
-    assert!(events
-        .iter()
-        .any(|event| matches!(event, Event::Order(OrderEvent::Snapshot))));
-    assert_eq!(
-        d.orders.get(0x123).unwrap().status,
-        OrderWorkerStatus::SellSet
-    );
-}
-
 #[test]
 fn snapshot_carries_session_identity_set_after_init() {
     use crate::commands::engine_api::{AuthCheckResponse, ServerInfo};
@@ -997,26 +836,6 @@ fn identity_snapshot_shares_arc_no_per_publish_clone() {
 }
 
 #[test]
-fn dispatcher_all_statuses_uses_process_command_order_item_loop() {
-    let mut d = EventDispatcher::new();
-    seed_event_markets(&mut d, &["BTCUSDT"]);
-    let uid = 0x1234_5678_ABCD_EF01;
-    let status = order_status_for_test(uid, "BTCUSDT", 7, 9, OrderWorkerStatus::BuySet);
-    let payload = all_statuses_payload(0x55, &[status]);
-
-    let events = d.dispatch(Command::Order, &payload, 1000);
-
-    assert_eq!(events.len(), 2);
-    assert!(matches!(
-        &events[0],
-        Event::Order(OrderEvent::Created(order)) if order.uid == uid
-    ));
-    assert!(matches!(events[1], Event::Order(OrderEvent::Snapshot)));
-    assert_eq!(d.orders.current_snapshot_flag(), 1);
-    assert!(d.orders.get(uid).is_some());
-}
-
-#[test]
 // parity: RepEngine.TDBSaver.SendClosedSellReport sends canonical expanded SQL, not a new order model.
 fn dispatcher_emits_closed_sell_order_report_without_mutating_orders() {
     let mut d = EventDispatcher::new();
@@ -1037,464 +856,7 @@ fn dispatcher_emits_closed_sell_order_report_without_mutating_orders() {
         }
         other => panic!("wrong event: {other:?}"),
     }
-    assert_eq!(d.orders.iter().count(), 0);
-}
-
-#[test]
-// parity: MoonBot MoonProtoBaseStruct.pas:TCommandRegistry.FromStream
-fn dispatcher_skips_future_version_order_command() {
-    let mut d = EventDispatcher::new();
-    seed_event_markets(&mut d, &["BTCUSDT"]);
-    let mut out = Vec::new();
-    let uid = 0x1234;
-
-    d.process_command_order(
-        TradeCommand::OrderStatus(Box::new(order_status_for_test(
-            uid,
-            "BTCUSDT",
-            7,
-            9,
-            OrderWorkerStatus::BuySet,
-        ))),
-        1000,
-        &mut out,
-    );
-
-    d.orders.begin_snapshot();
-    let mut future_status = Vec::new();
-    future_status.push(4);
-    future_status.extend_from_slice(&99u16.to_le_bytes());
-    future_status.extend_from_slice(&uid.to_le_bytes());
-
-    let events = d.dispatch(Command::Order, &future_status, 1010);
-
-    assert!(events.is_empty());
-    assert_eq!(
-            d.orders.missing_after_snapshot(),
-            vec![uid],
-            "Delphi registry returns skipped TBaseTradeCommand for future versions, so ClientNewData does not call ProcessCommandOrder"
-        );
-}
-
-#[test]
-// parity: MoonBot MoonProtoBaseStruct.pas:TCommandRegistry.FromStream (unknown CmdId)
-fn dispatcher_skips_unknown_order_cmd_id() {
-    let mut d = EventDispatcher::new();
-    seed_event_markets(&mut d, &["BTCUSDT"]);
-    let mut out = Vec::new();
-    let uid = 0x1235;
-
-    d.process_command_order(
-        TradeCommand::OrderStatus(Box::new(order_status_for_test(
-            uid,
-            "BTCUSDT",
-            7,
-            9,
-            OrderWorkerStatus::BuySet,
-        ))),
-        1000,
-        &mut out,
-    );
-
-    d.orders.begin_snapshot();
-    let mut unknown = Vec::new();
-    unknown.push(250);
-    unknown.extend_from_slice(&3u16.to_le_bytes());
-    unknown.extend_from_slice(&uid.to_le_bytes());
-
-    let events = d.dispatch(Command::Order, &unknown, 1010);
-
-    assert!(events.is_empty());
-    assert_eq!(
-            d.orders.missing_after_snapshot(),
-            vec![uid],
-            "Delphi unknown CmdId under TBaseTradeCommand is not TBaseMarketCommand, so it is freed before ProcessCommandOrder"
-        );
-}
-
-#[test]
-fn dispatcher_keeps_sell_done_order_for_delphi_final_trace_grace() {
-    let mut d = EventDispatcher::new();
-    seed_event_markets(&mut d, &["BTCUSDT"]);
-    let mut out = Vec::new();
-    let uid = 0x42;
-
-    d.process_command_order(
-        TradeCommand::OrderStatus(Box::new(order_status_for_test(
-            uid,
-            "BTCUSDT",
-            7,
-            9,
-            OrderWorkerStatus::SellSet,
-        ))),
-        1000,
-        &mut out,
-    );
-    let mut done = order_status_for_test(uid, "BTCUSDT", 7, 9, OrderWorkerStatus::SellDone);
-    done.epoch_header.epoch = 2;
-    d.process_command_order(TradeCommand::OrderStatus(Box::new(done)), 1001, &mut out);
-    d.process_command_order(
-        TradeCommand::OrderTracePoint(OrderTracePoint {
-            market: MarketCommandHeader {
-                base: BaseCommandHeader {
-                    cmd_id: 25,
-                    ver: 3,
-                    uid,
-                },
-                currency: 7,
-                platform: 9,
-                market_name: "BTCUSDT".to_string(),
-            },
-            trace_time: 45_000.0,
-            trace_price: 101.0,
-            base_price: 100.0,
-            stop_price: 0.0,
-            ord_type: OrderType::Sell,
-            flags: trace_flags::IS_FINISH,
-        }),
-        1002,
-        &mut out,
-    );
-
-    assert!(matches!(
-        out.last(),
-        Some(Event::Order(OrderEvent::TracePoint { uid: found })) if *found == uid
-    ));
-    assert!(d.orders().get(uid).is_some());
-
-    out.clear();
-    d.drain_deferred_order_removals_due(1400, &mut out);
-    assert!(out.is_empty());
-    assert!(d.orders().get(uid).is_some());
-
-    d.process_command_order(
-        TradeCommand::OrderTracePoint(OrderTracePoint {
-            market: MarketCommandHeader {
-                base: BaseCommandHeader {
-                    cmd_id: 25,
-                    ver: 3,
-                    uid,
-                },
-                currency: 7,
-                platform: 9,
-                market_name: "BTCUSDT".to_string(),
-            },
-            trace_time: 45_000.0,
-            trace_price: 102.0,
-            base_price: 100.0,
-            stop_price: 0.0,
-            ord_type: OrderType::Sell,
-            flags: trace_flags::IS_FINISH,
-        }),
-        1400,
-        &mut out,
-    );
-    assert!(matches!(
-        out.last(),
-        Some(Event::Order(OrderEvent::TracePoint { uid: found })) if *found == uid
-    ));
-    assert!(d.orders().get(uid).is_some());
-
-    out.clear();
-    d.drain_deferred_order_removals_due(1401, &mut out);
-    let removed_order = match out.as_slice() {
-        [Event::Order(OrderEvent::Removed(order))] if order.uid == uid => order,
-        other => panic!("expected removed order event with final row, got {other:?}"),
-    };
-    assert_eq!(removed_order.status, OrderWorkerStatus::SellDone);
-    assert!(removed_order.job_is_done);
-    assert!(d.orders().get(uid).is_none());
-}
-
-#[test]
-// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
-fn dispatcher_drops_new_order_status_for_unknown_market() {
-    let mut d = EventDispatcher::new();
-    let mut out = Vec::new();
-    let uid = 0x77;
-
-    d.process_command_order(
-        TradeCommand::OrderStatus(Box::new(order_status_for_test(
-            uid,
-            "UNKNOWNUSDT",
-            7,
-            9,
-            OrderWorkerStatus::BuySet,
-        ))),
-        1000,
-        &mut out,
-    );
-
-    assert!(out.is_empty());
-    assert!(d.orders.get(uid).is_none());
-}
-
-#[test]
-// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
-fn dispatcher_drops_unknown_from_cache_status_without_event() {
-    let mut d = EventDispatcher::new();
-    seed_event_markets(&mut d, &["BTCUSDT"]);
-    let mut out = Vec::new();
-    let uid = 0x78;
-    let mut status = order_status_for_test(uid, "BTCUSDT", 7, 9, OrderWorkerStatus::BuySet);
-    status.from_cache = true;
-
-    d.process_command_order(TradeCommand::OrderStatus(Box::new(status)), 1000, &mut out);
-
-    assert!(out.is_empty());
-    assert!(d.orders.get(uid).is_none());
-}
-
-#[test]
-// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
-fn dispatcher_drops_client_originated_order_command_without_event() {
-    let mut d = EventDispatcher::new();
-    seed_event_markets(&mut d, &["BTCUSDT"]);
-    let mut out = Vec::new();
-    let uid = 0x79;
-
-    d.process_command_order(
-        TradeCommand::OrderStatus(Box::new(order_status_for_test(
-            uid,
-            "BTCUSDT",
-            7,
-            9,
-            OrderWorkerStatus::BuySet,
-        ))),
-        1000,
-        &mut out,
-    );
-    out.clear();
-
-    d.process_command_order(
-        TradeCommand::SetImmune(SetImmuneCommand {
-            header: BaseCommandHeader {
-                cmd_id: 22,
-                ver: 3,
-                uid,
-            },
-            items: Vec::new(),
-        }),
-        1010,
-        &mut out,
-    );
-
-    assert!(out.is_empty());
-    assert!(!d.orders.get(uid).unwrap().immune_for_clicks);
-}
-
-#[test]
-// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
-fn dispatcher_drops_skipped_order_updates_without_event() {
-    let mut d = EventDispatcher::new();
-    seed_event_markets(&mut d, &["BTCUSDT"]);
-    let mut out = Vec::new();
-
-    d.process_command_order(
-        TradeCommand::OrderStatusUpdate(OrderStatusUpdate {
-            epoch_header: TradeEpochHeader {
-                market: MarketCommandHeader {
-                    base: BaseCommandHeader {
-                        cmd_id: 5,
-                        ver: 3,
-                        uid: 0x7B,
-                    },
-                    currency: 7,
-                    platform: 9,
-                    market_name: "BTCUSDT".to_string(),
-                },
-                epoch: 1,
-                status: OrderWorkerStatus::BuySet,
-            },
-            update_data: OrderUpdateData::default(),
-            sell_reason_code: 0,
-        }),
-        1000,
-        &mut out,
-    );
-    assert!(out.is_empty());
-    assert!(d.orders.get(0x7B).is_none());
-
-    let uid_stale = 0x7C;
-    d.process_command_order(
-        TradeCommand::OrderStatus(Box::new(order_status_for_test(
-            uid_stale,
-            "BTCUSDT",
-            7,
-            9,
-            OrderWorkerStatus::BuySet,
-        ))),
-        1010,
-        &mut out,
-    );
-    out.clear();
-    let accepted_update = OrderStatusUpdate {
-        epoch_header: TradeEpochHeader {
-            market: MarketCommandHeader {
-                base: BaseCommandHeader {
-                    cmd_id: 5,
-                    ver: 3,
-                    uid: uid_stale,
-                },
-                currency: 7,
-                platform: 9,
-                market_name: "BTCUSDT".to_string(),
-            },
-            epoch: 2,
-            status: OrderWorkerStatus::BuySet,
-        },
-        update_data: OrderUpdateData::default(),
-        sell_reason_code: 0,
-    };
-    d.process_command_order(
-        TradeCommand::OrderStatusUpdate(accepted_update.clone()),
-        1020,
-        &mut out,
-    );
-    assert!(matches!(
-        out.as_slice(),
-        [Event::Order(OrderEvent::Updated(order))] if order.uid == uid_stale
-    ));
-    out.clear();
-    d.process_command_order(
-        TradeCommand::OrderStatusUpdate(accepted_update),
-        1030,
-        &mut out,
-    );
-    assert!(out.is_empty());
-
-    let uid_rollback = 0x7D;
-    d.process_command_order(
-        TradeCommand::OrderStatus(Box::new(order_status_for_test(
-            uid_rollback,
-            "BTCUSDT",
-            7,
-            9,
-            OrderWorkerStatus::SellSet,
-        ))),
-        1040,
-        &mut out,
-    );
-    out.clear();
-    d.process_command_order(
-        TradeCommand::OrderStatusUpdate(OrderStatusUpdate {
-            epoch_header: TradeEpochHeader {
-                market: MarketCommandHeader {
-                    base: BaseCommandHeader {
-                        cmd_id: 5,
-                        ver: 3,
-                        uid: uid_rollback,
-                    },
-                    currency: 7,
-                    platform: 9,
-                    market_name: "BTCUSDT".to_string(),
-                },
-                epoch: 3,
-                status: OrderWorkerStatus::BuySet,
-            },
-            update_data: OrderUpdateData::default(),
-            sell_reason_code: 0,
-        }),
-        1050,
-        &mut out,
-    );
-    assert!(out.is_empty());
-    assert_eq!(
-        d.orders.get(uid_rollback).unwrap().status,
-        OrderWorkerStatus::SellSet
-    );
-}
-
-#[test]
-// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder (ReplaceSentTime lifecycle)
-fn dispatcher_tick_orders_clears_bulk_replace_timeout() {
-    let mut d = EventDispatcher::new();
-    seed_event_markets(&mut d, &["BTCUSDT"]);
-    let mut out = Vec::new();
-    let uid = 0x7A;
-
-    d.process_command_order(
-        TradeCommand::OrderStatus(Box::new(order_status_for_test(
-            uid,
-            "BTCUSDT",
-            7,
-            9,
-            OrderWorkerStatus::BuySet,
-        ))),
-        1000,
-        &mut out,
-    );
-    d.process_command_order(
-        TradeCommand::BulkReplaceNotify(BulkReplaceNotify {
-            market: MarketCommandHeader {
-                base: BaseCommandHeader {
-                    cmd_id: 28,
-                    ver: 3,
-                    uid: 0,
-                },
-                currency: 7,
-                platform: 9,
-                market_name: "BTCUSDT".to_string(),
-            },
-            order_type: OrderType::Buy,
-            uids: vec![uid],
-        }),
-        1100,
-        &mut out,
-    );
-    assert!(d.orders.get(uid).unwrap().bulk_replace_buy);
-
-    assert!(d.tick_orders(6100).is_empty());
-    let events = d.tick_orders(6101);
-
-    assert!(matches!(
-        events.as_slice(),
-        [Event::Order(OrderEvent::Updated(order))] if order.uid == uid
-    ));
-    assert!(!d.orders.get(uid).unwrap().bulk_replace_buy);
-}
-
-#[test]
-// parity: MoonBot MarketsU.pas:BOrderWorker (pending-cancel job loop)
-fn dispatcher_tick_orders_repeats_pending_cancel() {
-    let mut d = EventDispatcher::new();
-    seed_event_markets(&mut d, &["BTCUSDT"]);
-    let mut out = Vec::new();
-    let uid = 0x7B;
-    let mut status = order_status_for_test(uid, "BTCUSDT", 7, 9, OrderWorkerStatus::None);
-    status.buy_order.mean_price = 9.25;
-    d.process_command_order(TradeCommand::OrderStatus(Box::new(status)), 1000, &mut out);
-
-    let first = d
-        .orders
-        .send_cancel_if_requested(uid, 1000)
-        .expect("first pending cancel should send immediately");
-    assert!(matches!(
-        first,
-        OrderCancelSend::PendingReplaceThenCancel { .. }
-    ));
-
-    let mut actions = Vec::new();
-    out.clear();
-    d.tick_orders_active_actions(1031, &mut out, &mut actions);
-    assert!(out.is_empty());
-    assert!(
-        actions.is_empty(),
-        "Delphi pending cancel worker loop sleeps 32 ms"
-    );
-
-    d.tick_orders_active_actions(1032, &mut out, &mut actions);
-    assert_eq!(actions.len(), 1);
-    match actions.pop().unwrap() {
-        ActiveAction::OrderCancel {
-            request: OrderCancelSend::PendingReplaceThenCancel { ctx, market, price },
-        } => {
-            assert_eq!(ctx.uid, uid);
-            assert_eq!(market, "BTCUSDT");
-            assert_eq!(price, 9.25);
-        }
-        _ => panic!("expected pending cancel resend action"),
-    }
+    assert_eq!(d.orders().iter().count(), 0);
 }
 
 #[test]
@@ -1648,7 +1010,7 @@ fn dispatcher_drops_detect_signal_without_strategy_except_alerts() {
 fn dispatcher_unknown_channel_returns_raw() {
     let mut d = EventDispatcher::new();
     let unknown = Command::from_byte(99);
-    // Unknown ordinal — no dispatch → fallback to Raw
+    // Unknown ordinal -- no dispatch -> fallback to Raw
     let events = d.dispatch(unknown, b"hello", 1000);
     assert_eq!(events.len(), 1);
     match &events[0] {
@@ -2107,16 +1469,10 @@ fn dispatcher_corrupted_order_returns_parse_failed() {
 }
 
 #[test]
-fn dispatcher_ctx_unused_warning_silenced() {
-    // Suppress dead_code warning for TradeCtx if not used elsewhere
-    let _ = TradeCtx::with_route_bytes(1, 1, 4);
-}
-
-#[test]
 fn dispatcher_blocks_orderbook_until_indexes_sync() {
     let mut d = EventDispatcher::new();
-    // indexes_synchronized = false by default — the OrderBook event must be dropped.
-    // Build a minimal wire-payload for OrderBook (parse may fail, and that is fine —
+    // indexes_synchronized = false by default -- the OrderBook event must be dropped.
+    // Build a minimal wire-payload for OrderBook (parse may fail, and that is fine --
     // the point is that we do NOT reach parse at all, because the block happens earlier).
     let dummy_payload = vec![0u8; 32];
     let events = d.dispatch(Command::OrderBook, &dummy_payload, 1000);
@@ -2125,11 +1481,11 @@ fn dispatcher_blocks_orderbook_until_indexes_sync() {
         "OrderBook event must be dropped until indexes_synchronized"
     );
 
-    // After apply_markets_indexes — it must start parsing.
+    // After apply_markets_indexes -- it must start parsing.
     d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
     let _events = d.dispatch(Command::OrderBook, &dummy_payload, 1000);
     // Now either a successful parse or ParseFailed (but not empty).
-    // The exact value depends on the dummy_payload contents — the point is the block is lifted.
+    // The exact value depends on the dummy_payload contents -- the point is the block is lifted.
 }
 
 #[test]
@@ -2307,7 +1663,7 @@ fn trades_datagram_does_not_clone_markets_state_while_snapshot_held() {
     // Regression guard for the CowState container-clone fix (moonproto cac7451):
     // the live trade tail lives on each per-market `Market`, so a trades datagram
     // mutates it through that market's own lock and must NOT trigger
-    // `Arc::make_mut` on the whole `MarketsState` — even while a snapshot clone of
+    // `Arc::make_mut` on the whole `MarketsState` -- even while a snapshot clone of
     // the markets domain is alive (refcount >= 2, the published-snapshot condition
     // that turns every `&mut` domain apply into a full container deep clone).
     let mut d = EventDispatcher::new();
@@ -2348,7 +1704,7 @@ fn trades_datagram_does_not_clone_markets_state_while_snapshot_held() {
         "trades datagram must not copy-on-write clone the whole MarketsState"
     );
 
-    // Tail updated in place, and live-shared with the held snapshot — this is the
+    // Tail updated in place, and live-shared with the held snapshot -- this is the
     // Delphi `TMarket` shape (shared object reference), not a frozen-at-snapshot copy.
     let live = d.markets.trade_state("BTCUSDT").expect("known market");
     assert_eq!(live.last_trade_price, 110.0);
@@ -2360,46 +1716,6 @@ fn trades_datagram_does_not_clone_markets_state_while_snapshot_held() {
         110.0,
         "per-market trade tail is structurally shared with the snapshot like Delphi TMarket"
     );
-
-    drop(held);
-}
-
-#[test]
-fn idle_orders_tick_does_not_clone_orders_while_snapshot_held() {
-    // Regression guard: periodic_orders_tick runs on every writer maintenance
-    // pass. With a published snapshot alive (refcount >= 2), a needless
-    // `make_mut` would clone the whole order map even when nothing was due. The
-    // read-only dirty-guard (`has_due_tick_work`) must skip that.
-    let mut d = EventDispatcher::new();
-    seed_event_markets(&mut d, &["BTCUSDT"]);
-
-    // Seed one freshly-applied order: no pending cancel, no bulk-replace timer,
-    // no due removal.
-    let uid = 0x1234;
-    let status = order_status_for_test(uid, "BTCUSDT", 7, 9, OrderWorkerStatus::BuySet);
-    let payload = all_statuses_payload(0x55, &[status]);
-    let _ = d.dispatch(Command::Order, &payload, 1000);
-
-    // Published snapshot keeps the orders domain alive (refcount 2) — the
-    // condition that turns any `&mut` order apply into a full container clone.
-    let held = d.orders.clone();
-    let ptr_before = d.orders.arc_ptr();
-    assert_eq!(
-        ptr_before,
-        held.arc_ptr(),
-        "snapshot clone shares the live orders allocation"
-    );
-
-    let mut out = Vec::new();
-    let mut actions = Vec::new();
-    d.tick_orders_active_actions(2000, &mut out, &mut actions);
-
-    assert_eq!(
-        d.orders.arc_ptr(),
-        ptr_before,
-        "an idle orders tick must not copy-on-write clone the Orders map"
-    );
-    assert!(actions.is_empty(), "an idle tick produces no order actions");
 
     drop(held);
 }
@@ -2914,6 +2230,8 @@ fn active_dispatch_emits_typed_watcher_fills() {
         eps_profile: EpsProfile::default(),
         server_base_currency_name: Some("BTC".into()),
         server_base_currency_code: Some(BaseCurrency::BTC),
+        exchange_code: ExchangeCode::None,
+        kernel_health: crate::state::KernelHealth::default(),
     };
     let mut out = Vec::new();
     let mut actions = Vec::new();
@@ -3016,6 +2334,8 @@ fn active_dispatch_queues_update_markets_last_price_into_history_worker() {
         eps_profile: EpsProfile::default(),
         server_base_currency_name: Some("BTC".into()),
         server_base_currency_code: Some(BaseCurrency::BTC),
+        exchange_code: ExchangeCode::None,
+        kernel_health: crate::state::KernelHealth::default(),
     };
     let mut out = Vec::new();
     let mut actions = Vec::new();
@@ -3135,28 +2455,6 @@ fn dispatcher_spot_trades_do_not_overwrite_futures_tail() {
 }
 
 #[test]
-fn dispatcher_order_not_blocked_by_indexes_sync() {
-    // The Order channel does not depend on market_idx → must not be blocked by indexes_sync.
-    let mut d = EventDispatcher::new();
-    seed_event_markets(&mut d, &["BTCUSDT"]);
-    let payload = all_statuses_payload(
-        0x55,
-        &[order_status_for_test(
-            0x124,
-            "BTCUSDT",
-            7,
-            9,
-            OrderWorkerStatus::BuySet,
-        )],
-    );
-    let events = d.dispatch(Command::Order, &payload, 1000);
-    assert!(
-        !events.is_empty(),
-        "Order must be processed even without indexes_synchronized"
-    );
-}
-
-#[test]
 fn dispatch_into_active_invalidates_indexes_on_peer_token_mismatch() {
     let mut d = EventDispatcher::new();
     d.markets.apply_markets_indexes(vec!["OLDUSDT".to_string()]);
@@ -3187,78 +2485,6 @@ fn dispatch_into_active_invalidates_indexes_on_peer_token_mismatch() {
         out.is_empty(),
         "OrderBook packet from a new server process must be dropped with stale indexes"
     );
-}
-
-#[test]
-fn dispatch_into_active_requests_missing_order_status_after_snapshot() {
-    let mut d = EventDispatcher::new();
-    let stale_uid = 0xAABB_CCDD_0011_2233;
-    let status = order_status_for_test(stale_uid, "BTCUSDT", 7, 9, OrderWorkerStatus::BuySet);
-    let (_result, _event) = d.orders.apply(TradeCommand::OrderStatus(Box::new(status)));
-
-    let mut client = crate::client::Client::new(dummy_client_cfg());
-    client.testing_set_domain_ready(true);
-    client.testing_set_server_token(0x2222);
-    client.testing_set_subscribed_book_server_token(0x2222);
-    let mut out = Vec::new();
-    let mut actions = Vec::new();
-    dispatch_active_packet_for_test(
-        &mut d,
-        Command::Order,
-        &empty_all_statuses_payload(0x55),
-        1000,
-        &mut out,
-        &client,
-        &mut actions,
-    );
-    apply_active_actions_for_test(&client, &mut actions);
-
-    assert!(out
-        .iter()
-        .any(|ev| matches!(ev, Event::Order(OrderEvent::Snapshot))));
-
-    let mut found = false;
-    for item in drain_client_send_items(&client) {
-        if item.cmd != Command::Order.to_byte() {
-            continue;
-        }
-        let Some(TradeCommand::OrderStatusRequest(req)) = TradeCommand::parse(&item.data) else {
-            continue;
-        };
-        assert_eq!(req.market.base.uid, stale_uid);
-        assert_eq!(req.market.market_name, "BTCUSDT");
-        assert_eq!(req.market.currency, 7);
-        assert_eq!(req.market.platform, 9);
-        found = true;
-    }
-
-    assert!(found, "missing order must trigger TOrderStatusRequest");
-}
-
-#[test]
-fn raw_dispatch_exposes_missing_order_status_requests_after_snapshot() {
-    let mut d = EventDispatcher::new();
-    let stale_uid = 0xAABB_CCDD_0011_2233;
-    let status = order_status_for_test(stale_uid, "BTCUSDT", 7, 9, OrderWorkerStatus::BuySet);
-    let (_result, _event) = d.orders.apply(TradeCommand::OrderStatus(Box::new(status)));
-
-    let mut out = Vec::new();
-    d.dispatch_into(
-        Command::Order,
-        &empty_all_statuses_payload(0x55),
-        1000,
-        &mut out,
-    );
-
-    assert!(out
-        .iter()
-        .any(|ev| matches!(ev, Event::Order(OrderEvent::Snapshot))));
-    let missing = d.missing_order_status_requests_after_snapshot();
-    assert_eq!(missing.len(), 1);
-    assert_eq!(missing[0].ctx.uid, stale_uid);
-    assert_eq!(missing[0].ctx.currency, BaseCurrency::from_byte(7));
-    assert_eq!(missing[0].ctx.platform, ExchangeCode::from_byte(9));
-    assert_eq!(missing[0].market_name, "BTCUSDT");
 }
 
 #[test]
@@ -3378,7 +2604,7 @@ fn orderbook_apply_updates_market_chart_price_step() {
 
 #[test]
 fn orderbook_datagram_does_not_clone_markets_state_while_snapshot_held() {
-    // Regression guard for the prices→Market move (MarketPrice now lives on the
+    // Regression guard for the prices->Market move (MarketPrice now lives on the
     // per-market `Market`): an order-book datagram refreshes `ChartPriceStep`
     // through that market's own lock, so it must NOT trigger `Arc::make_mut` on
     // the whole `MarketsState` (no per-datagram clone of the price vector), even
@@ -3405,7 +2631,7 @@ fn orderbook_datagram_does_not_clone_markets_state_while_snapshot_held() {
         "snapshot shares the markets allocation"
     );
 
-    // Another book datagram with a different best ask → ChartPriceStep changes.
+    // Another book datagram with a different best ask -> ChartPriceStep changes.
     d.dispatch_into(
         Command::OrderBook,
         &order_book_payload_full_with_levels(0, 1, &[(110.0, 1.0)], &[(150.0, 2.0)]),
@@ -3479,30 +2705,6 @@ fn orderbook_datagram_does_not_clone_orderbooks_state_while_snapshot_held() {
     );
 }
 
-#[test]
-fn dispatch_into_active_drops_domain_commands_before_init() {
-    let mut d = EventDispatcher::new();
-    let client = crate::client::Client::new(dummy_client_cfg());
-    let mut out = Vec::new();
-    let mut actions = Vec::new();
-
-    dispatch_active_packet_for_test(
-        &mut d,
-        Command::Order,
-        &empty_all_statuses_payload(0x55),
-        1000,
-        &mut out,
-        &client,
-        &mut actions,
-    );
-
-    assert!(
-        out.is_empty(),
-        "pre-init Order must be dropped like Delphi InitDone gate"
-    );
-    assert_eq!(d.orders().current_snapshot_flag(), 0);
-}
-
 // =========================================================================
 //  Multi-Client ServerTimeDelta tests
 // =========================================================================
@@ -3518,7 +2720,7 @@ fn current_delta_falls_back_to_global_when_source_is_none() {
     // Raw dispatch without linking: the dispatcher reads the global.
     let d = EventDispatcher::new();
     assert!(d.server_time_delta_source.is_none());
-    // Write to the global → the dispatcher sees the same value.
+    // Write to the global -> the dispatcher sees the same value.
     crate::client::set_server_time_delta_global(2.5 / 86400.0);
     assert!((delta_seconds(&d) - 2.5).abs() < 1e-9);
     // Reset the global so it does not affect other tests.
@@ -3536,7 +2738,7 @@ fn current_delta_reads_from_source_when_set() {
     handle.store(days.to_bits(), Ordering::Relaxed);
     let mut d = EventDispatcher::new();
     d.set_server_time_delta_source(Arc::clone(&handle));
-    // Meanwhile the global holds a different value — the dispatcher must ignore it.
+    // Meanwhile the global holds a different value -- the dispatcher must ignore it.
     crate::client::set_server_time_delta_global(99.0 / 86400.0);
     assert!(
         (delta_seconds(&d) - 7.0).abs() < 1e-9,
@@ -3548,7 +2750,7 @@ fn current_delta_reads_from_source_when_set() {
 #[test]
 fn delta_handle_update_visible_to_dispatcher() {
     // A handle change is reflected in the dispatcher's next read
-    // (atomic snapshot — no caching).
+    // (atomic snapshot -- no caching).
     let handle = Arc::new(AtomicU64::new(0));
     let mut d = EventDispatcher::new();
     d.set_server_time_delta_source(Arc::clone(&handle));
@@ -3570,7 +2772,7 @@ fn two_dispatchers_with_distinct_handles_are_isolated() {
     d_a.set_server_time_delta_source(Arc::clone(&h_a));
     d_b.set_server_time_delta_source(Arc::clone(&h_b));
 
-    // Client A: delta = +5s; Client B: delta = -200ms (different servers — different drift).
+    // Client A: delta = +5s; Client B: delta = -200ms (different servers -- different drift).
     h_a.store((5.0_f64 / 86400.0).to_bits(), Ordering::Relaxed);
     h_b.store((-0.2_f64 / 86400.0).to_bits(), Ordering::Relaxed);
 
@@ -3587,7 +2789,7 @@ fn two_dispatchers_with_distinct_handles_are_isolated() {
 }
 
 // =========================================================================
-//  dispatch_into_active — server_token tracking + auto-link delta handle
+//  dispatch_into_active -- server_token tracking + auto-link delta handle
 // =========================================================================
 
 fn dummy_client_cfg() -> crate::client::ClientConfig {
@@ -3911,10 +3113,10 @@ fn active_get_markets_list_emits_new_markets_added_after_actual_insert() {
         "user-facing listing event must be emitted only after the new market is present in state"
     );
     assert!(
-        actions
+        !actions
             .iter()
-            .any(|action| matches!(action, ActiveAction::RequestOrderSnapshot)),
-        "Delphi AddNewMarket sends TAllStatusesReq after local market creation"
+            .any(|action| matches!(action, ActiveAction::RequestOrderStatus { .. })),
+        "new markets attach already-retained parked mirrors without a network snapshot"
     );
     assert!(
         actions
@@ -3922,18 +3124,6 @@ fn active_get_markets_list_emits_new_markets_added_after_actual_insert() {
             .any(|action| matches!(action, ActiveAction::RequestUpdateMarketsList)),
         "Delphi immediately updates prices after NewMarkets.Count > 0"
     );
-    let order_snapshot_pos = actions
-        .iter()
-        .position(|action| matches!(action, ActiveAction::RequestOrderSnapshot))
-        .expect("order snapshot action");
-    let update_prices_pos = actions
-        .iter()
-        .position(|action| matches!(action, ActiveAction::RequestUpdateMarketsList))
-        .expect("update prices action");
-    assert!(
-            order_snapshot_pos < update_prices_pos,
-            "Delphi AddNewMarket queues TAllStatusesReq during GetMarketsList before Bworks calls UpdateMarketsList"
-        );
 }
 
 #[test]
@@ -4017,7 +3207,7 @@ fn active_trades_resend_check_runs_after_valid_trades_packet() {
 #[test]
 fn dispatch_into_active_records_initial_server_token() {
     // The first call records the current server_token into last_known_server_token.
-    // Sentinel value 0 (init) → does not trigger a reset on the first non-zero token.
+    // Sentinel value 0 (init) -> does not trigger a reset on the first non-zero token.
     let mut d = EventDispatcher::new();
     let mut client = crate::client::Client::new(dummy_client_cfg());
     // Set server_token=42 (simulating the state after the first Fine).
@@ -4042,8 +3232,8 @@ fn dispatch_into_active_records_initial_server_token() {
 
 #[test]
 fn dispatch_into_active_does_not_reset_on_first_non_zero_token() {
-    // Init last_known=0 → the first non-zero token does NOT trigger full_reset.
-    // To verify this — set "signature" values in trades/order_books
+    // Init last_known=0 -> the first non-zero token does NOT trigger full_reset.
+    // To verify this -- set "signature" values in trades/order_books
     // and check that they were NOT reset.
     let mut d = EventDispatcher::new();
     // Make order_books non-empty via apply_markets_indexes (creates the market_idx mapping).
@@ -4066,7 +3256,7 @@ fn dispatch_into_active_does_not_reset_on_first_non_zero_token() {
     assert_eq!(
         d.markets.by_name.len(),
         snapshot_count_before,
-        "first non-zero token — does not trigger a reset"
+        "first non-zero token -- does not trigger a reset"
     );
 }
 
@@ -4076,7 +3266,7 @@ fn dispatch_into_active_triggers_reset_on_token_change() {
     // Simulate that we already saw server_token = 0xAAA.
     d.last_known_server_token = 0xAAA;
     // Set trades state to non-default (last_packet_num != 0 is observable via
-    // a repeat dispatch — but it is private. It is enough to check that `last_known`
+    // a repeat dispatch -- but it is private. It is enough to check that `last_known`
     // updates to the new value, while full_reset works at the level of TradesState itself).
     let mut client = crate::client::Client::new(dummy_client_cfg());
     client.testing_set_server_token(0xBBB);
@@ -4093,7 +3283,7 @@ fn dispatch_into_active_triggers_reset_on_token_change() {
     );
     assert_eq!(
         d.last_known_server_token, 0xBBB,
-        "after a token change — last_known is updated"
+        "after a token change -- last_known is updated"
     );
     // The behavior of TradesState.full_reset() and OrderBooks.reset_caches_keep_books() is covered
     // by unit tests in the respective modules (state::trades, state::order_books).
@@ -4120,10 +3310,10 @@ fn dispatch_into_active_auto_links_server_time_delta_source() {
     );
     assert!(
         d.server_time_delta_source.is_some(),
-        "after the first dispatch_into_active — source is bound to the Client"
+        "after the first dispatch_into_active -- source is bound to the Client"
     );
 
-    // Repeat call — source does not change (already linked).
+    // Repeat call -- source does not change (already linked).
     let handle_after_first = Arc::clone(d.server_time_delta_source.as_ref().unwrap());
     actions.clear();
     dispatch_active_packet_for_test(
@@ -4138,7 +3328,7 @@ fn dispatch_into_active_auto_links_server_time_delta_source() {
     let handle_after_second = d.server_time_delta_source.as_ref().unwrap();
     assert!(
         Arc::ptr_eq(&handle_after_first, handle_after_second),
-        "repeat call — source stays the same handle"
+        "repeat call -- source stays the same handle"
     );
 }
 
@@ -4164,7 +3354,7 @@ fn snapshot_requested_with_provider_triggers_fresh_reply() {
     let mut out = Vec::new();
     let mut actions = Vec::new();
 
-    // Server prods the client: "send your strategy snapshot" — this is
+    // Server prods the client: "send your strategy snapshot" -- this is
     // StratCommand::SnapshotRequest. Payload = `build_snapshot_request(uid)`.
     let payload = crate::commands::strat::build_snapshot_request(42);
 
@@ -4179,7 +3369,7 @@ fn snapshot_requested_with_provider_triggers_fresh_reply() {
     );
     apply_active_actions_for_test(&client, &mut actions);
 
-    // Drain send queues — there must be a Command::Strat send with a fresh
+    // Drain send queues -- there must be a Command::Strat send with a fresh
     // TStratSnapshot body: CmdId/ver/uid + ServerEpoch/ClientMaxLastDate/Size/Full/Data.
     let mut found_snapshot_send = false;
     for item in drain_client_send_items(&client) {
@@ -4206,7 +3396,7 @@ fn snapshot_requested_with_provider_triggers_fresh_reply() {
     }
     assert!(
         found_snapshot_send,
-        "after a SnapshotRequest with a provider — there must be a fresh send"
+        "after a SnapshotRequest with a provider -- there must be a fresh send"
     );
 
     assert!(
@@ -4238,7 +3428,7 @@ fn snapshot_requested_without_provider_sends_owned_empty_snapshot() {
     );
     apply_active_actions_for_test(&client, &mut actions);
 
-    // Drain send queues — there must be a Command::Strat with an empty serializer batch.
+    // Drain send queues -- there must be a Command::Strat with an empty serializer batch.
     let mut empty_snapshot_sends = 0;
     for item in drain_client_send_items(&client) {
         if item.cmd == Command::Strat.to_byte() {
@@ -4259,7 +3449,7 @@ fn snapshot_requested_without_provider_sends_owned_empty_snapshot() {
     }
     assert_eq!(
         empty_snapshot_sends, 1,
-        "without a provider — an empty owned snapshot must be sent"
+        "without a provider -- an empty owned snapshot must be sent"
     );
 
     assert!(
@@ -4355,6 +3545,60 @@ fn pre_init_strategy_runtime_state_is_applied_before_domain_ready() {
             strategies_running: true
         })
     )));
+}
+
+#[test]
+fn pre_init_news_history_is_applied_but_regular_ui_remains_gated() {
+    let mut d = EventDispatcher::new();
+    let client = crate::client::Client::new(dummy_client_cfg());
+    assert!(!client.is_domain_ready());
+    let mut out = Vec::new();
+    let mut actions = Vec::new();
+
+    let news = gzip_news_frame(r#"{"meta":{"id":"startup"}}"#);
+    let tags = gzip_news_frame(r#"{"tags":[{"name":"ETF"}]}"#);
+    let mut payload = Vec::new();
+    payload.push(27); // TNewsHistoryCommand
+    payload.extend_from_slice(&CURRENT_PROTO_CMD_VER.to_le_bytes());
+    payload.extend_from_slice(&27u64.to_le_bytes());
+    payload.extend_from_slice(&1u16.to_le_bytes());
+    payload.extend_from_slice(&(news.len() as u16).to_le_bytes());
+    payload.extend_from_slice(&news);
+    payload.extend_from_slice(&(tags.len() as u16).to_le_bytes());
+    payload.extend_from_slice(&tags);
+
+    dispatch_active_packet_for_test(
+        &mut d,
+        Command::UI,
+        &payload,
+        0,
+        &mut out,
+        &client,
+        &mut actions,
+    );
+
+    assert_eq!(d.news.len(), 1);
+    assert!(d.news.tags_json().is_some());
+    assert!(out.iter().any(|event| matches!(
+        event,
+        Event::News(crate::state::NewsEvent::HistoryApplied {
+            news_count: 1,
+            tags_included: true,
+        })
+    )));
+
+    out.clear();
+    dispatch_active_packet_for_test(
+        &mut d,
+        Command::UI,
+        &[1], // regular TClientSettingsCommand payload
+        0,
+        &mut out,
+        &client,
+        &mut actions,
+    );
+    assert!(out.is_empty());
+    assert_eq!(d.news.len(), 1);
 }
 
 fn raw_strat_snapshot_payload(uid: u64, server_epoch: u64, full: bool, data: &[u8]) -> Vec<u8> {
@@ -4685,31 +3929,4 @@ fn ui_strat_start_stop_v2_uses_owned_checked_delta() {
         }
         other => panic!("expected StratStartStopV2, got {other:?}"),
     }
-}
-
-#[test]
-fn dispatcher_propagates_delta_to_orders_state() {
-    // End-to-end: on `dispatch(Command::Order, ...)` the dispatcher applies the current
-    // delta to Orders state. Verify that after linking the handle the delta reaches
-    // `Orders.server_time_delta`.
-    let handle = Arc::new(AtomicU64::new(0));
-    let days: f64 = 1.25 / 86400.0;
-    handle.store(days.to_bits(), Ordering::Relaxed);
-
-    let mut d = EventDispatcher::new();
-    d.set_server_time_delta_source(Arc::clone(&handle));
-
-    // Any Order payload triggers set_server_time_delta.
-    let payload = build_all_statuses_request(99);
-    let _events = d.dispatch(Command::Order, &payload, 1000);
-
-    // Round-trip days → seconds for comparison against 1.25.
-    let applied_days = d.orders.server_time_delta;
-    let applied_seconds = applied_days * 86400.0;
-    assert!(
-        (applied_seconds - 1.25).abs() < 1e-9,
-        "Orders.server_time_delta must receive the value from the handle ({}s, got {}s)",
-        1.25,
-        applied_seconds
-    );
 }

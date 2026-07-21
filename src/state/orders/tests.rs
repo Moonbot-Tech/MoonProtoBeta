@@ -1,2649 +1,877 @@
 use super::*;
-use crate::commands::market::{BaseCurrency, ExchangeCode};
+use crate::commands::registry::CURRENT_PROTO_CMD_VER;
 
-fn make_base(uid: u64, ver: u16) -> BaseCommandHeader {
+const SERVER_TOKEN: u64 = 11;
+const APP_TOKEN: u64 = 22;
+
+fn header(cmd_id: u8, uid: u64) -> BaseCommandHeader {
     BaseCommandHeader {
-        cmd_id: 4,
-        ver,
+        cmd_id,
+        ver: CURRENT_PROTO_CMD_VER,
         uid,
     }
 }
 
-fn make_market(uid: u64, ver: u16, market_name: &str) -> MarketCommandHeader {
+fn desc(market: &str) -> OrderDescription {
+    OrderDescription::for_test(market, false, false)
+}
+
+fn state(status: OrderWorkerStatus, tag: u8) -> CanonicalOrderState {
+    let mut state = CanonicalOrderState::default();
+    state.0[0] = status.to_byte();
+    state.0[9] = tag;
+    state.0[10] = tag & 7;
+    state.0[11..19].copy_from_slice(&(100.0 + f64::from(tag)).to_le_bytes());
+    state.0[19..27].copy_from_slice(&(5.0 + f64::from(tag)).to_le_bytes());
+    state.0[333..341].copy_from_slice(&(200.0 + f64::from(tag)).to_le_bytes());
+    state
+}
+
+fn put_i64(state: &mut CanonicalOrderState, offset: usize, value: i64) {
+    state.0[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+fn put_u64(state: &mut CanonicalOrderState, offset: usize, value: u64) {
+    state.0[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+fn put_f64(state: &mut CanonicalOrderState, offset: usize, value: f64) {
+    state.0[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+fn put_f32(state: &mut CanonicalOrderState, offset: usize, value: f32) {
+    state.0[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+fn fill_leg(
+    state: &mut CanonicalOrderState,
+    exec: usize,
+    placement: usize,
+    slow: usize,
+    seed: f64,
+) {
+    put_f64(state, exec, seed + 1.0);
+    put_f64(state, exec + 8, seed + 2.0);
+    put_f64(state, exec + 16, seed + 3.0);
+    put_f64(state, exec + 24, seed + 4.0);
+    state.0[exec + 32] = 5;
+
+    put_i64(state, placement, seed as i64 + 10);
+    put_f64(state, placement + 8, seed + 11.0);
+    put_i64(state, placement + 16, 1_700_000_000_000 + seed as i64);
+    put_f64(state, placement + 24, seed + 12.0);
+    put_f64(state, placement + 32, seed + 13.0);
+    put_i64(state, placement + 40, 1_700_000_100_000 + seed as i64);
+    put_i64(state, placement + 48, 1_700_000_200_000 + seed as i64);
+    state.0[placement + 56] = 14;
+    state.0[placement + 57] = OrderType::BuyLimit.to_byte();
+    state.0[placement + 58] = OrderSubType::ReduceOnly.to_byte();
+    state.0[placement + 59] = 15;
+    state.0[placement + 60] = 1;
+    state.0[placement + 61] = 2;
+    state.0[placement + 62] = 0;
+
+    put_f64(state, slow, seed + 16.0);
+    put_f64(state, slow + 8, seed + 17.0);
+    put_f32(state, slow + 16, seed as f32 + 18.0);
+}
+
+fn image(uid: u64, rev: u64, desc: OrderDescription, state: CanonicalOrderState) -> TradeCommand {
+    TradeCommand::OrderImage(OrderImage {
+        header: header(41, uid),
+        state_rev: rev,
+        desc,
+        section_mask: ORDER_SECTION_ALL_MASK,
+        state,
+    })
+}
+
+fn patch(uid: u64, rev: u64, hash: u32, mask: u16, state: CanonicalOrderState) -> TradeCommand {
+    TradeCommand::OrderPatch(OrderPatch {
+        header: header(42, uid),
+        state_rev: rev,
+        state_hash: hash,
+        section_mask: mask,
+        state,
+    })
+}
+
+fn apply(
+    orders: &mut OrderState,
+    command: TradeCommand,
+    app_token: u64,
+    market_exists: bool,
+) -> (Vec<OrderEvent>, Vec<OrderRepair>) {
+    let mut events = Vec::new();
+    let mut repairs = Vec::new();
+    orders.apply_protocol(
+        command,
+        1_000,
+        SERVER_TOKEN,
+        app_token,
+        0.0,
+        &|_| market_exists,
+        &mut events,
+        &mut repairs,
+    );
+    (events, repairs)
+}
+
+fn market_header(cmd_id: u8, uid: u64, market_name: &str) -> MarketCommandHeader {
     MarketCommandHeader {
-        base: make_base(uid, ver),
-        currency: 1,
-        platform: 4,
-        market_name: market_name.to_string(),
-    }
-}
-
-fn make_epoch(
-    uid: u64,
-    ver: u16,
-    market: &str,
-    epoch: u16,
-    status: OrderWorkerStatus,
-) -> TradeEpochHeader {
-    TradeEpochHeader {
-        market: make_market(uid, ver, market),
-        epoch,
-        status,
-    }
-}
-
-fn make_status(uid: u64, market: &str, status: OrderWorkerStatus, epoch: u16) -> OrderStatus {
-    OrderStatus {
-        epoch_header: make_epoch(uid, 3, market, epoch, status),
-        buy_order: OrderCompact::default(),
-        sell_order: OrderCompact::default(),
-        stops: StopSettings::default(),
-        strat_id: 0,
-        is_short: false,
-        db_id: 0,
-        from_cache: false,
-        emulator_mode: false,
-        immune_for_clicks: false,
-        vstop_on: false,
-        vstop_fixed: false,
-        vstop_level: 0.0,
-        vstop_vol: 0.0,
-    }
-}
-
-fn order_status_cmd(status: OrderStatus) -> TradeCommand {
-    TradeCommand::OrderStatus(Box::new(status))
-}
-
-fn trace_point(
-    uid: u64,
-    order_type: OrderType,
-    flags: u8,
-    time: f64,
-    price: f32,
-    base: f32,
-    stop: f32,
-) -> OrderTracePoint {
-    OrderTracePoint {
-        market: make_market(uid, 3, "BTCUSDT"),
-        trace_time: time,
-        trace_price: price,
-        base_price: base,
-        stop_price: stop,
-        ord_type: order_type,
-        flags,
+        base: header(cmd_id, uid),
+        currency: 0,
+        platform: 0,
+        market_name: market_name.to_owned(),
     }
 }
 
 #[test]
-fn sell_reason_descriptions_match_delphi_sell_reason_code_to_str() {
-    let cases = [
-        (SellReason::Unknown, "Unknown"),
-        (SellReason::SellPrice, "Sell Price"),
-        (SellReason::AutoPriceDown, "Auto Price Down"),
-        (SellReason::SellLevel, "Sell Level"),
-        (SellReason::SellSpread, "SellSpread"),
-        (SellReason::SellShot, "SellShot"),
-        (SellReason::PanicSell, "PanicSell"),
-        (SellReason::StopLoss, "StopLoss"),
-        (SellReason::Trailing, "Trailing"),
-        (SellReason::MarketStop, "Market Stop"),
-        (SellReason::ManualSell, "Manual Sell"),
-        (SellReason::JoinedSell, "JoinedSell"),
-        (SellReason::SellFromAssets, "SellFromAssets"),
-        (SellReason::BvSvStop, "BV/SV Stop"),
-        (SellReason::TakeProfit, "TakeProfit"),
-    ];
-
-    for (reason, expected) in cases {
-        assert_eq!(reason.description(), expected);
-    }
-}
-
-fn order_replace_response_cmd(response: OrderReplaceResponse) -> TradeCommand {
-    TradeCommand::OrderReplaceResponse(Box::new(response))
-}
-
-#[test]
-fn terminal_status_marks_done_then_deferred_removal() {
-    let mut orders = Orders::new();
-    let s1 = make_status(42, "BTCUSDT", OrderWorkerStatus::BuySet, 1);
-    let (res, ev) = orders.apply(order_status_cmd(s1));
-    assert_eq!(res, ApplyResult::Applied);
-    assert!(matches!(ev, OrderEvent::Created(order) if order.uid == 42));
-    assert!(orders.get(42).is_some());
-
-    let s2 = make_status(42, "BTCUSDT", OrderWorkerStatus::SellDone, 2);
-    let (_, ev) = orders.apply(order_status_cmd(s2));
-    let final_status_from_event = match &ev {
-        OrderEvent::Updated(order) if order.uid == 42 => order.status,
-        other => panic!("expected terminal update event, got {other:?}"),
-    };
-    assert_eq!(final_status_from_event, OrderWorkerStatus::SellDone);
-    assert!(orders.get(42).unwrap().job_is_done);
-
-    let removed = orders.drain_pending_removals();
-    assert_eq!(removed, vec![42]);
-    assert!(orders.get(42).is_none());
-}
-
-#[test]
-// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
-fn from_cache_status_does_not_create_unknown_order() {
-    let mut orders = Orders::new();
-    let mut cached = make_status(42, "BTCUSDT", OrderWorkerStatus::BuySet, 1);
-    cached.from_cache = true;
-
-    let (res, ev) = orders.apply(order_status_cmd(cached));
-
-    assert_eq!(res, ApplyResult::OrderNotFound);
-    assert!(matches!(
-        ev,
-        OrderEvent::Ignored {
-            uid: 42,
-            reason: ApplyResult::OrderNotFound
-        }
-    ));
-    assert!(orders.get(42).is_none());
-}
-
-#[test]
-// parity: MoonBot TaskWorkers.pas:TOrdersWorkers.TotalSellQuantity + ChartFrameUnit.pas:HasUnprotectedPos
-fn position_protection_counts_active_non_emulator_sell_workers_by_side() {
-    let mut orders = Orders::new();
-
-    let mut long_sell = make_status(42, "BTCUSDT", OrderWorkerStatus::SellSet, 1);
-    long_sell.sell_order.quantity_remaining = 1.5;
-    orders.apply(order_status_cmd(long_sell));
-
-    let mut short_sell = make_status(43, "BTCUSDT", OrderWorkerStatus::SellSet, 1);
-    short_sell.is_short = true;
-    short_sell.sell_order.quantity_remaining = 2.0;
-    orders.apply(order_status_cmd(short_sell));
-
-    let mut emulator_sell = make_status(44, "BTCUSDT", OrderWorkerStatus::SellSet, 1);
-    emulator_sell.emulator_mode = true;
-    emulator_sell.sell_order.quantity_remaining = 99.0;
-    orders.apply(order_status_cmd(emulator_sell));
-
-    let mut other_market_sell = make_status(45, "ETHUSDT", OrderWorkerStatus::SellSet, 1);
-    other_market_sell.sell_order.quantity_remaining = 99.0;
-    orders.apply(order_status_cmd(other_market_sell));
-
-    let mut buy_set = make_status(46, "BTCUSDT", OrderWorkerStatus::BuySet, 1);
-    buy_set.sell_order.quantity_remaining = 99.0;
-    orders.apply(order_status_cmd(buy_set));
-
-    assert_eq!(
-        orders.total_sell_quantity("BTCUSDT", PositionFilter::Both),
-        3.5
+fn exact_image_creates_projection_without_repair() {
+    let mut orders = OrderState::new();
+    let (events, repairs) = apply(
+        &mut orders,
+        image(7, 3, desc("BTCUSDT"), state(OrderWorkerStatus::BuySet, 1)),
+        APP_TOKEN,
+        true,
     );
-    assert_eq!(
-        orders.total_sell_quantity("BTCUSDT", PositionFilter::Long),
-        1.5
-    );
-    assert_eq!(
-        orders.total_sell_quantity("BTCUSDT", PositionFilter::Short),
-        2.0
-    );
-
-    let protection = orders.position_protection("BTCUSDT", 4.0, 1.5, 2.5);
-    assert!(protection.both.has_warning);
-    assert_eq!(protection.both.closing_sell_quantity, 3.5);
-    assert_eq!(protection.both.missing_quantity, 0.5);
-    assert!(!protection.long.has_warning);
-    assert_eq!(protection.long.missing_quantity, 0.0);
-    assert!(protection.short.has_warning);
-    assert_eq!(protection.short.missing_quantity, 0.5);
+    assert!(repairs.is_empty());
+    assert!(matches!(events.as_slice(), [OrderEvent::Created(order)] if order.uid == 7));
+    assert_eq!(orders.get(7).unwrap().status, OrderWorkerStatus::BuySet);
+    assert!(orders.mirrors[&7].is_exact());
 }
 
 #[test]
-// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
-fn existing_full_status_keeps_worker_identity_fields() {
-    let mut orders = Orders::new();
-    let mut first = make_status(42, "BTCUSDT", OrderWorkerStatus::BuySet, 1);
-    first.epoch_header.market.currency = 1;
-    first.epoch_header.market.platform = 4;
-    first.strat_id = 11;
-    first.is_short = false;
-    first.db_id = 101;
-    first.from_cache = false;
-    first.emulator_mode = false;
-    first.buy_order.actual_price = 10.0;
-    first.stops.sl_level = 1.0;
-    first.immune_for_clicks = false;
-    orders.apply(order_status_cmd(first));
+fn full_image_materializes_every_canonical_section() {
+    let mut canonical = CanonicalOrderState::default();
+    canonical.0[0] = OrderWorkerStatus::None.to_byte();
+    put_u64(&mut canonical, 1, 0x1122_3344_5566_7788);
+    canonical.0[9] = 14;
+    canonical.0[10] = OFL_IMMUNE | OFL_PANIC_ON | OFL_PANIC_AUTO;
+    put_f64(&mut canonical, 11, 101.25);
+    put_f64(&mut canonical, 19, 2.5);
+    canonical.0[27] = 1;
+    put_f64(&mut canonical, 28, 111.5);
+    canonical.0[36] = 1;
+    fill_leg(&mut canonical, 37, 70, 133, 100.0);
+    fill_leg(&mut canonical, 153, 186, 249, 200.0);
 
-    let mut second = make_status(42, "ETHUSDT", OrderWorkerStatus::BuySet, 2);
-    second.epoch_header.market.currency = 9;
-    second.epoch_header.market.platform = 8;
-    second.strat_id = 22;
-    second.is_short = true;
-    second.db_id = 202;
-    second.from_cache = true;
-    second.emulator_mode = true;
-    second.buy_order.actual_price = 25.0;
-    second.stops.sl_level = 2.0;
-    second.immune_for_clicks = true;
+    let stops = StopSettings::disabled()
+        .with_stop_loss_fixed(95.0, 0.25)
+        .with_trailing_percent(1.5, 0.1)
+        .with_take_profit_price(120.0);
+    let mut stop_bytes = Vec::new();
+    stops.write_to(&mut stop_bytes);
+    canonical.0[269..315].copy_from_slice(&stop_bytes);
+    canonical.0[315] = 1;
+    canonical.0[316] = 1;
+    put_f64(&mut canonical, 317, 97.5);
+    put_f64(&mut canonical, 325, 0.75);
+    put_f64(&mut canonical, 333, 118.0);
+    canonical.0[341] = 1;
 
-    let (res, ev) = orders.apply(order_status_cmd(second));
+    let mut orders = OrderState::new();
+    let (events, repairs) = apply(
+        &mut orders,
+        image(
+            701,
+            1,
+            OrderDescription::for_test("BTCUSDT", true, true),
+            canonical,
+        ),
+        APP_TOKEN,
+        true,
+    );
+    assert!(repairs.is_empty());
+    assert!(matches!(events.as_slice(), [OrderEvent::Created(order)] if order.uid == 701));
 
-    assert_eq!(res, ApplyResult::Applied);
-    assert!(matches!(ev, OrderEvent::Updated(order) if order.uid == 42));
-    let order = orders.get(42).unwrap();
-    assert_eq!(order.market_name, "BTCUSDT");
-    assert_eq!(order.currency, BaseCurrency::USDT);
-    assert_eq!(order.platform, ExchangeCode::FBinance);
-    assert_eq!(order.strat_id, 11);
-    assert!(!order.is_short);
-    assert_eq!(order.db_id, 101);
-    assert!(!order.from_cache);
-    assert!(!order.emulator_mode);
-    assert_eq!(order.buy_order.actual_price, 25.0);
-    assert_eq!(order.stops.sl_level, 2.0);
+    let order = orders.get(701).unwrap();
+    assert_eq!(order.status, OrderWorkerStatus::None);
+    assert_eq!(order.strat_id, 0x1122_3344_5566_7788);
+    assert_eq!(order.sell_reason, SellReason::TakeProfit);
     assert!(order.immune_for_clicks);
-}
-
-#[test]
-// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
-fn incoming_set_immune_is_not_applied_by_process_command_order() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        42,
-        "BTCUSDT",
-        OrderWorkerStatus::BuySet,
-        1,
-    )));
-
-    let set_immune = SetImmuneCommand {
-        header: make_base(777, 3),
-        items: vec![ImmuneItem {
-            uid: 42,
-            value: true,
-        }],
-    };
-    let (res, ev) = orders.apply(TradeCommand::SetImmune(set_immune));
-
-    assert_eq!(res, ApplyResult::NotApplicable);
-    assert!(matches!(
-        ev,
-        OrderEvent::Ignored {
-            uid: 777,
-            reason: ApplyResult::NotApplicable
-        }
-    ));
-    assert!(!orders.get(42).unwrap().immune_for_clicks);
-}
-
-#[test]
-// parity: MoonBot MoonProtoServer.pas:TMoonProtoNetServer.ProcessCommandOrder (TSetImmuneCommand)
-fn outgoing_set_immune_clicks_mutates_only_found_active_orders() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        42,
-        "BTCUSDT",
-        OrderWorkerStatus::BuySet,
-        1,
-    )));
-    orders.apply(order_status_cmd(make_status(
-        43,
-        "BTCUSDT",
-        OrderWorkerStatus::SellDone,
-        1,
-    )));
-
-    let applied = orders.set_immune_clicks(&[
-        ImmuneItem {
-            uid: 42,
-            value: true,
-        },
-        ImmuneItem {
-            uid: 43,
-            value: true,
-        },
-        ImmuneItem {
-            uid: 44,
-            value: true,
-        },
-    ]);
-
-    assert_eq!(applied.len(), 1);
-    assert_eq!(applied[0].uid, 42);
-    assert!(orders.get(42).unwrap().immune_for_clicks);
-    assert!(!orders.get(43).unwrap().immune_for_clicks);
-    assert!(orders.get(44).is_none());
-}
-
-#[test]
-fn outgoing_send_stops_if_changed_matches_delphi_change_gate() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        42,
-        "BTCUSDT",
-        OrderWorkerStatus::BuySet,
-        1,
-    )));
-
-    assert!(
-        orders
-            .send_stops_if_changed(404, &StopSettings::default())
-            .is_none(),
-        "Delphi exits when vOrder/local worker is absent"
-    );
-    assert!(
-        orders
-            .send_stops_if_changed(42, &StopSettings::default())
-            .is_none(),
-        "Delphi exits when Cur == FPrevStops"
-    );
-
-    let stops = StopSettings {
-        stop_loss_on: DelphiBool::TRUE,
-        sl_level: 12.5,
-        trailing_on: DelphiBool::TRUE,
-        trailing_level: -0.0,
-        ..StopSettings::default()
-    };
-    let (ctx, market, status, sent_stops) = orders
-        .send_stops_if_changed(42, &stops)
-        .expect("changed stops should be sent");
-
-    assert_eq!(ctx.uid, 42);
-    assert_eq!(ctx.currency, BaseCurrency::USDT);
-    assert_eq!(ctx.platform, ExchangeCode::FBinance);
-    assert_eq!(market, "BTCUSDT");
-    assert_eq!(status, OrderWorkerStatus::BuySet);
-    assert_eq!(sent_stops, stops);
-    assert_eq!(orders.get(42).unwrap().stops, stops);
-    assert!(
-        orders.send_stops_if_changed(42, &stops).is_none(),
-        "FPrevStops was updated before sending"
-    );
-
-    let same_by_float_math = StopSettings {
-        trailing_level: 0.0,
-        ..stops
-    };
-    assert!(
-        orders
-            .send_stops_if_changed(42, &same_by_float_math)
-            .is_some(),
-        "Delphi TStopSettings.Equal is CompareMem, so -0.0 and +0.0 differ"
-    );
-}
-
-#[test]
-// parity: MoonBot Unit1.pas (GUI send-stops; TakeProfit auto-default guard)
-fn send_stops_derives_take_profit_changed() {
-    // Regression guard: the trader must never set the take_profit_changed wire
-    // flag by hand. The runtime derives it so the server never auto-defaults
-    // (clobbers) the trader's TP on the SELL transition (Unit1.pas:18760).
-    // Enabling/changing the TP latches the flag true; once set it stays latched.
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        7,
-        "BTCUSDT",
-        OrderWorkerStatus::BuySet,
-        1,
-    )));
-
-    // Caller forgets the flag (FALSE) but enables a take-profit: runtime sends TRUE.
-    let stops = StopSettings {
-        use_take_profit: DelphiBool::TRUE,
-        take_profit: 123.0,
-        take_profit_changed: DelphiBool::FALSE,
-        ..StopSettings::default()
-    };
-    let (_, _, _, sent) = orders
-        .send_stops_if_changed(7, &stops)
-        .expect("enabling TP must send");
-    assert_eq!(
-        sent.take_profit_changed,
-        DelphiBool::TRUE,
-        "enabling/changing TP must latch take_profit_changed regardless of caller input"
-    );
-
-    // Re-sending the same stops (still FALSE from the caller) is a no-op: the
-    // latched-true stored value makes the derived flag equal, so nothing changes.
-    assert!(
-        orders.send_stops_if_changed(7, &stops).is_none(),
-        "re-sending identical stops is a no-op; the latched flag keeps it equal"
-    );
-
-    // Changing only a non-TP field keeps the flag latched true (Delphi keeps it
-    // once set), proving the latch is independent of the caller's flag.
-    let sl_only = StopSettings {
-        stop_loss_on: DelphiBool::TRUE,
-        sl_level: 50.0,
-        ..stops
-    };
-    let (_, _, _, sent2) = orders
-        .send_stops_if_changed(7, &sl_only)
-        .expect("SL change must send");
-    assert_eq!(
-        sent2.take_profit_changed,
-        DelphiBool::TRUE,
-        "take_profit_changed stays latched once set, like Delphi"
-    );
-}
-
-#[test]
-fn outgoing_send_vstop_if_changed_matches_delphi_change_gate() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        42,
-        "BTCUSDT",
-        OrderWorkerStatus::SellSet,
-        1,
-    )));
-
-    assert!(
-        orders
-            .send_vstop_if_changed(404, false, false, 0.0, 0.0)
-            .is_none(),
-        "Delphi exits when vOrder/local worker is absent"
-    );
-    assert!(
-        orders
-            .send_vstop_if_changed(42, false, false, 0.0, 0.0)
-            .is_none(),
-        "Delphi exits when VStop fields equal FPrevVStop*"
-    );
-
-    let (ctx, market, params) = orders
-        .send_vstop_if_changed(42, true, false, 12.5, 100.0)
-        .expect("changed VStop should be sent");
-
-    assert_eq!(ctx.uid, 42);
-    assert_eq!(ctx.currency, BaseCurrency::USDT);
-    assert_eq!(ctx.platform, ExchangeCode::FBinance);
-    assert_eq!(market, "BTCUSDT");
-    assert_eq!(params.status, OrderWorkerStatus::SellSet);
-    assert!(params.vstop_on);
-    assert!(!params.vstop_fixed);
-    assert_eq!(params.vstop_level, 12.5);
-    assert_eq!(params.vstop_vol, 100.0);
-    assert!(orders.get(42).unwrap().vstop_on);
-    assert_eq!(orders.get(42).unwrap().vstop_level, 12.5);
-    assert!(
-        orders
-            .send_vstop_if_changed(42, true, false, 12.5, 100.0)
-            .is_none(),
-        "FPrevVStop* was updated before sending"
-    );
-}
-
-#[test]
-fn outgoing_replace_does_not_lose_a_new_target_while_old_replace_is_in_flight() {
-    let mut orders = Orders::new();
-    let mut buy_status = make_status(42, "BTCUSDT", OrderWorkerStatus::BuySet, 1);
-    buy_status.buy_order.order_type = OrderType::Buy;
-    orders.apply(order_status_cmd(buy_status));
-
-    assert!(
-        orders.send_replace_if_requested(404, 10.0, 1000).is_none(),
-        "Delphi exits when local worker is absent"
-    );
-
-    let (ctx, market, order_type, price) = orders
-        .send_replace_if_requested(42, 10.5, 1000)
-        .expect("first replace should be sent");
-    assert_eq!(ctx.uid, 42);
-    assert_eq!(ctx.currency, BaseCurrency::USDT);
-    assert_eq!(ctx.platform, ExchangeCode::FBinance);
-    assert_eq!(market, "BTCUSDT");
-    assert_eq!(order_type, OrderType::Buy);
-    assert_eq!(price, 10.5);
-    let order = orders.get(42).unwrap();
-    assert_eq!(order.buy_price, 10.5);
+    assert!(order.panic_sell);
+    assert!(order.panic_sell_auto);
+    assert_eq!(order.pending_buy_cond_price, Some(101.25));
+    assert_eq!(order.buy_size, 2.5);
     assert!(order.bulk_replace_buy);
-    assert_eq!(order.replace_sent_time_ms, 1000);
+    assert!(order.bulk_replace_sell);
+    assert!(order.emulator_mode);
+    assert!(order.is_short);
+    assert!(!order.job_is_done);
 
-    let (_, _, order_type, price) = orders
-        .send_replace_if_requested(42, 10.7, 1001)
-        .expect("a newer UI target must not be swallowed by the older in-flight replace");
-    assert_eq!(order_type, OrderType::Buy);
-    assert_eq!(price, 10.7);
-    let order = orders.get(42).unwrap();
-    assert_eq!(order.buy_price, 10.7);
-    assert!(order.bulk_replace_buy);
-    assert_eq!(order.replace_sent_time_ms, 1001);
+    let buy = order.buy_order;
+    assert_eq!(buy.quantity_remaining, 101.0);
+    assert_eq!(buy.actual_q, 102.0);
+    assert_eq!(buy.total_btc, 103.0);
+    assert_eq!(buy.mean_price, 104.0);
+    assert_eq!(buy.partial_done, 5);
+    assert_eq!(buy.int_id, 110);
+    assert_eq!(buy.actual_price, 111.0);
+    assert_eq!(buy.open_time().unix_millis(), 1_700_000_000_100);
+    assert_eq!(buy.quantity, 112.0);
+    assert_eq!(buy.quantity_base, 113.0);
+    assert_eq!(buy.close_time().unix_millis(), 1_700_000_100_100);
+    assert_eq!(buy.create_time().unix_millis(), 1_700_000_200_100);
+    assert_eq!(buy.stop_flag, 14);
+    assert_eq!(buy.order_type, OrderType::BuyLimit);
+    assert_eq!(buy.sub_type, OrderSubType::ReduceOnly);
+    assert_eq!(buy.leverage, 15);
+    assert!(buy.is_opened());
+    assert!(buy.is_closed());
+    assert!(!buy.canceled());
+    assert!(buy.is_short());
+    assert_eq!(buy.spent_btc, 116.0);
+    assert_eq!(buy.tmp_btc, 117.0);
+    assert_eq!(buy.panic_sell_down, 118.0);
 
-    let mut pending = make_status(43, "BTCUSDT", OrderWorkerStatus::None, 1);
-    pending.buy_order.mean_price = 9.0;
-    orders.apply(order_status_cmd(pending));
-    assert!(
-        orders.send_replace_if_requested(43, 9.0, 1000).is_none(),
-        "pending replace sends only when BuyCondPrice changes"
-    );
-    let (_, _, order_type, price) = orders
-        .send_replace_if_requested(43, 9.1, 1000)
-        .expect("changed pending price should send O_BUY replace");
-    assert_eq!(order_type, OrderType::Buy);
-    assert_eq!(price, 9.1);
-    assert_eq!(orders.get(43).unwrap().pending_buy_cond_price, Some(9.1));
+    let sell = order.sell_order;
+    assert_eq!(sell.quantity_remaining, 201.0);
+    assert_eq!(sell.actual_q, 202.0);
+    assert_eq!(sell.total_btc, 203.0);
+    assert_eq!(sell.mean_price, 204.0);
+    assert_eq!(sell.int_id, 210);
+    assert_eq!(sell.actual_price, 211.0);
+    assert_eq!(sell.open_time().unix_millis(), 1_700_000_000_200);
+    assert_eq!(sell.spent_btc, 216.0);
+    assert_eq!(sell.tmp_btc, 217.0);
+    assert_eq!(sell.panic_sell_down, 218.0);
+    assert!(sell.is_short());
+
+    assert_eq!(order.buy_price, buy.actual_price);
+    assert_eq!(order.sell_price, sell.actual_price);
+    assert_eq!(order.stops, stops);
+    assert!(order.vstop_on);
+    assert!(order.vstop_fixed);
+    assert_eq!(order.vstop_level, 97.5);
+    assert_eq!(order.vstop_vol, 0.75);
+    assert_eq!(order.planned_sell_price, 118.0);
+    assert!(order.use_market_stop);
 }
 
 #[test]
-fn outgoing_send_cancel_if_requested_matches_delphi_gate() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        42,
-        "BTCUSDT",
-        OrderWorkerStatus::SellSet,
-        1,
-    )));
-    orders.apply(order_status_cmd(make_status(
-        43,
-        "BTCUSDT",
-        OrderWorkerStatus::SellDone,
-        1,
-    )));
-
-    assert!(orders.send_cancel_if_requested(404, 1000).is_none());
-    assert!(orders.send_cancel_if_requested(43, 1000).is_none());
-
-    let send = orders
-        .send_cancel_if_requested(42, 1000)
-        .expect("sell-set cancel should be sent");
-    match send {
-        OrderCancelSend::Cancel {
-            ctx,
-            market,
-            status,
-        } => {
-            assert_eq!(ctx.uid, 42);
-            assert_eq!(market, "BTCUSDT");
-            assert_eq!(status, OrderWorkerStatus::SellSet);
-        }
-        other => panic!("unexpected cancel send: {other:?}"),
-    }
-    assert!(
-        !orders.get(42).unwrap().cancel_request,
-        "Delphi clears FOrder.CancelRequest after sending"
-    );
-
-    let mut pending = make_status(44, "BTCUSDT", OrderWorkerStatus::None, 1);
-    pending.buy_order.mean_price = 9.25;
-    orders.apply(order_status_cmd(pending));
-    let send = orders
-        .send_cancel_if_requested(44, 1000)
-        .expect("pending cancel should be sent");
-    match send {
-        OrderCancelSend::PendingReplaceThenCancel { ctx, market, price } => {
-            assert_eq!(ctx.uid, 44);
-            assert_eq!(market, "BTCUSDT");
-            assert_eq!(price, 9.25);
-        }
-        other => panic!("unexpected pending cancel send: {other:?}"),
-    }
-    assert!(
-        orders.get(44).unwrap().pending_cancel,
-        "Delphi leaves vOrder.PendingCancel set on the pending order"
-    );
-    assert!(
-        orders.tick_pending_cancel_resends(1031).is_empty(),
-        "Delphi worker loop sleeps 32 ms between pending cancel sends"
-    );
-    let sends = orders.tick_pending_cancel_resends(1032);
-    assert_eq!(sends.len(), 1);
-    match &sends[0] {
-        OrderCancelSend::PendingReplaceThenCancel { ctx, market, price } => {
-            assert_eq!(ctx.uid, 44);
-            assert_eq!(market, "BTCUSDT");
-            assert_eq!(*price, 9.25);
-        }
-        other => panic!("unexpected pending cancel resend: {other:?}"),
-    }
-}
-
-#[test]
-fn outgoing_send_panic_sell_if_changed_matches_delphi_gate() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        42,
-        "BTCUSDT",
-        OrderWorkerStatus::SellSet,
-        1,
-    )));
-    orders.apply(order_status_cmd(make_status(
-        43,
-        "BTCUSDT",
-        OrderWorkerStatus::BuySet,
-        1,
-    )));
-
-    assert!(
-        orders.send_panic_sell_if_changed(43, true).is_none(),
-        "Delphi sends panic-sell only from OS_SellSet workers"
-    );
-    assert!(
-        orders.send_panic_sell_if_changed(42, false).is_none(),
-        "initial PrevPanicSell=false suppresses redundant false"
-    );
-
-    let send = orders
-        .send_panic_sell_if_changed(42, true)
-        .expect("false -> true should be sent");
-    assert_eq!(send.ctx.uid, 42);
-    assert_eq!(send.market, "BTCUSDT");
-    assert!(send.turn_on);
-    assert!(orders.get(42).unwrap().panic_sell);
-
-    assert!(
-        orders.send_panic_sell_if_changed(42, true).is_none(),
-        "PrevPanicSell was updated before sending"
-    );
-    let send = orders
-        .send_panic_sell_if_changed(42, false)
-        .expect("true -> false should be sent");
-    assert!(!send.turn_on);
-    assert!(!orders.get(42).unwrap().panic_sell);
-}
-
-#[test]
-fn outgoing_market_panic_sell_matches_delphi_workers_toggle() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        42,
-        "BTCUSDT",
-        OrderWorkerStatus::SellSet,
-        1,
-    )));
-    orders.apply(order_status_cmd(make_status(
-        43,
-        "BTCUSDT",
-        OrderWorkerStatus::SellSet,
-        1,
-    )));
-    orders.apply(order_status_cmd(make_status(
-        44,
-        "ETHUSDT",
-        OrderWorkerStatus::SellSet,
-        1,
-    )));
-    orders.apply(order_status_cmd(make_status(
-        45,
-        "BTCUSDT",
-        OrderWorkerStatus::BuySet,
-        1,
-    )));
-
-    let sends = orders.turn_panic_sell_by_market("BTCUSDT", true);
-    assert_eq!(sends.len(), 2);
-    assert!(orders.get(42).unwrap().panic_sell);
-    assert!(orders.get(43).unwrap().panic_sell);
-    assert!(!orders.get(44).unwrap().panic_sell);
-    assert!(!orders.get(45).unwrap().panic_sell);
-
-    let (panic_sell_on, sends) = orders.switch_panic_sell_by_market("BTCUSDT", true);
-    assert!(!panic_sell_on);
-    assert_eq!(sends.len(), 2);
-    assert!(sends.iter().all(|send| !send.turn_on));
-    assert!(!orders.get(42).unwrap().panic_sell);
-    assert!(!orders.get(43).unwrap().panic_sell);
-
-    let (panic_sell_on, sends) = orders.switch_panic_sell_by_market("BTCUSDT", true);
-    assert!(panic_sell_on);
-    assert_eq!(sends.len(), 2);
-    assert!(sends.iter().all(|send| send.turn_on));
-}
-
-#[test]
-// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
-fn incoming_turn_panic_sell_is_not_applied_by_process_command_order() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        42,
-        "BTCUSDT",
-        OrderWorkerStatus::SellSet,
-        1,
-    )));
-
-    let turn = TurnPanicSellCommand {
-        epoch_header: make_epoch(42, 3, "BTCUSDT", 2, OrderWorkerStatus::SellSet),
-        turn_on: true,
-    };
-    let (res, ev) = orders.apply(TradeCommand::TurnPanicSell(turn));
-
-    assert_eq!(res, ApplyResult::NotApplicable);
-    assert!(matches!(
-        ev,
-        OrderEvent::Ignored {
-            uid: 42,
-            reason: ApplyResult::NotApplicable
-        }
-    ));
-    assert_eq!(orders.get(42).unwrap().status, OrderWorkerStatus::SellSet);
-}
-
-#[test]
-// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
-fn incoming_noop_trade_epoch_still_updates_epoch() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        42,
-        "BTCUSDT",
-        OrderWorkerStatus::SellSet,
-        1,
-    )));
-
-    let turn = TurnPanicSellCommand {
-        epoch_header: make_epoch(42, 3, "BTCUSDT", 2, OrderWorkerStatus::SellSet),
-        turn_on: true,
-    };
-    let (res, _) = orders.apply(TradeCommand::TurnPanicSell(turn));
-    assert_eq!(res, ApplyResult::NotApplicable);
-
-    let stale_update = OrderStatusUpdate {
-        epoch_header: make_epoch(42, 3, "BTCUSDT", 1, OrderWorkerStatus::SellSet),
-        update_data: OrderUpdateData {
-            actual_price: 123.0,
-            ..OrderUpdateData::default()
-        },
-        sell_reason_code: 0,
-    };
-    let (res, _) = orders.apply(TradeCommand::OrderStatusUpdate(stale_update));
-
-    assert_eq!(
-            res,
-            ApplyResult::OutOfOrder,
-            "Every accepted TTradeEpochCommand advances the shared server watermark before payload dispatch"
-        );
-    let sell_actual = orders.get(42).unwrap().sell_order.actual_price;
-    assert_eq!(sell_actual, 0.0);
-}
-
-#[test]
-fn move_all_sells_candidate_gate_matches_delphi_active_client_overloads() {
-    let mut orders = Orders::new();
-    let mut immune_short = make_status(1, "BTCUSDT", OrderWorkerStatus::SellSet, 1);
-    immune_short.is_short = true;
-    immune_short.immune_for_clicks = true;
-    orders.apply(order_status_cmd(immune_short));
-
-    let move_kind = MoveAllSellsParams {
-        cmd_type: MoveAllCmdType::MoveKind,
-        move_kind: ReplaceMultiKind::TopVol,
-        price: 10.0,
-        price_zone: PriceZone::default(),
-        side: FixedPosition::Short,
-    };
-    assert!(
-        !orders.has_move_all_sells_candidate("BTCUSDT", move_kind),
-        "MoveKind overload checks not ImmuneForClicks before wire send"
-    );
-
-    let pers = MoveAllSellsParams {
-        cmd_type: MoveAllCmdType::Pers,
-        ..move_kind
-    };
-    assert!(
-        orders.has_move_all_sells_candidate("BTCUSDT", pers),
-        "percent overload ignores ImmuneForClicks in Delphi"
-    );
-
-    let mut long = make_status(2, "BTCUSDT", OrderWorkerStatus::SellSet, 1);
-    long.is_short = false;
-    orders.apply(order_status_cmd(long));
-
-    let price_zone = MoveAllSellsParams {
-        cmd_type: MoveAllCmdType::PriceZone,
-        side: FixedPosition::Short,
-        ..move_kind
-    };
-    assert!(
-        orders.has_move_all_sells_candidate("BTCUSDT", price_zone),
-        "PriceZone active-client send gate ignores ASide and checks only market/status/non-immune"
-    );
-
-    let none = MoveAllSellsParams {
-        move_kind: ReplaceMultiKind::None,
-        ..move_kind
-    };
-    assert!(
-        !orders.has_move_all_sells_candidate("BTCUSDT", none),
-        "RM_None exits before sending"
-    );
-}
-
-#[test]
-fn move_all_buys_candidate_gate_matches_delphi_active_client_overloads() {
-    let mut orders = Orders::new();
-    let mut immune_long = make_status(1, "BTCUSDT", OrderWorkerStatus::BuySet, 1);
-    immune_long.is_short = false;
-    immune_long.immune_for_clicks = true;
-    orders.apply(order_status_cmd(immune_long));
-
-    assert!(
-        !orders.has_move_all_buys_candidate(
-            "BTCUSDT",
-            MoveAllBuysCmdType::MoveKind,
-            ReplaceMultiKind::TopVol,
-            FixedPosition::Long,
+fn short_description_materializes_direction_in_both_order_legs() {
+    let mut orders = OrderState::new();
+    apply(
+        &mut orders,
+        image(
+            70,
+            1,
+            OrderDescription::for_test("BTCUSDT", false, true),
+            state(OrderWorkerStatus::BuySet, 1),
         ),
-        "MoveKind overload checks not ImmuneForClicks before wire send"
+        APP_TOKEN,
+        true,
     );
-    assert!(
-        orders.has_move_all_buys_candidate(
-            "BTCUSDT",
-            MoveAllBuysCmdType::Pers,
-            ReplaceMultiKind::None,
-            FixedPosition::Short,
-        ),
-        "percent overload checks only active market BuySet"
-    );
-
-    let mut short = make_status(2, "BTCUSDT", OrderWorkerStatus::BuySet, 1);
-    short.is_short = true;
-    orders.apply(order_status_cmd(short));
-
-    assert!(
-        orders.has_move_all_buys_candidate(
-            "BTCUSDT",
-            MoveAllBuysCmdType::MoveKind,
-            ReplaceMultiKind::LastSet,
-            FixedPosition::Short,
-        ),
-        "MoveKind gate honors ASide"
-    );
-    assert!(
-        !orders.has_move_all_buys_candidate(
-            "BTCUSDT",
-            MoveAllBuysCmdType::MoveKind,
-            ReplaceMultiKind::None,
-            FixedPosition::Both,
-        ),
-        "RM_None exits before sending"
-    );
+    let order = orders.get(70).unwrap();
+    assert!(order.is_short);
+    assert!(order.buy_order.is_short());
+    assert!(order.sell_order.is_short());
 }
 
 #[test]
-fn sell_almost_done_is_terminal() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        42,
-        "BTCUSDT",
-        OrderWorkerStatus::SellSet,
-        1,
-    )));
+fn terminal_order_ignores_late_trace_and_corridor_packets() {
+    let uid = 71;
+    let mut orders = OrderState::new();
+    apply(
+        &mut orders,
+        image(
+            uid,
+            1,
+            desc("BTCUSDT"),
+            state(OrderWorkerStatus::SellDone, 1),
+        ),
+        APP_TOKEN,
+        true,
+    );
 
-    let s2 = make_status(42, "BTCUSDT", OrderWorkerStatus::SellAlmostDone, 2);
-    let (res, ev) = orders.apply(order_status_cmd(s2));
-    assert_eq!(res, ApplyResult::Applied);
-    assert!(matches!(
-        ev,
-        OrderEvent::Updated(order)
-            if order.uid == 42 && order.status == OrderWorkerStatus::SellAlmostDone
-    ));
-    assert!(orders.get(42).unwrap().job_is_done);
-    assert_eq!(orders.drain_pending_removals(), vec![42]);
-    assert!(orders.get(42).is_none());
-}
-
-#[test]
-// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
-fn visual_trace_after_terminal_status_is_accepted_before_deferred_removal() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        42,
-        "BTCUSDT",
-        OrderWorkerStatus::SellSet,
-        1,
-    )));
-
-    orders.apply(order_status_cmd(make_status(
-        42,
-        "BTCUSDT",
-        OrderWorkerStatus::SellDone,
-        2,
-    )));
-
-    let trace = OrderTracePoint {
-        market: make_market(42, 3, "BTCUSDT"),
+    let trace = TradeCommand::OrderTracePoint(OrderTracePoint {
+        market: market_header(25, uid, "BTCUSDT"),
         trace_time: 45_000.0,
         trace_price: 101.0,
         base_price: 100.0,
-        stop_price: 0.0,
+        stop_price: 99.0,
         ord_type: OrderType::Sell,
-        flags: trace_flags::IS_FINISH,
-    };
-    let (res, ev) = orders.apply(TradeCommand::OrderTracePoint(trace));
+        flags: trace_flags::IS_INITIAL,
+    });
+    let corridor = TradeCommand::CorridorUpdate(CorridorUpdate {
+        market: market_header(26, uid, "BTCUSDT"),
+        price_down: 95.0,
+        price_up: 105.0,
+    });
 
-    assert_eq!(res, ApplyResult::Applied);
-    assert!(matches!(ev, OrderEvent::TracePoint { uid: 42 }));
-    assert!(orders.get(42).is_some());
-    assert_eq!(orders.drain_pending_removals(), vec![42]);
-    assert!(orders.get(42).is_none());
+    let (trace_events, _) = apply(&mut orders, trace, APP_TOKEN, true);
+    let (corridor_events, _) = apply(&mut orders, corridor, APP_TOKEN, true);
+    let order = orders.get(uid).unwrap();
+
+    assert!(trace_events.is_empty());
+    assert!(corridor_events.is_empty());
+    assert!(order.buy_trace_line.is_none());
+    assert!(order.sell_trace_line.is_none());
+    assert!(!order.is_moon_shot);
+    assert_eq!(order.corridor_price_down, 0.0);
+    assert_eq!(order.corridor_price_up, 0.0);
 }
 
 #[test]
-fn trace_lines_shrink_like_delphi_order_line() {
-    let mut orders = Orders::new();
-    let mut status = make_status(42, "BTCUSDT", OrderWorkerStatus::SellSet, 1);
-    status.sell_order.create_time = 44_000.0;
-    status.sell_order.int_id = 77;
-    orders.apply(order_status_cmd(status));
+fn sparse_image_zeroes_sections_not_carried_on_wire() {
+    let original = OrderImage {
+        header: header(41, 8),
+        state_rev: 4,
+        desc: desc("ETHUSDT"),
+        section_mask: 1 << OSEC_PHASE,
+        state: state(OrderWorkerStatus::SellSet, 9),
+    };
+    let mut bytes = Vec::new();
+    original.write(&mut bytes);
+    let parsed = TradeCommand::parse(&bytes).unwrap();
+    let mut orders = OrderState::new();
+    let (_, repairs) = apply(&mut orders, parsed, APP_TOKEN, true);
+    assert!(repairs.is_empty());
+    assert_eq!(orders.mirrors[&8].state.section(OSEC_FLAGS), [0, 0]);
+    assert!(orders.mirrors[&8].is_exact());
+}
 
-    orders.apply(TradeCommand::OrderTracePoint(trace_point(
-        42,
-        OrderType::Sell,
-        trace_flags::IS_INITIAL,
-        45_000.0,
-        101.0,
-        100.0,
-        0.0,
-    )));
+#[test]
+fn unknown_patch_requests_full_image_and_does_not_create() {
+    let mut orders = OrderState::new();
+    let (_, repairs) = apply(
+        &mut orders,
+        patch(
+            9,
+            1,
+            123,
+            1 << OSEC_FLAGS,
+            state(OrderWorkerStatus::None, 2),
+        ),
+        APP_TOKEN,
+        true,
+    );
+    assert!(orders.mirrors.is_empty());
+    assert_eq!(
+        repairs,
+        [OrderRepair {
+            order_id: 9,
+            exact_rev: 0
+        }]
+    );
+}
 
-    for n in 0..1100 {
-        let (res, ev) = orders.apply(TradeCommand::OrderTracePoint(trace_point(
-            42,
-            OrderType::Sell,
+#[test]
+fn torn_patch_requests_repair_then_promotes_when_all_sections_arrive() {
+    let uid = 10;
+    let description = desc("SOLUSDT");
+    let initial = state(OrderWorkerStatus::BuySet, 1);
+    let mut target = initial.clone();
+    target.copy_section_from(&state(OrderWorkerStatus::BuySet, 6), OSEC_FLAGS);
+    target.copy_section_from(&state(OrderWorkerStatus::SellSet, 6), OSEC_PHASE);
+    let target_hash = state_hash(2, &description, &target);
+    let mut orders = OrderState::new();
+    apply(
+        &mut orders,
+        image(uid, 1, description.clone(), initial),
+        APP_TOKEN,
+        true,
+    );
+
+    let (_, repairs) = apply(
+        &mut orders,
+        patch(uid, 2, target_hash, 1 << OSEC_FLAGS, target.clone()),
+        APP_TOKEN,
+        true,
+    );
+    assert_eq!(
+        repairs,
+        [OrderRepair {
+            order_id: uid,
+            exact_rev: 0
+        }]
+    );
+    assert!(!orders.mirrors[&uid].is_exact());
+
+    let remaining = ORDER_SECTION_ALL_MASK & !(1 << OSEC_FLAGS);
+    let (_, repairs) = apply(
+        &mut orders,
+        patch(uid, 2, target_hash, remaining, target),
+        APP_TOKEN,
+        true,
+    );
+    assert!(repairs.is_empty());
+    assert!(orders.mirrors[&uid].is_exact());
+    assert_eq!(orders.get(uid).unwrap().status, OrderWorkerStatus::SellSet);
+}
+
+#[test]
+fn stale_patch_cannot_roll_back_newer_sections() {
+    let uid = 11;
+    let description = desc("BTCUSDT");
+    let newer = state(OrderWorkerStatus::SellSet, 5);
+    let mut orders = OrderState::new();
+    apply(
+        &mut orders,
+        image(uid, 5, description, newer),
+        APP_TOKEN,
+        true,
+    );
+    let (_, repairs) = apply(
+        &mut orders,
+        patch(
+            uid,
+            4,
             0,
-            45_001.0 + n as f64,
-            102.0 + n as f32,
-            100.0,
-            0.0,
-        )));
-        assert_eq!(res, ApplyResult::Applied);
-        assert!(matches!(ev, OrderEvent::TracePoint { uid: 42 }));
-    }
+            ORDER_SECTION_ALL_MASK,
+            state(OrderWorkerStatus::BuySet, 1),
+        ),
+        APP_TOKEN,
+        true,
+    );
+    assert!(repairs.is_empty());
+    assert_eq!(orders.get(uid).unwrap().status, OrderWorkerStatus::SellSet);
+    assert_eq!(orders.mirrors[&uid].replica_rev(), 5);
+}
 
-    let line = orders.get(42).unwrap().sell_trace_line.as_ref().unwrap();
-    assert!(line.line_count() > (ORDER_TRACE_LINE_SHRINK_TO as f64 * 1.2) as usize);
+#[test]
+fn image_description_is_immutable() {
+    let mut orders = OrderState::new();
+    apply(
+        &mut orders,
+        image(12, 1, desc("BTCUSDT"), state(OrderWorkerStatus::BuySet, 1)),
+        APP_TOKEN,
+        true,
+    );
+    let (events, repairs) = apply(
+        &mut orders,
+        image(12, 2, desc("ETHUSDT"), state(OrderWorkerStatus::SellSet, 2)),
+        APP_TOKEN,
+        true,
+    );
+    assert!(events.is_empty() && repairs.is_empty());
+    assert_eq!(orders.get(12).unwrap().market_name, "BTCUSDT");
+    assert_eq!(orders.get(12).unwrap().status, OrderWorkerStatus::BuySet);
+}
+
+#[test]
+fn unknown_gone_creates_tombstone_and_blocks_late_image() {
+    let mut orders = OrderState::new();
+    apply(
+        &mut orders,
+        TradeCommand::OrderNotFound(header(46, 13)),
+        APP_TOKEN,
+        true,
+    );
+    apply(
+        &mut orders,
+        image(13, 1, desc("BTCUSDT"), state(OrderWorkerStatus::BuySet, 1)),
+        APP_TOKEN,
+        true,
+    );
+    assert!(orders.get(13).is_none());
+    assert!(orders.is_tombstoned(13));
+}
+
+#[test]
+fn gone_ignores_terminal_state_even_before_exact_promotion() {
+    let mut exact = OrderState::new();
+    apply(
+        &mut exact,
+        image(
+            14,
+            1,
+            desc("BTCUSDT"),
+            state(OrderWorkerStatus::SellDone, 1),
+        ),
+        APP_TOKEN,
+        true,
+    );
+    apply(
+        &mut exact,
+        TradeCommand::OrderNotFound(header(46, 14)),
+        APP_TOKEN,
+        true,
+    );
+    assert!(exact.mirrors.contains_key(&14));
+
+    let mut torn = OrderState::new();
+    let description = desc("BTCUSDT");
+    apply(
+        &mut torn,
+        image(
+            15,
+            1,
+            description.clone(),
+            state(OrderWorkerStatus::BuySet, 1),
+        ),
+        APP_TOKEN,
+        true,
+    );
+    let terminal = state(OrderWorkerStatus::SellDone, 2);
+    apply(
+        &mut torn,
+        patch(
+            15,
+            2,
+            state_hash(2, &description, &terminal),
+            1 << OSEC_PHASE,
+            terminal,
+        ),
+        APP_TOKEN,
+        true,
+    );
+    assert!(!torn.mirrors[&15].is_exact());
+    apply(
+        &mut torn,
+        TradeCommand::OrderNotFound(header(46, 15)),
+        APP_TOKEN,
+        true,
+    );
+    assert!(torn.mirrors.contains_key(&15));
+    assert!(!torn.is_tombstoned(15));
+}
+
+#[test]
+fn peer_app_token_changes_world_but_server_token_does_not() {
+    let mut orders = OrderState::new();
+    apply(
+        &mut orders,
+        image(16, 1, desc("BTCUSDT"), state(OrderWorkerStatus::BuySet, 1)),
+        APP_TOKEN,
+        true,
+    );
+    apply(
+        &mut orders,
+        image(
+            161,
+            1,
+            desc("XRPUSDT"),
+            state(OrderWorkerStatus::SellDone, 1),
+        ),
+        APP_TOKEN,
+        true,
+    );
+    let mut events = Vec::new();
+    let mut repairs = Vec::new();
+    orders.apply_protocol(
+        image(17, 1, desc("ETHUSDT"), state(OrderWorkerStatus::BuySet, 1)),
+        2_000,
+        SERVER_TOKEN + 1,
+        APP_TOKEN,
+        0.0,
+        &|_| true,
+        &mut events,
+        &mut repairs,
+    );
+    assert!(orders.get(16).is_some() && orders.get(17).is_some());
+
+    let (events, _) = apply(
+        &mut orders,
+        image(18, 1, desc("SOLUSDT"), state(OrderWorkerStatus::BuySet, 1)),
+        APP_TOKEN + 1,
+        true,
+    );
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, OrderEvent::Removed(order) if order.uid == 16)));
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, OrderEvent::Removed(order) if order.uid == 161)));
+    assert!(orders.get(16).is_none() && orders.get(161).is_none() && orders.get(18).is_some());
+}
+
+#[test]
+fn mirror_parks_until_market_exists_then_attaches_without_network_repair() {
+    let mut orders = OrderState::new();
+    let (_, repairs) = apply(
+        &mut orders,
+        image(19, 1, desc("NEWCOIN"), state(OrderWorkerStatus::BuySet, 1)),
+        APP_TOKEN,
+        false,
+    );
+    assert!(repairs.is_empty());
+    assert!(orders.get(19).is_none());
+    assert!(orders.mirrors.contains_key(&19));
+
+    let mut events = Vec::new();
+    orders.rescan_parked(2_000, &|market| market == "NEWCOIN", &mut events);
+    assert!(matches!(events.as_slice(), [OrderEvent::Created(order)] if order.uid == 19));
+    assert!(orders.get(19).is_some());
+}
+
+#[test]
+fn catalog_reconciles_exact_rows_and_repairs_missing_or_different_rows() {
+    let mut orders = OrderState::new();
+    apply(
+        &mut orders,
+        image(20, 3, desc("BTCUSDT"), state(OrderWorkerStatus::BuySet, 1)),
+        APP_TOKEN,
+        true,
+    );
+    apply(
+        &mut orders,
+        image(21, 4, desc("ETHUSDT"), state(OrderWorkerStatus::BuySet, 1)),
+        APP_TOKEN,
+        true,
+    );
+    let catalog = OrdersCatalog {
+        header: header(44, 0),
+        from_uid: 20,
+        range_end_uid: 22,
+        records: vec![
+            OrderCatalogRecord {
+                order_id: 20,
+                state_rev: 3,
+            },
+            OrderCatalogRecord {
+                order_id: 21,
+                state_rev: 5,
+            },
+            OrderCatalogRecord {
+                order_id: 22,
+                state_rev: 1,
+            },
+        ],
+    };
+    let (_, repairs) = apply(
+        &mut orders,
+        TradeCommand::OrdersCatalog(catalog),
+        APP_TOKEN,
+        true,
+    );
+    assert!(repairs.contains(&OrderRepair {
+        order_id: 21,
+        exact_rev: 4
+    }));
+    assert!(repairs.contains(&OrderRepair {
+        order_id: 22,
+        exact_rev: 0
+    }));
+    assert!(!repairs.iter().any(|repair| repair.order_id == 20));
+}
+
+#[test]
+fn snapshot_uses_the_same_cold_membership_reconcile_as_catalog() {
+    let mut orders = OrderState::new();
+    apply(
+        &mut orders,
+        image(30, 3, desc("BTCUSDT"), state(OrderWorkerStatus::BuySet, 1)),
+        APP_TOKEN,
+        true,
+    );
+    apply(
+        &mut orders,
+        image(31, 4, desc("ETHUSDT"), state(OrderWorkerStatus::BuySet, 1)),
+        APP_TOKEN,
+        true,
+    );
+
+    let mut snapshot_bytes = Vec::new();
+    header(43, 0).write(&mut snapshot_bytes);
+    snapshot_bytes.extend_from_slice(&30u64.to_le_bytes());
+    snapshot_bytes.extend_from_slice(&32u64.to_le_bytes());
+    snapshot_bytes.extend_from_slice(&32u64.to_le_bytes());
+    snapshot_bytes.push(1); // StateRev ULEB
+    desc("SOLUSDT").wire_bytes(&mut snapshot_bytes);
+    snapshot_bytes.extend_from_slice(&ORDER_SECTION_ALL_MASK.to_le_bytes());
+    snapshot_bytes.extend_from_slice(&state(OrderWorkerStatus::BuySet, 2).0);
+    let snapshot = TradeCommand::parse(&snapshot_bytes).expect("valid snapshot wire");
+    let (events, repairs) = apply(&mut orders, snapshot, APP_TOKEN, true);
+
+    assert!(orders.get(32).is_some());
+    assert!(repairs.contains(&OrderRepair {
+        order_id: 30,
+        exact_rev: 3,
+    }));
+    assert!(repairs.contains(&OrderRepair {
+        order_id: 31,
+        exact_rev: 4,
+    }));
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, OrderEvent::Snapshot)));
+}
+
+#[test]
+fn sell_almost_done_is_not_terminal() {
+    assert!(!state(OrderWorkerStatus::SellAlmostDone, 1).is_terminal());
+    for status in [
+        OrderWorkerStatus::BuyFail,
+        OrderWorkerStatus::BuyCancel,
+        OrderWorkerStatus::SellFail,
+        OrderWorkerStatus::SellCancel,
+        OrderWorkerStatus::SellDone,
+    ] {
+        assert!(state(status, 1).is_terminal(), "{status:?}");
+    }
+}
+
+#[test]
+fn buy_replace_uses_canonical_target_size() {
+    let uid = 23;
+    let mut order_state = state(OrderWorkerStatus::BuySet, 1);
+    order_state.0[19..27].copy_from_slice(&12.5f64.to_le_bytes());
+    order_state.0[94..102].copy_from_slice(&3.0f64.to_le_bytes());
+    let mut orders = OrderState::new();
+    apply(
+        &mut orders,
+        image(uid, 1, desc("BTCUSDT"), order_state),
+        APP_TOKEN,
+        true,
+    );
+    let payload = orders.send_replace_if_requested(uid, 123.0, 5_000).unwrap();
+    assert!(matches!(payload, OrderCommandPayload::TargetBuy { size, .. } if size == 12.5));
+}
+
+#[test]
+fn order_maintenance_uses_deadlines_instead_of_per_tick_map_scans() {
+    let mut orders = OrderState::new();
+    let uid = 0xA11;
+    apply(
+        &mut orders,
+        image(uid, 1, desc("BTCUSDT"), state(OrderWorkerStatus::BuySet, 1)),
+        APP_TOKEN,
+        true,
+    );
 
     assert!(orders
-        .tick_order_trace_line_shrink(ORDER_TRACE_LINE_SHRINK_INTERVAL_MS - 1)
-        .is_empty());
+        .send_replace_if_requested(uid, 123.0, 1_000)
+        .is_some());
+    assert!(!orders.has_due_tick_work(6_000));
+    assert!(orders.has_due_tick_work(6_001));
+    assert_eq!(orders.tick_bulk_replace_timeouts(6_001).len(), 1);
+    assert!(!orders.has_due_tick_work(6_002));
 
-    let events = orders.tick_order_trace_line_shrink(ORDER_TRACE_LINE_SHRINK_INTERVAL_MS);
-    assert!(matches!(
-        events.as_slice(),
-        [OrderEvent::TracePoint { uid: 42 }]
-    ));
-    let line = orders.get(42).unwrap().sell_trace_line.as_ref().unwrap();
-    assert_eq!(line.line_count(), ORDER_TRACE_LINE_SHRINK_TO);
-    assert_eq!(line.points.len(), 1 + ORDER_TRACE_LINE_SHRINK_TO * 3);
+    let mut empty = OrderState::new();
+    assert!(!empty.has_due_tick_work(29_999));
+    assert!(empty.has_due_tick_work(30_000));
+    assert!(empty.tick_order_trace_line_shrink(30_000).is_empty());
+    assert!(!empty.has_due_tick_work(30_001));
 }
 
 #[test]
-// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
-fn trace_line_ignores_non_initial_without_existing_line() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        42,
-        "BTCUSDT",
-        OrderWorkerStatus::SellSet,
-        1,
-    )));
+fn market_panic_off_updates_every_sell_and_emits_auto_stop_setters() {
+    let stops = StopSettings::disabled()
+        .with_stop_loss_fixed(95.0, 0.25)
+        .with_trailing_percent(1.5, 0.1)
+        .with_take_profit_price(120.0);
+    let mut auto = state(OrderWorkerStatus::SellSet, 0);
+    auto.0[10] = OFL_PANIC_ON | OFL_PANIC_AUTO;
+    let mut stop_bytes = Vec::new();
+    stops.write_to(&mut stop_bytes);
+    auto.0[269..315].copy_from_slice(&stop_bytes);
+    auto.0[315] = 1;
+    auto.0[316] = 1;
+    put_f64(&mut auto, 317, 97.5);
+    put_f64(&mut auto, 325, 0.75);
 
-    let (res, ev) = orders.apply(TradeCommand::OrderTracePoint(trace_point(
-        42,
-        OrderType::Sell,
-        0,
-        45_000.0,
-        101.0,
-        100.0,
-        0.0,
-    )));
+    let manual = state(OrderWorkerStatus::SellSet, 0);
+    let mut other_market = state(OrderWorkerStatus::SellSet, 0);
+    other_market.0[10] = OFL_PANIC_ON;
 
-    assert_eq!(res, ApplyResult::Applied);
-    assert!(matches!(ev, OrderEvent::TracePoint { uid: 42 }));
-    let order = orders.get(42).unwrap();
-    assert!(order.sell_trace_line.is_none());
-}
-
-#[test]
-fn trace_line_initial_temp_and_finish_match_delphi_order_line() {
-    let mut orders = Orders::new();
-    let mut status = make_status(42, "BTCUSDT", OrderWorkerStatus::SellSet, 1);
-    status.sell_order.create_time = 44_000.0;
-    status.sell_order.int_id = 77;
-    orders.apply(order_status_cmd(status));
-
-    orders.apply(TradeCommand::OrderTracePoint(trace_point(
-        42,
-        OrderType::Sell,
-        trace_flags::IS_INITIAL,
-        45_000.0,
-        101.0,
-        100.0,
-        99.0,
-    )));
-    {
-        let line = orders.get(42).unwrap().sell_trace_line.as_ref().unwrap();
-        assert_eq!(line.order_type, OrderType::Sell);
-        assert_eq!(line.order_id, 77);
-        assert!(line.prevent_delete);
-        assert_eq!(line.stop_price, Some(99.0));
-        assert_eq!(
-            line.stop_time,
-            Some(crate::MoonTime::from_delphi_days(45_000.0).unwrap())
-        );
-        assert_eq!(
-            line.points,
-            vec![
-                OrderTraceChartPoint {
-                    time: 44_000.0,
-                    price: 100.0,
-                },
-                OrderTraceChartPoint {
-                    time: 45_000.0,
-                    price: 100.0,
-                },
-                OrderTraceChartPoint::default(),
-                OrderTraceChartPoint {
-                    time: 45_000.0,
-                    price: 101.0,
-                },
-            ]
-        );
-        assert!(line.can_finish);
-    }
-
-    orders.apply(TradeCommand::OrderTracePoint(trace_point(
-        42,
-        OrderType::Sell,
-        trace_flags::IS_TEMP,
-        45_010.0,
-        102.0,
-        100.0,
-        0.0,
-    )));
-    {
-        let line = orders.get(42).unwrap().sell_trace_line.as_ref().unwrap();
-        assert_eq!(
-            line.tmp_point,
-            Some(OrderTraceChartPoint {
-                time: 45_010.0,
-                price: 102.0,
-            })
-        );
-        assert_eq!(line.points.len(), 4);
-    }
-
-    orders.apply(TradeCommand::OrderTracePoint(trace_point(
-        42,
-        OrderType::Sell,
-        0,
-        45_020.0,
-        103.0,
-        100.0,
-        0.0,
-    )));
-    {
-        let line = orders.get(42).unwrap().sell_trace_line.as_ref().unwrap();
-        assert_eq!(
-            &line.points[4..],
-            &[
-                OrderTraceChartPoint {
-                    time: 45_020.0,
-                    price: 101.0,
-                },
-                OrderTraceChartPoint {
-                    time: 45_010.0,
-                    price: 102.0,
-                },
-                OrderTraceChartPoint {
-                    time: 45_020.0,
-                    price: 103.0,
-                },
-            ]
-        );
-        assert!(line.can_finish);
-    }
-
-    orders.apply(TradeCommand::OrderTracePoint(trace_point(
-        42,
-        OrderType::Sell,
-        trace_flags::IS_FINISH,
-        45_030.0,
-        104.0,
-        100.0,
-        0.0,
-    )));
-    let line = orders.get(42).unwrap().sell_trace_line.as_ref().unwrap();
-    assert_eq!(line.points.last().unwrap().price, 104.0);
-    assert!(!line.can_finish);
-}
-
-#[test]
-// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
-fn order_not_found_marks_server_forced_then_deferred_removal() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        42,
-        "BTCUSDT",
-        OrderWorkerStatus::BuySet,
-        1,
-    )));
-    {
-        let order = std::sync::Arc::make_mut(orders.map.get_mut(&42).unwrap());
-        order.buy_order.is_opened = DelphiBool::TRUE;
-        order.buy_order.canceled = DelphiBool::FALSE;
-        order.buy_order.is_closed = DelphiBool::FALSE;
-        order.buy_order.close_time = 11.0;
-        order.sell_order.is_opened = DelphiBool::TRUE;
-        order.sell_order.canceled = DelphiBool::FALSE;
-        order.sell_order.is_closed = DelphiBool::FALSE;
-        order.sell_order.close_time = 12.0;
-        order.bulk_replace_buy = true;
-        order.bulk_replace_sell = true;
-        order.replace_sent_time_ms = 1000;
-    }
-
-    let not_found = make_epoch(42, 3, "BTCUSDT", 0, OrderWorkerStatus::None);
-    let (res, ev) = orders.apply(TradeCommand::OrderNotFound(not_found));
-
-    assert_eq!(res, ApplyResult::Applied);
-    assert!(matches!(ev, OrderEvent::Updated(order) if order.uid == 42));
-    let order = orders.get(42).unwrap();
-    assert!(order.server_forced_remove);
-    assert!(order.cancel_request);
-    let buy_is_opened = order.buy_order.is_opened;
-    let buy_canceled = order.buy_order.canceled;
-    let buy_is_closed = order.buy_order.is_closed;
-    let buy_close_time = order.buy_order.close_time;
-    let sell_is_opened = order.sell_order.is_opened;
-    let sell_canceled = order.sell_order.canceled;
-    let sell_is_closed = order.sell_order.is_closed;
-    let sell_close_time = order.sell_order.close_time;
-    assert_eq!(
-        (buy_is_opened, buy_canceled, buy_is_closed),
-        (DelphiBool::TRUE, DelphiBool::FALSE, DelphiBool::FALSE)
+    let mut orders = OrderState::new();
+    apply(
+        &mut orders,
+        image(801, 1, desc("BTC"), auto),
+        APP_TOKEN,
+        true,
     );
-    assert_eq!(
-        (sell_is_opened, sell_canceled, sell_is_closed),
-        (DelphiBool::TRUE, DelphiBool::FALSE, DelphiBool::FALSE)
+    apply(
+        &mut orders,
+        image(802, 1, desc("BTC"), manual),
+        APP_TOKEN,
+        true,
     );
-    assert_eq!(buy_close_time, 11.0);
-    assert_eq!(sell_close_time, 12.0);
-    assert!(order.bulk_replace_buy);
-    assert!(order.bulk_replace_sell);
-    assert!(
-        !order.job_is_done,
-        "Delphi TOrderNotFound sets CancellRequest, not JobIsDone, inside ProcessCommandOrder"
-    );
-    assert_eq!(orders.drain_pending_removals(), vec![42]);
-    assert!(orders.get(42).is_none());
-}
-
-#[test]
-fn full_status_is_authoritative_for_phase_changes() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        1,
-        "X",
-        OrderWorkerStatus::SellSet,
-        5,
-    )));
-    let (res, _) = orders.apply(order_status_cmd(make_status(
-        1,
-        "X",
-        OrderWorkerStatus::BuySet,
-        6,
-    )));
-    assert_eq!(res, ApplyResult::Applied);
-    assert_eq!(orders.get(1).unwrap().status, OrderWorkerStatus::BuySet);
-}
-
-#[test]
-fn full_terminal_status_finishes_worker() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        1,
-        "X",
-        OrderWorkerStatus::BuySet,
-        5,
-    )));
-    let (res, _) = orders.apply(order_status_cmd(make_status(
-        1,
-        "X",
-        OrderWorkerStatus::BuyCancel,
-        6,
-    )));
-    assert_eq!(res, ApplyResult::Applied);
-    assert!(orders.get(1).unwrap().job_is_done);
-    assert_eq!(orders.drain_pending_removals(), vec![1]);
-}
-
-#[test]
-fn epoch_out_of_order_rejected() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        1,
-        "X",
-        OrderWorkerStatus::BuySet,
-        10,
-    )));
-    let (res, _) = orders.apply(order_status_cmd(make_status(
-        1,
-        "X",
-        OrderWorkerStatus::BuySet,
-        10,
-    )));
-    // Equal full is snapshot recovery and remains applicable.
-    assert_eq!(res, ApplyResult::Applied);
-    // epoch 5 after 10 is stale.
-    let (res, _) = orders.apply(order_status_cmd(make_status(
-        1,
-        "X",
-        OrderWorkerStatus::BuySet,
-        5,
-    )));
-    assert_eq!(res, ApplyResult::OutOfOrder);
-}
-
-#[test]
-fn equal_full_snapshot_recovery_is_applied() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        1,
-        "X",
-        OrderWorkerStatus::BuySet,
-        10,
-    )));
-    let mut recovery = make_status(1, "X", OrderWorkerStatus::BuySet, 10);
-    recovery.buy_order.actual_price = 123.0;
-    let (res, _) = orders.apply(order_status_cmd(recovery));
-    assert_eq!(res, ApplyResult::Applied);
-    assert_eq!(orders.get(1).unwrap().buy_order.actual_price, 123.0);
-}
-
-#[test]
-// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
-fn first_full_seeds_epoch_and_equal_short_is_rejected() {
-    let mut orders = Orders::new();
-    let mut status = make_status(1, "X", OrderWorkerStatus::BuySet, 10);
-    status.buy_order.actual_price = 10.0;
-    orders.apply(order_status_cmd(status));
-
-    let same_epoch_update = OrderStatusUpdate {
-        epoch_header: make_epoch(1, 3, "X", 10, OrderWorkerStatus::BuySet),
-        update_data: OrderUpdateData {
-            actual_price: 11.0,
-            ..Default::default()
-        },
-        sell_reason_code: 0,
-    };
-    let (res, ev) = orders.apply(TradeCommand::OrderStatusUpdate(same_epoch_update));
-
-    assert_eq!(res, ApplyResult::OutOfOrder);
-    assert!(matches!(ev, OrderEvent::Ignored { uid: 1, .. }));
-    let actual = orders.get(1).unwrap().buy_order.actual_price;
-    assert_eq!(actual, 10.0);
-}
-
-#[test]
-fn epoch_wrap_around_accepted() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        1,
-        "X",
-        OrderWorkerStatus::BuySet,
-        65500,
-    )));
-    // wrap: 65500 -> 200 is forward progress.
-    let (res, _) = orders.apply(order_status_cmd(make_status(
-        1,
-        "X",
-        OrderWorkerStatus::BuySet,
-        200,
-    )));
-    assert_eq!(res, ApplyResult::Applied);
-}
-
-#[test]
-fn replace_response_updates_epoch_slot() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        1,
-        "X",
-        OrderWorkerStatus::BuySet,
-        10,
-    )));
-
-    let rr = OrderReplaceResponse {
-        epoch_header: make_epoch(1, 3, "X", 11, OrderWorkerStatus::BuySet),
-        order_type: OrderType::Buy,
-        price: 123.0,
-        update_data: OrderUpdateData::default(),
-        quantity_base: 0.0,
-    };
-
-    let (res, _) = orders.apply(order_replace_response_cmd(rr.clone()));
-    assert_eq!(res, ApplyResult::Applied);
-
-    let (res, _) = orders.apply(order_replace_response_cmd(rr));
-    assert_eq!(res, ApplyResult::Applied);
-}
-
-#[test]
-fn foreign_phase_short_does_not_bury_its_missing_full_baseline() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        1,
-        "X",
-        OrderWorkerStatus::BuySet,
-        10,
-    )));
-
-    let overtaking_short = OrderStatusUpdate {
-        epoch_header: make_epoch(1, 3, "X", 11, OrderWorkerStatus::SellSet),
-        update_data: OrderUpdateData {
-            actual_price: 111.0,
-            ..Default::default()
-        },
-        sell_reason_code: 0,
-    };
-    let (res, _) = orders.apply(TradeCommand::OrderStatusUpdate(overtaking_short));
-    assert_eq!(res, ApplyResult::PhaseMismatch);
-    assert_eq!(orders.get(1).unwrap().server_watermark, 10);
-
-    let mut baseline = make_status(1, "X", OrderWorkerStatus::SellSet, 11);
-    baseline.sell_order.actual_price = 112.0;
-    let (res, _) = orders.apply(order_status_cmd(baseline));
-    assert_eq!(res, ApplyResult::Applied);
-    let order = orders.get(1).unwrap();
-    assert_eq!(order.status, OrderWorkerStatus::SellSet);
-    assert_eq!(order.sell_order.actual_price, 112.0);
-    assert_eq!(order.server_watermark, 11);
-}
-
-#[test]
-fn equal_full_repairs_state_after_same_phase_short() {
-    let mut orders = Orders::new();
-    let mut initial = make_status(1, "X", OrderWorkerStatus::BuySet, 10);
-    initial.buy_order.actual_price = 100.0;
-    orders.apply(order_status_cmd(initial));
-
-    let short = OrderStatusUpdate {
-        epoch_header: make_epoch(1, 3, "X", 11, OrderWorkerStatus::BuySet),
-        update_data: OrderUpdateData {
-            actual_price: 110.0,
-            ..Default::default()
-        },
-        sell_reason_code: 0,
-    };
-    assert_eq!(
-        orders.apply(TradeCommand::OrderStatusUpdate(short)).0,
-        ApplyResult::Applied
+    apply(
+        &mut orders,
+        image(803, 1, desc("ETH"), other_market),
+        APP_TOKEN,
+        true,
     );
 
-    let mut recovery = make_status(1, "X", OrderWorkerStatus::BuySet, 11);
-    recovery.buy_order.actual_price = 111.0;
-    recovery.stops.stop_loss_on = DelphiBool::TRUE;
-    let (res, _) = orders.apply(order_status_cmd(recovery));
-    assert_eq!(res, ApplyResult::Applied);
-    let order = orders.get(1).unwrap();
-    assert_eq!(order.buy_order.actual_price, 111.0);
-    assert_eq!(order.stops.stop_loss_on, DelphiBool::TRUE);
-}
-
-#[test]
-fn equal_full_cannot_change_phase() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        1,
-        "X",
-        OrderWorkerStatus::BuySet,
-        10,
+    let commands = orders.switch_panic_sell_by_market("BTC", true);
+    assert!(commands[..2]
+        .iter()
+        .all(|command| matches!(command, OrderCommandPayload::Panic { .. })));
+    assert!(commands[2..].iter().all(|command| matches!(
+        command,
+        OrderCommandPayload::Stops { .. } | OrderCommandPayload::VStop { .. }
     )));
-
-    let mut torn = make_status(1, "X", OrderWorkerStatus::SellSet, 10);
-    torn.stops.stop_loss_on = DelphiBool::TRUE;
-    let (res, _) = orders.apply(order_status_cmd(torn));
-    assert_eq!(res, ApplyResult::Applied);
-    let order = orders.get(1).unwrap();
-    assert_eq!(order.status, OrderWorkerStatus::BuySet);
-    assert_eq!(order.stops.stop_loss_on, DelphiBool::TRUE);
-}
-
-#[test]
-fn replace_response_uses_independent_stream_state_and_ack_judges() {
-    let mut orders = Orders::new();
-    let mut initial = make_status(1, "X", OrderWorkerStatus::BuySet, 10);
-    initial.buy_order.actual_price = 100.0;
-    orders.apply(order_status_cmd(initial));
-    std::sync::Arc::make_mut(orders.map.get_mut(&1).unwrap()).buy_price = 130.0;
-
-    let short = OrderStatusUpdate {
-        epoch_header: make_epoch(1, 3, "X", 12, OrderWorkerStatus::BuySet),
-        update_data: OrderUpdateData {
-            actual_price: 120.0,
-            ..Default::default()
-        },
-        sell_reason_code: 0,
-    };
-    orders.apply(TradeCommand::OrderStatusUpdate(short));
-    std::sync::Arc::make_mut(orders.map.get_mut(&1).unwrap()).bulk_replace_buy = true;
-
-    let stale_response = OrderReplaceResponse {
-        epoch_header: make_epoch(1, 3, "X", 11, OrderWorkerStatus::BuySet),
-        order_type: OrderType::Buy,
-        price: 111.0,
-        update_data: OrderUpdateData {
-            actual_price: 110.0,
-            ..Default::default()
-        },
-        quantity_base: 2.0,
-    };
-    assert_eq!(
-        orders.apply(order_replace_response_cmd(stale_response)).0,
-        ApplyResult::Applied
-    );
-    let order = orders.get(1).unwrap();
-    assert_eq!(order.buy_order.actual_price, 120.0);
-    assert_eq!(order.buy_price, 130.0);
-    assert_eq!(order.buy_order.quantity_base, 2.0);
-    assert!(!order.bulk_replace_buy);
-
-    let mut full = make_status(1, "X", OrderWorkerStatus::BuySet, 12);
-    full.buy_order.actual_price = 125.0;
-    orders.apply(order_status_cmd(full));
-    std::sync::Arc::make_mut(orders.map.get_mut(&1).unwrap()).bulk_replace_buy = true;
-
-    let same_epoch_ack = OrderReplaceResponse {
-        epoch_header: make_epoch(1, 3, "X", 12, OrderWorkerStatus::BuySet),
-        order_type: OrderType::Buy,
-        price: 999.0,
-        update_data: OrderUpdateData {
-            actual_price: 999.0,
-            ..Default::default()
-        },
-        quantity_base: 999.0,
-    };
-    orders.apply(order_replace_response_cmd(same_epoch_ack));
-    let order = orders.get(1).unwrap();
-    assert_eq!(order.buy_order.actual_price, 125.0);
-    assert_eq!(order.buy_price, 130.0);
-    assert_eq!(order.buy_order.quantity_base, 0.0);
-    assert!(!order.bulk_replace_buy);
-}
-
-#[test]
-fn direct_stops_and_vstop_equal_to_full_epoch_are_duplicates() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        1,
-        "X",
-        OrderWorkerStatus::BuySet,
-        10,
-    )));
-
-    let vstop = VStopUpdate {
-        epoch_header: make_epoch(1, 3, "X", 10, OrderWorkerStatus::BuySet),
-        vstop_on: true,
-        vstop_fixed: true,
-        vstop_level: 12.0,
-        vstop_vol: 3.0,
-    };
-    assert_eq!(
-        orders.apply(TradeCommand::VStopUpdate(vstop)).0,
-        ApplyResult::OutOfOrder
-    );
-    assert!(!orders.get(1).unwrap().vstop_on);
-
-    let stops = OrderStopsUpdate {
-        epoch_header: make_epoch(1, 3, "X", 10, OrderWorkerStatus::BuySet),
-        stops: StopSettings {
-            stop_loss_on: DelphiBool::TRUE,
-            ..Default::default()
-        },
-    };
-    assert_eq!(
-        orders.apply(TradeCommand::OrderStopsUpdate(stops)).0,
-        ApplyResult::OutOfOrder
-    );
-    assert_eq!(orders.get(1).unwrap().stops.stop_loss_on, DelphiBool::FALSE);
-}
-
-#[test]
-fn stops_and_vstop_do_not_advance_shared_lifecycle_watermark() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        1,
-        "X",
-        OrderWorkerStatus::BuySet,
-        10,
-    )));
-
-    let stops = OrderStopsUpdate {
-        epoch_header: make_epoch(1, 3, "X", 100, OrderWorkerStatus::SellSet),
-        stops: StopSettings {
-            stop_loss_on: DelphiBool::TRUE,
-            ..Default::default()
-        },
-    };
-    assert_eq!(
-        orders.apply(TradeCommand::OrderStopsUpdate(stops)).0,
-        ApplyResult::Applied
-    );
-    let vstop = VStopUpdate {
-        epoch_header: make_epoch(1, 3, "X", 101, OrderWorkerStatus::SellSet),
-        vstop_on: true,
-        vstop_fixed: false,
-        vstop_level: 12.0,
-        vstop_vol: 3.0,
-    };
-    assert_eq!(
-        orders.apply(TradeCommand::VStopUpdate(vstop)).0,
-        ApplyResult::Applied
-    );
-
-    let short = OrderStatusUpdate {
-        epoch_header: make_epoch(1, 3, "X", 11, OrderWorkerStatus::BuySet),
-        update_data: OrderUpdateData {
-            actual_price: 111.0,
-            ..Default::default()
-        },
-        sell_reason_code: 0,
-    };
-    assert_eq!(
-        orders.apply(TradeCommand::OrderStatusUpdate(short)).0,
-        ApplyResult::Applied
-    );
-    assert_eq!(orders.get(1).unwrap().server_watermark, 11);
-}
-
-#[test]
-fn stale_lifecycle_full_can_repair_lost_stops_and_vstop_echo() {
-    let mut orders = Orders::new();
-    let mut initial = make_status(1, "X", OrderWorkerStatus::BuySet, 10);
-    initial.buy_order.actual_price = 100.0;
-    orders.apply(order_status_cmd(initial));
-
-    let short = OrderStatusUpdate {
-        epoch_header: make_epoch(1, 3, "X", 12, OrderWorkerStatus::BuySet),
-        update_data: OrderUpdateData {
-            actual_price: 120.0,
-            ..Default::default()
-        },
-        sell_reason_code: 0,
-    };
-    orders.apply(TradeCommand::OrderStatusUpdate(short));
-
-    let mut stale_full = make_status(1, "X", OrderWorkerStatus::BuySet, 11);
-    stale_full.buy_order.actual_price = 110.0;
-    stale_full.stops.stop_loss_on = DelphiBool::TRUE;
-    stale_full.vstop_on = true;
-    stale_full.vstop_level = 15.0;
-    let (res, _) = orders.apply(order_status_cmd(stale_full));
-
-    assert_eq!(res, ApplyResult::Applied);
-    let order = orders.get(1).unwrap();
-    assert_eq!(order.buy_order.actual_price, 120.0);
-    assert_eq!(order.stops.stop_loss_on, DelphiBool::TRUE);
-    assert!(order.vstop_on);
-    assert_eq!(order.vstop_level, 15.0);
-}
-
-#[test]
-fn newer_stops_and_vstop_echo_are_not_rolled_back_by_full() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        1,
-        "X",
-        OrderWorkerStatus::BuySet,
-        10,
-    )));
-
-    let stops = OrderStopsUpdate {
-        epoch_header: make_epoch(1, 3, "X", 12, OrderWorkerStatus::BuySet),
-        stops: StopSettings {
-            stop_loss_on: DelphiBool::TRUE,
-            ..Default::default()
-        },
-    };
-    orders.apply(TradeCommand::OrderStopsUpdate(stops));
-    orders.apply(TradeCommand::VStopUpdate(VStopUpdate {
-        epoch_header: make_epoch(1, 3, "X", 12, OrderWorkerStatus::BuySet),
-        vstop_on: true,
-        vstop_fixed: false,
-        vstop_level: 20.0,
-        vstop_vol: 2.0,
-    }));
-
-    let full = make_status(1, "X", OrderWorkerStatus::BuySet, 11);
-    orders.apply(order_status_cmd(full));
-    let order = orders.get(1).unwrap();
-    assert_eq!(order.stops.stop_loss_on, DelphiBool::TRUE);
-    assert!(order.vstop_on);
-    assert_eq!(order.vstop_level, 20.0);
-}
-
-#[test]
-fn first_replace_response_seeds_ack_judge_in_word_tail() {
-    let mut orders = Orders::new();
-    let mut initial = make_status(1, "X", OrderWorkerStatus::BuySet, 65_000);
-    initial.buy_order.actual_price = 100.0;
-    orders.apply(order_status_cmd(initial));
-    std::sync::Arc::make_mut(orders.map.get_mut(&1).unwrap()).bulk_replace_buy = true;
-
-    let response = OrderReplaceResponse {
-        epoch_header: make_epoch(1, 3, "X", 65_000, OrderWorkerStatus::BuySet),
-        order_type: OrderType::Buy,
-        price: 999.0,
-        update_data: Default::default(),
-        quantity_base: 0.0,
-    };
-    assert_eq!(
-        orders.apply(order_replace_response_cmd(response)).0,
-        ApplyResult::Applied
-    );
-    let order = orders.get(1).unwrap();
-    assert!(order.ack_seeded_buy);
-    assert_eq!(order.ack_epoch_buy, 65_000);
-    assert!(!order.bulk_replace_buy);
-    assert_eq!(order.buy_price, 100.0);
-}
-
-#[test]
-fn terminal_tombstone_blocks_stale_snapshot_until_hard_session_changes() {
-    let mut orders = Orders::new();
-    let token_a = 0xAAAA;
-    let token_b = 0xBBBB;
-    orders.apply_at_with_server_token(
-        order_status_cmd(make_status(1, "X", OrderWorkerStatus::SellSet, 10)),
-        900,
-        token_a,
-    );
-    orders.apply_at_with_server_token(
-        order_status_cmd(make_status(1, "X", OrderWorkerStatus::SellDone, 11)),
-        1000,
-        token_a,
-    );
-    assert_eq!(orders.drain_pending_removals_due(1401).len(), 1);
-    assert!(orders.get(1).is_none());
-
-    let (res, _) = orders.apply_at_with_server_token(
-        order_status_cmd(make_status(1, "X", OrderWorkerStatus::SellSet, 12)),
-        1500,
-        token_a,
-    );
-    assert_eq!(res, ApplyResult::OutOfOrder);
-    assert!(orders.get(1).is_none());
-
-    let (res, _) = orders.apply_at_with_server_token(
-        order_status_cmd(make_status(1, "X", OrderWorkerStatus::SellSet, 1)),
-        1600,
-        token_b,
-    );
-    assert_eq!(res, ApplyResult::Applied);
-    assert!(orders.get(1).is_some());
-}
-
-#[test]
-fn fresh_session_full_cancels_old_terminal_cleanup() {
-    let mut orders = Orders::new();
-    orders.apply_at_with_server_token(
-        order_status_cmd(make_status(1, "X", OrderWorkerStatus::SellSet, 10)),
-        900,
-        0xAAAA,
-    );
-    orders.apply_at_with_server_token(
-        order_status_cmd(make_status(1, "X", OrderWorkerStatus::SellDone, 11)),
-        1000,
-        0xAAAA,
-    );
-    orders.apply_at_with_server_token(
-        order_status_cmd(make_status(1, "X", OrderWorkerStatus::BuySet, 1)),
-        1100,
-        0xBBBB,
-    );
-
-    assert!(orders.drain_pending_removals_due(1401).is_empty());
-    assert_eq!(orders.get(1).unwrap().status, OrderWorkerStatus::BuySet);
-}
-
-#[test]
-fn server_token_change_resets_order_epoch_watermarks() {
-    let mut orders = Orders::new();
-    assert_eq!(
-        orders
-            .apply_at_with_server_token(
-                order_status_cmd(make_status(1, "X", OrderWorkerStatus::BuySet, 5000)),
-                0,
-                0xAAA,
-            )
-            .0,
-        ApplyResult::Applied
-    );
-    let short = OrderStatusUpdate {
-        epoch_header: make_epoch(1, 3, "X", 5001, OrderWorkerStatus::BuySet),
-        update_data: Default::default(),
-        sell_reason_code: 0,
-    };
-    orders.apply_at_with_server_token(TradeCommand::OrderStatusUpdate(short), 0, 0xAAA);
-
-    let (res, _) = orders.apply_at_with_server_token(
-        order_status_cmd(make_status(1, "X", OrderWorkerStatus::SellSet, 4500)),
-        0,
-        0xBBB,
-    );
-    assert_eq!(res, ApplyResult::Applied);
-    let order = orders.get(1).unwrap();
-    assert_eq!(order.server_session_token, 0xBBB);
-    assert_eq!(order.server_watermark, 4500);
-    assert_eq!(order.status, OrderWorkerStatus::SellSet);
-}
-
-#[test]
-fn stops_update_uses_epoch_guard() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        1,
-        "X",
-        OrderWorkerStatus::BuySet,
-        10,
-    )));
-    let (res, _) = orders.apply(order_status_cmd(make_status(
-        1,
-        "X",
-        OrderWorkerStatus::BuySet,
-        10,
-    )));
-    assert_eq!(res, ApplyResult::Applied);
-
-    let stops = StopSettings {
-        stop_loss_on: DelphiBool::TRUE,
-        ..Default::default()
-    };
-    let stale = OrderStopsUpdate {
-        epoch_header: make_epoch(1, 3, "X", 5, OrderWorkerStatus::BuySet),
-        stops,
-    };
-
-    let (res, _) = orders.apply(TradeCommand::OrderStopsUpdate(stale));
-    assert_eq!(res, ApplyResult::OutOfOrder);
-    assert_eq!(orders.get(1).unwrap().stops.stop_loss_on, DelphiBool::FALSE);
-}
-
-#[test]
-fn vstop_update_is_independent_of_lifecycle_phase() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        1,
-        "X",
-        OrderWorkerStatus::SellSet,
-        10,
-    )));
-
-    let rollback = VStopUpdate {
-        epoch_header: make_epoch(1, 3, "X", 200, OrderWorkerStatus::BuySet),
-        vstop_on: true,
-        vstop_fixed: false,
-        vstop_level: 42.0,
-        vstop_vol: 1.0,
-    };
-
-    let (res, _) = orders.apply(TradeCommand::VStopUpdate(rollback));
-    assert_eq!(res, ApplyResult::Applied);
-    assert!(orders.get(1).unwrap().vstop_on);
-}
-
-#[test]
-// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
-fn short_update_cannot_change_phase_to_terminal() {
-    let mut orders = Orders::new();
-    let mut status = make_status(1, "X", OrderWorkerStatus::SellSet, 10);
-    status.sell_order.actual_price = 10.0;
-    orders.apply(order_status_cmd(status));
-
-    let terminal_update = OrderStatusUpdate {
-        epoch_header: make_epoch(1, 3, "X", 11, OrderWorkerStatus::SellDone),
-        update_data: OrderUpdateData {
-            actual_price: 999.0,
-            mean_price: 999.0,
-            quantity: 999.0,
-            ..Default::default()
-        },
-        sell_reason_code: 14,
-    };
-    let (res, ev) = orders.apply(TradeCommand::OrderStatusUpdate(terminal_update));
-
-    assert_eq!(res, ApplyResult::PhaseMismatch);
-    assert!(matches!(ev, OrderEvent::Ignored { uid: 1, .. }));
-    let order = orders.get(1).unwrap();
-    let sell_actual = order.sell_order.actual_price;
-    let sell_mean = order.sell_order.mean_price;
-    assert_eq!(sell_actual, 10.0);
-    assert_eq!(sell_mean, 0.0);
-    assert_eq!(order.sell_reason, SellReason::Unknown);
-    assert!(!order.job_is_done);
-}
-
-#[test]
-// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
-fn sell_done_short_update_does_not_finish_worker() {
-    let mut orders = Orders::new();
-    let mut status = make_status(1, "X", OrderWorkerStatus::SellSet, 10);
-    status.buy_order.is_opened = DelphiBool::TRUE;
-    status.buy_order.is_closed = DelphiBool::FALSE;
-    status.buy_order.canceled = DelphiBool::FALSE;
-    status.sell_order.is_opened = DelphiBool::TRUE;
-    status.sell_order.is_closed = DelphiBool::FALSE;
-    status.sell_order.canceled = DelphiBool::FALSE;
-    orders.apply(order_status_cmd(status));
-
-    {
-        let order = std::sync::Arc::make_mut(orders.map.get_mut(&1).unwrap());
-        order.bulk_replace_buy = true;
-        order.bulk_replace_sell = true;
-    }
-
-    let terminal_update = OrderStatusUpdate {
-        epoch_header: make_epoch(1, 3, "X", 11, OrderWorkerStatus::SellDone),
-        update_data: Default::default(),
-        sell_reason_code: 0,
-    };
-    let (res, _) = orders.apply(TradeCommand::OrderStatusUpdate(terminal_update));
-
-    assert_eq!(res, ApplyResult::PhaseMismatch);
-    let order = orders.get(1).unwrap();
-    assert_eq!(order.sell_order.is_opened, DelphiBool::TRUE);
-    assert_eq!(order.sell_order.is_closed, DelphiBool::FALSE);
-    assert_eq!(order.sell_order.canceled, DelphiBool::FALSE);
-    assert_eq!(order.buy_order.is_opened, DelphiBool::TRUE);
-    assert_eq!(order.buy_order.is_closed, DelphiBool::FALSE);
-    assert_eq!(order.buy_order.canceled, DelphiBool::FALSE);
-    assert!(order.bulk_replace_buy);
-    assert!(order.bulk_replace_sell);
-}
-
-#[test]
-// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
-fn sell_done_full_status_applies_set_done_flags() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        1,
-        "X",
-        OrderWorkerStatus::SellSet,
-        10,
-    )));
-
-    {
-        let order = std::sync::Arc::make_mut(orders.map.get_mut(&1).unwrap());
-        order.bulk_replace_buy = true;
-        order.bulk_replace_sell = true;
-    }
-
-    let mut done = make_status(1, "X", OrderWorkerStatus::SellDone, 11);
-    done.buy_order.is_opened = DelphiBool::TRUE;
-    done.buy_order.is_closed = DelphiBool::TRUE;
-    done.buy_order.canceled = DelphiBool::FALSE;
-    done.sell_order.is_opened = DelphiBool::TRUE;
-    done.sell_order.is_closed = DelphiBool::FALSE;
-    done.sell_order.canceled = DelphiBool::FALSE;
-    let (res, _) = orders.apply(order_status_cmd(done));
-
-    assert_eq!(res, ApplyResult::Applied);
-    let order = orders.get(1).unwrap();
-    assert_eq!(order.sell_order.is_opened, DelphiBool::FALSE);
-    assert_eq!(order.sell_order.is_closed, DelphiBool::TRUE);
-    assert_eq!(order.sell_order.canceled, DelphiBool::FALSE);
-    assert_eq!(order.buy_order.is_opened, DelphiBool::FALSE);
-    assert_eq!(
-        order.buy_order.canceled,
-        DelphiBool::FALSE,
-        "already closed buy side is not marked canceled by SetDoneFlags"
-    );
-    assert!(!order.bulk_replace_buy);
-    assert!(!order.bulk_replace_sell);
-}
-
-#[test]
-// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
-fn zero_sell_reason_update_keeps_previous_reason() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        1,
-        "X",
-        OrderWorkerStatus::SellSet,
-        10,
-    )));
-
-    let first_reason = OrderStatusUpdate {
-        epoch_header: make_epoch(1, 3, "X", 11, OrderWorkerStatus::SellSet),
-        update_data: Default::default(),
-        sell_reason_code: 14,
-    };
-    orders.apply(TradeCommand::OrderStatusUpdate(first_reason));
-    assert_eq!(orders.get(1).unwrap().sell_reason, SellReason::TakeProfit);
-
-    let zero_reason = OrderStatusUpdate {
-        epoch_header: make_epoch(1, 3, "X", 12, OrderWorkerStatus::SellSet),
-        update_data: Default::default(),
-        sell_reason_code: 0,
-    };
-    orders.apply(TradeCommand::OrderStatusUpdate(zero_reason));
-    assert_eq!(
-        orders.get(1).unwrap().sell_reason,
-        SellReason::TakeProfit,
-        "Delphi ignores SellReasonCode=0 and keeps FPrevSellReasonCode/SellReason"
-    );
-
-    let changed_reason = OrderStatusUpdate {
-        epoch_header: make_epoch(1, 3, "X", 13, OrderWorkerStatus::SellSet),
-        update_data: Default::default(),
-        sell_reason_code: 9,
-    };
-    orders.apply(TradeCommand::OrderStatusUpdate(changed_reason));
-    assert_eq!(orders.get(1).unwrap().sell_reason, SellReason::MarketStop);
-}
-
-#[test]
-// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
-fn pending_status_update_tracks_vorder_buy_cond_price() {
-    let mut orders = Orders::new();
-    let mut status = make_status(1, "X", OrderWorkerStatus::None, 10);
-    status.buy_order.mean_price = 10.0;
-    orders.apply(order_status_cmd(status));
-
-    assert_eq!(orders.get(1).unwrap().pending_buy_cond_price, Some(10.0));
-    let initial_buy_mean = orders.get(1).unwrap().buy_order.mean_price;
-    assert_eq!(initial_buy_mean, 10.0);
-
-    let pending_update = OrderStatusUpdate {
-        epoch_header: make_epoch(1, 3, "X", 11, OrderWorkerStatus::None),
-        update_data: OrderUpdateData {
-            mean_price: 11.0,
-            actual_price: 999.0,
-            ..Default::default()
-        },
-        sell_reason_code: 0,
-    };
-    let (res, ev) = orders.apply(TradeCommand::OrderStatusUpdate(pending_update));
-
-    assert_eq!(res, ApplyResult::Applied);
-    assert!(matches!(ev, OrderEvent::Updated(order) if order.uid == 1));
-    let order = orders.get(1).unwrap();
-    let buy_mean = order.buy_order.mean_price;
-    let buy_actual = order.buy_order.actual_price;
-    assert_eq!(order.pending_buy_cond_price, Some(11.0));
-    assert_eq!(
-        buy_mean, 10.0,
-        "OS_None update changes vOrder.BuyCondPrice, not pBuyOrder"
-    );
-    assert_eq!(buy_actual, 0.0);
-
-    orders.apply(order_status_cmd(make_status(
-        1,
-        "X",
-        OrderWorkerStatus::BuySet,
-        12,
-    )));
-    assert_eq!(orders.get(1).unwrap().pending_buy_cond_price, None);
-}
-
-#[test]
-// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
-fn os_none_update_without_pending_vorder_does_not_create_pending_price() {
-    let mut orders = Orders::new();
-    let mut status = make_status(1, "X", OrderWorkerStatus::BuySet, 10);
-    status.buy_order.mean_price = 10.0;
-    orders.apply(order_status_cmd(status));
-
-    let non_pending_none = OrderStatusUpdate {
-        epoch_header: make_epoch(1, 3, "X", 11, OrderWorkerStatus::None),
-        update_data: OrderUpdateData {
-            mean_price: 77.0,
-            actual_price: 88.0,
-            ..Default::default()
-        },
-        sell_reason_code: 0,
-    };
-    let (res, ev) = orders.apply(TradeCommand::OrderStatusUpdate(non_pending_none));
-
-    assert_eq!(res, ApplyResult::PhaseMismatch);
-    assert!(matches!(ev, OrderEvent::Ignored { uid: 1, .. }));
-    let order = orders.get(1).unwrap();
-    assert_eq!(order.status, OrderWorkerStatus::BuySet);
-    assert_eq!(
-        order.pending_buy_cond_price, None,
-        "Delphi changes vOrder.BuyCondPrice only when IsPending and vOrder exists"
-    );
-    let buy_mean_price = order.buy_order.mean_price;
-    assert_eq!(
-        buy_mean_price, 10.0,
-        "OS_None update still must not ApplyTo(pBuyOrder)"
-    );
-}
-
-#[test]
-// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
-fn full_os_none_status_for_existing_pending_keeps_vorder_price() {
-    let mut orders = Orders::new();
-    let mut pending = make_status(1, "X", OrderWorkerStatus::None, 10);
-    pending.buy_order.mean_price = 10.0;
-    orders.apply(order_status_cmd(pending));
-    assert_eq!(orders.get(1).unwrap().pending_buy_cond_price, Some(10.0));
-
-    let mut full_status = make_status(1, "X", OrderWorkerStatus::None, 11);
-    full_status.buy_order.mean_price = 77.0;
-    let (res, ev) = orders.apply(order_status_cmd(full_status));
-
-    assert_eq!(res, ApplyResult::Applied);
-    assert!(matches!(ev, OrderEvent::Updated(order) if order.uid == 1));
-    let order = orders.get(1).unwrap();
-    assert_eq!(
-        order.pending_buy_cond_price,
-        Some(10.0),
-        "Delphi TOrderStatus does not copy BuyOrder.MeanPrice into existing vOrder.BuyCondPrice"
-    );
-    let buy_mean = order.buy_order.mean_price;
-    assert_eq!(
-        buy_mean, 77.0,
-        "Delphi still applies Cmd.BuyOrder to pBuyOrder"
-    );
-}
-
-#[test]
-// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
-fn full_os_none_status_for_existing_non_pending_does_not_create_vorder() {
-    let mut orders = Orders::new();
-    let mut status = make_status(1, "X", OrderWorkerStatus::BuySet, 10);
-    status.buy_order.mean_price = 10.0;
-    orders.apply(order_status_cmd(status));
-
-    let mut full_none = make_status(1, "X", OrderWorkerStatus::None, 11);
-    full_none.buy_order.mean_price = 88.0;
-    let (res, ev) = orders.apply(order_status_cmd(full_none));
-
-    assert_eq!(res, ApplyResult::Applied);
-    assert!(matches!(ev, OrderEvent::Updated(order) if order.uid == 1));
-    let order = orders.get(1).unwrap();
-    assert_eq!(order.status, OrderWorkerStatus::None);
-    assert_eq!(
-        order.pending_buy_cond_price, None,
-        "Delphi creates pending vOrder only on the new OnMServerOrder path"
-    );
-    let buy_mean = order.buy_order.mean_price;
-    assert_eq!(buy_mean, 88.0);
-}
-
-#[test]
-// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
-fn corridor_update_marks_order_as_moon_shot() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        1,
-        "X",
-        OrderWorkerStatus::BuySet,
-        10,
-    )));
-    assert!(!orders.get(1).unwrap().is_moon_shot);
-
-    let (res, ev) = orders.apply(TradeCommand::CorridorUpdate(CorridorUpdate {
-        market: make_market(1, 3, "X"),
-        price_down: 10.5,
-        price_up: 12.25,
-    }));
-
-    assert_eq!(res, ApplyResult::Applied);
-    assert!(matches!(ev, OrderEvent::CorridorChanged(1)));
-    let order = orders.get(1).unwrap();
-    assert!(order.is_moon_shot);
-    assert_eq!(order.corridor_price_down, 10.5);
-    assert_eq!(order.corridor_price_up, 12.25);
-}
-
-#[test]
-// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
-fn replace_response_quantity_base_zero_preserves_existing_value() {
-    let mut orders = Orders::new();
-    let mut status = make_status(1, "X", OrderWorkerStatus::BuySet, 10);
-    status.buy_order.quantity_base = 12.5;
-    status.buy_order.actual_price = 100.0;
-    orders.apply(order_status_cmd(status));
-
-    let rr = OrderReplaceResponse {
-        epoch_header: make_epoch(1, 3, "X", 11, OrderWorkerStatus::BuySet),
-        order_type: OrderType::Buy,
-        price: 123.0,
-        update_data: OrderUpdateData {
-            actual_price: 123.0,
-            ..Default::default()
-        },
-        quantity_base: 0.0,
-    };
-    let (res, ev) = orders.apply(order_replace_response_cmd(rr));
-
-    assert_eq!(res, ApplyResult::Applied);
-    assert!(matches!(ev, OrderEvent::Updated(order) if order.uid == 1));
-    let quantity_base = orders.get(1).unwrap().buy_order.quantity_base;
-    assert_eq!(quantity_base, 12.5);
-    assert_eq!(orders.get(1).unwrap().buy_price, 100.0);
-}
-
-#[test]
-// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
-fn replace_response_buy_stop_uses_sell_side() {
-    let mut orders = Orders::new();
-    let mut status = make_status(1, "X", OrderWorkerStatus::SellSet, 10);
-    status.buy_order.actual_price = 111.0;
-    status.sell_order.actual_price = 222.0;
-    orders.apply(order_status_cmd(status));
-
-    let rr = OrderReplaceResponse {
-        epoch_header: make_epoch(1, 3, "X", 11, OrderWorkerStatus::SellSet),
-        order_type: OrderType::BuyStop,
-        price: 456.0,
-        update_data: OrderUpdateData {
-            actual_price: 456.0,
-            ..Default::default()
-        },
-        quantity_base: 7.5,
-    };
-    let (res, ev) = orders.apply(order_replace_response_cmd(rr));
-
-    assert_eq!(res, ApplyResult::Applied);
-    assert!(matches!(ev, OrderEvent::Updated(order) if order.uid == 1));
-    let order = orders.get(1).unwrap();
-    let buy_actual_price = order.buy_order.actual_price;
-    let sell_actual_price = order.sell_order.actual_price;
-    let sell_quantity_base = order.sell_order.quantity_base;
-    assert_eq!(buy_actual_price, 111.0);
-    assert_eq!(order.buy_price, 111.0);
-    assert_eq!(sell_actual_price, 456.0);
-    assert_eq!(sell_quantity_base, 7.5);
-    assert_eq!(order.sell_price, 222.0);
-}
-
-#[test]
-// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder (ReplaceSentTime lifecycle)
-fn bulk_replace_timeout_clears_flag_after_5000ms() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        1,
-        "X",
-        OrderWorkerStatus::BuySet,
-        10,
-    )));
-
-    let notify = BulkReplaceNotify {
-        market: make_market(0, 3, "X"),
-        order_type: OrderType::Buy,
-        uids: vec![1],
-    };
-    let (res, ev) = orders.apply_at(TradeCommand::BulkReplaceNotify(notify), 1000);
-    assert_eq!(res, ApplyResult::Applied);
-    assert!(matches!(ev, Some(OrderEvent::BulkReplaced { .. })));
-    assert!(orders.get(1).unwrap().bulk_replace_buy);
-
-    assert!(orders.tick_bulk_replace_timeouts(6000).is_empty());
-    assert!(orders.get(1).unwrap().bulk_replace_buy);
-
-    let events = orders.tick_bulk_replace_timeouts(6001);
-    assert!(matches!(events.as_slice(), [OrderEvent::Updated(order)] if order.uid == 1));
-    assert!(!orders.get(1).unwrap().bulk_replace_buy);
-}
-
-#[test]
-// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder (ReplaceSentTime lifecycle)
-fn replace_response_clears_flag_then_tick_clears_shared_sent_time() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        1,
-        "X",
-        OrderWorkerStatus::BuySet,
-        10,
-    )));
-
-    assert!(orders.send_replace_if_requested(1, 123.0, 1000).is_some());
-    assert!(orders.get(1).unwrap().bulk_replace_buy);
-    assert_eq!(orders.get(1).unwrap().replace_sent_time_ms, 1000);
-
-    let rr = OrderReplaceResponse {
-        epoch_header: make_epoch(1, 3, "X", 11, OrderWorkerStatus::BuySet),
-        order_type: OrderType::Buy,
-        price: 123.0,
-        update_data: OrderUpdateData::default(),
-        quantity_base: 0.0,
-    };
-    let (res, _) = orders.apply(order_replace_response_cmd(rr));
-    assert_eq!(res, ApplyResult::Applied);
-
-    let order = orders.get(1).unwrap();
-    assert!(!order.bulk_replace_buy);
-    assert_eq!(
-        order.replace_sent_time_ms, 1000,
-        "Delphi TOrderReplaceResponse clears p*Order.OrderReplace, not ReplaceSentTime"
-    );
-
-    assert!(orders.tick_bulk_replace_timeouts(1001).is_empty());
-    assert_eq!(
-        orders.get(1).unwrap().replace_sent_time_ms,
-        0,
-        "Delphi CheckReplaceFlag clears ReplaceSentTime when current FOrder flag is false"
-    );
-}
-
-#[test]
-// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder (ReplaceSentTime lifecycle)
-fn bulk_replace_tick_checks_only_current_side() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        1,
-        "X",
-        OrderWorkerStatus::BuySet,
-        10,
-    )));
-
-    let notify = BulkReplaceNotify {
-        market: make_market(0, 3, "X"),
-        order_type: OrderType::BuyStop,
-        uids: vec![1],
-    };
-    let (res, _) = orders.apply_at(TradeCommand::BulkReplaceNotify(notify), 1000);
-    assert_eq!(res, ApplyResult::Applied);
-    assert!(orders.get(1).unwrap().bulk_replace_sell);
-    assert_eq!(orders.get(1).unwrap().replace_sent_time_ms, 1000);
-
-    assert!(orders.tick_bulk_replace_timeouts(6001).is_empty());
-    let order = orders.get(1).unwrap();
-    assert!(order.bulk_replace_sell);
-    assert_eq!(
-        order.replace_sent_time_ms, 0,
-        "Delphi current FOrder=buy clears only ReplaceSentTime; opposite side flag is untouched"
-    );
-}
-
-#[test]
-// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder (TBulkReplaceNotify)
-fn bulk_replace_notify_reports_only_found_workers() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        1,
-        "X",
-        OrderWorkerStatus::BuySet,
-        10,
-    )));
-
-    let notify = BulkReplaceNotify {
-        market: make_market(0, 3, "X"),
-        order_type: OrderType::Buy,
-        uids: vec![1, 2],
-    };
-    let (res, ev) = orders.apply_at(TradeCommand::BulkReplaceNotify(notify), 1000);
-
-    assert_eq!(res, ApplyResult::Applied);
-    assert!(orders.get(1).unwrap().bulk_replace_buy);
-    assert!(matches!(
-        ev,
-        Some(OrderEvent::BulkReplaced {
-            order_type: OrderType::Buy,
-            uids
-        }) if uids == vec![1]
-    ));
-
-    let missing_notify = BulkReplaceNotify {
-        market: make_market(0, 3, "X"),
-        order_type: OrderType::Sell,
-        uids: vec![2],
-    };
-    let (res, ev) = orders.apply_at(TradeCommand::BulkReplaceNotify(missing_notify), 1000);
-
-    assert_eq!(res, ApplyResult::OrderNotFound);
-    assert!(matches!(
-        ev,
-        Some(OrderEvent::Ignored {
-            uid: 0,
-            reason: ApplyResult::OrderNotFound
-        })
-    ));
-}
-
-#[test]
-// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder (TBulkReplaceNotify)
-fn bulk_replace_notify_buy_stop_uses_sell_side() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        1,
-        "X",
-        OrderWorkerStatus::SellSet,
-        10,
-    )));
-
-    let notify = BulkReplaceNotify {
-        market: make_market(0, 3, "X"),
-        order_type: OrderType::BuyStop,
-        uids: vec![1],
-    };
-    let (res, ev) = orders.apply_at(TradeCommand::BulkReplaceNotify(notify), 1000);
-
-    assert_eq!(res, ApplyResult::Applied);
-    assert!(matches!(ev, Some(OrderEvent::BulkReplaced { .. })));
-    let order = orders.get(1).unwrap();
-    assert!(!order.bulk_replace_buy);
-    assert!(order.bulk_replace_sell);
-}
-
-#[test]
-// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder (TBulkReplaceNotify)
-fn bulk_replace_notify_unknown_order_type_uses_sell_side() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        1,
-        "X",
-        OrderWorkerStatus::SellSet,
-        10,
-    )));
-
-    let notify = BulkReplaceNotify {
-        market: make_market(0, 3, "X"),
-        order_type: OrderType::from_byte(250),
-        uids: vec![1],
-    };
-    let (res, ev) = orders.apply_at(TradeCommand::BulkReplaceNotify(notify), 1000);
-
-    assert_eq!(res, ApplyResult::Applied);
-    assert!(matches!(ev, Some(OrderEvent::BulkReplaced { .. })));
-    let order = orders.get(1).unwrap();
-    assert!(!order.bulk_replace_buy);
-    assert!(order.bulk_replace_sell);
-}
-
-#[test]
-// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder
-fn same_phase_full_does_not_overwrite_local_price_intent() {
-    let mut orders = Orders::new();
-    let mut status = make_status(1, "X", OrderWorkerStatus::BuySet, 10);
-    status.buy_order.actual_price = 10.0;
-    status.sell_order.actual_price = 20.0;
-    orders.apply(order_status_cmd(status));
-
-    let order = orders.get(1).unwrap();
-    assert_eq!(order.buy_price, 10.0);
-    assert_eq!(order.sell_price, 20.0);
-
-    let mut repeated = make_status(1, "X", OrderWorkerStatus::BuySet, 11);
-    repeated.buy_order.actual_price = 11.0;
-    repeated.sell_order.actual_price = 21.0;
-    orders.apply(order_status_cmd(repeated));
-
-    let order = orders.get(1).unwrap();
-    assert_eq!(order.buy_price, 10.0);
-    assert_eq!(order.sell_price, 20.0);
-}
-
-#[test]
-fn epoch_is_ok_unit() {
-    // Protocol: backDist := last - new (Word wrapping); accept = backDist > 1000.
-
-    // duplicate
-    assert!(!epoch_is_ok(10, 10));
-    // stale and close: backDist = 100-50 = 50 <= 1000 -> reject.
-    assert!(!epoch_is_ok(100, 50));
-    // accept forward through wrap: backDist = 100-250 = 65386 > 1000 -> accept.
-    assert!(epoch_is_ok(100, 250));
-    // wrap-around forward far: last=65500, new=200. backDist = 65300 > 1000 -> accept.
-    assert!(epoch_is_ok(65500, 200));
-    // last=200, new=65500 is only 236 behind and therefore stale.
-    assert!(!epoch_is_ok(200, 65500));
-    // near stale: last=10, new=65500. backDist = 46 <= 1000 -> reject.
-    assert!(!epoch_is_ok(10, 65500));
-    // window boundary: backDist = 1000 is stale; 1001 is accepted.
-    assert!(!epoch_is_ok(2000, 1000));
-    assert!(epoch_is_ok(2000, 999));
-}
-
-#[test]
-fn missing_after_snapshot_returns_old_orders_after_dispatcher_style_status_loop() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        1,
-        "X",
-        OrderWorkerStatus::BuySet,
-        1,
-    )));
-    orders.apply(order_status_cmd(make_status(
-        2,
-        "Y",
-        OrderWorkerStatus::BuySet,
-        1,
-    )));
-
-    orders.begin_snapshot();
-    orders.apply(order_status_cmd(make_status(
-        1,
-        "X",
-        OrderWorkerStatus::SellSet,
-        2,
-    )));
-
-    let missing = orders.missing_after_snapshot();
-    assert_eq!(missing, vec![2]);
-}
-
-#[test]
-// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder (SnapshotFlag)
-fn existing_order_command_refreshes_snapshot_flag_before_epoch_guard() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        1,
-        "X",
-        OrderWorkerStatus::BuySet,
-        10,
-    )));
-    let (res, _) = orders.apply(order_status_cmd(make_status(
-        1,
-        "X",
-        OrderWorkerStatus::BuySet,
-        10,
-    )));
-    assert_eq!(res, ApplyResult::Applied);
-
-    orders.begin_snapshot();
-    let duplicate_update = OrderStatusUpdate {
-        epoch_header: make_epoch(1, 3, "X", 10, OrderWorkerStatus::BuySet),
-        update_data: OrderUpdateData::default(),
-        sell_reason_code: 0,
-    };
-    let (res, _) = orders.apply(TradeCommand::OrderStatusUpdate(duplicate_update));
-
-    assert_eq!(res, ApplyResult::OutOfOrder);
-    assert!(
-        orders.missing_after_snapshot().is_empty(),
-        "Delphi sets Worker.SnapshotFlag before AcceptServerCommand can reject the command"
-    );
-}
-
-#[test]
-// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder (SnapshotFlag)
-fn unknown_status_ordinal_preserves_snapshot_flag_and_fails_phase_gate() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        1,
-        "X",
-        OrderWorkerStatus::BuySet,
-        10,
-    )));
-
-    orders.begin_snapshot();
-    let unknown_status = OrderWorkerStatus::from_byte(250);
-    let (res, _) = orders.apply(TradeCommand::OrderStatusRequest(make_epoch(
-        1,
-        3,
-        "X",
-        11,
-        unknown_status,
-    )));
-
-    assert_eq!(res, ApplyResult::PhaseMismatch);
-    assert!(
-        orders.missing_after_snapshot().is_empty(),
-        "SnapshotFlag is refreshed before the common server epoch/phase gate"
-    );
-    assert_eq!(orders.get(1).unwrap().status, OrderWorkerStatus::BuySet);
-}
-
-#[test]
-// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder (TBulkReplaceNotify early-exit branch)
-fn bulk_replace_notify_does_not_refresh_snapshot_flag() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        1,
-        "X",
-        OrderWorkerStatus::BuySet,
-        10,
-    )));
-
-    orders.begin_snapshot();
-    let notify = BulkReplaceNotify {
-        market: make_market(0, 3, "X"),
-        order_type: OrderType::Buy,
-        uids: vec![1],
-    };
-    let (res, _) = orders.apply_at(TradeCommand::BulkReplaceNotify(notify), 1000);
-
-    assert_eq!(res, ApplyResult::Applied);
-    assert_eq!(
-        orders.missing_after_snapshot(),
-        vec![1],
-        "Delphi TBulkReplaceNotify exits before the general WCache SnapshotFlag assignment"
-    );
-}
-
-#[test]
-// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder (SnapshotFlag)
-fn non_base_market_trade_command_does_not_refresh_snapshot_flag() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        1,
-        "X",
-        OrderWorkerStatus::BuySet,
-        10,
-    )));
-
-    orders.begin_snapshot();
-    let (res, _) = orders.apply(TradeCommand::AllStatusesRequest(make_base(1, 3)));
-
-    assert_eq!(res, ApplyResult::NotApplicable);
-    assert_eq!(
-        orders.missing_after_snapshot(),
-        vec![1],
-        "Delphi ClientNewData calls ProcessCommandOrder only for TBaseMarketCommand descendants"
-    );
-}
-
-#[test]
-// parity: MoonBot MoonProtoClient.pas:TMoonProtoNetClient.ProcessCommandOrder (WCache SnapshotFlag sweep)
-fn missing_after_snapshot_keeps_terminal_entry_until_deferred_removal() {
-    let mut orders = Orders::new();
-    orders.apply_at(
-        order_status_cmd(make_status(1, "X", OrderWorkerStatus::SellSet, 1)),
-        1000,
-    );
-    orders.apply_at(
-        order_status_cmd(make_status(1, "X", OrderWorkerStatus::SellDone, 2)),
-        1001,
-    );
-    assert!(orders.get(1).unwrap().job_is_done);
-
-    orders.begin_snapshot();
-
-    assert_eq!(
-        orders.missing_after_snapshot(),
-        vec![1],
-        "Delphi virtual worker is still in WCache and not JobIsDone until DoTheJobVirtual returns"
-    );
-    assert_eq!(
-        orders
-            .drain_pending_removals_due(1401)
-            .into_iter()
-            .map(|order| order.uid)
-            .collect::<Vec<_>>(),
-        vec![1]
-    );
-    assert!(orders.missing_after_snapshot().is_empty());
-}
-
-#[test]
-fn direct_all_statuses_is_not_hidden_batch_inside_process_command_order() {
-    let mut orders = Orders::new();
-    let snap = AllStatuses {
-        header: make_base(0, 3),
-        orders: vec![order_status_cmd(make_status(
-            1,
-            "X",
-            OrderWorkerStatus::SellSet,
-            2,
-        ))],
-    };
-
-    let (res, ev) = orders.apply(TradeCommand::AllStatuses(snap));
-
-    assert_eq!(res, ApplyResult::NotApplicable);
-    assert!(matches!(
-        ev,
-        OrderEvent::Ignored {
-            uid: 0,
-            reason: ApplyResult::NotApplicable
+    let mut panic_off = Vec::new();
+    let mut saw_stops = false;
+    let mut saw_vstop = false;
+    for command in commands {
+        match command {
+            OrderCommandPayload::Panic {
+                order_id,
+                enabled: false,
+            } => panic_off.push(order_id),
+            OrderCommandPayload::Stops { order_id, stops } => {
+                assert_eq!(order_id, 801);
+                assert!(!bool::from(stops.stop_loss_on));
+                assert!(!bool::from(stops.trailing_on));
+                assert!(bool::from(stops.use_take_profit));
+                assert_eq!(stops.sl_level, 95.0);
+                assert_eq!(stops.trailing_level, 1.5);
+                assert_eq!(stops.take_profit, 120.0);
+                saw_stops = true;
+            }
+            OrderCommandPayload::VStop {
+                order_id,
+                enabled,
+                fixed,
+                level,
+                volume,
+            } => {
+                assert_eq!(order_id, 801);
+                assert!(!enabled);
+                assert!(fixed);
+                assert_eq!(level, 97.5);
+                assert_eq!(volume, 0.75);
+                saw_vstop = true;
+            }
+            other => panic!("unexpected market-panic command: {other:?}"),
         }
-    ));
-    assert!(orders.is_empty());
-    assert_eq!(orders.current_snapshot_flag(), 0);
-}
-
-#[test]
-fn accepts_more_than_former_rust_order_cap() {
-    const FORMER_MAX_ORDERS: u64 = 50_000;
-    let mut orders = Orders::new();
-    for uid in 1..=FORMER_MAX_ORDERS + 1 {
-        let (res, ev) = orders.apply(order_status_cmd(make_status(
-            uid,
-            "X",
-            OrderWorkerStatus::BuySet,
-            1,
-        )));
-        assert_eq!(res, ApplyResult::Applied);
-        assert!(matches!(ev, OrderEvent::Created(order) if order.uid == uid));
     }
+    panic_off.sort_unstable();
+    assert_eq!(panic_off, [801, 802]);
+    assert!(saw_stops);
+    assert!(saw_vstop);
 
-    assert_eq!(orders.len(), (FORMER_MAX_ORDERS + 1) as usize);
-    assert!(orders.get(FORMER_MAX_ORDERS + 1).is_some());
+    let auto = orders.get(801).unwrap();
+    assert!(!auto.panic_sell);
+    assert!(!auto.panic_sell_auto);
+    assert!(!bool::from(auto.stops.stop_loss_on));
+    assert!(!bool::from(auto.stops.trailing_on));
+    assert!(!auto.vstop_on);
+    assert_eq!(auto.vstop_level, 97.5);
+    assert_eq!(auto.vstop_vol, 0.75);
+    assert!(!orders.get(802).unwrap().panic_sell);
+    assert!(orders.get(803).unwrap().panic_sell);
 }
 
 #[test]
-fn snapshot_cow_mutating_one_order_does_not_deep_clone_other_orders() {
-    let mut orders = Orders::new();
-    orders.apply(order_status_cmd(make_status(
-        1,
-        "BTCUSDT",
-        OrderWorkerStatus::BuySet,
-        1,
-    )));
-    orders.apply(order_status_cmd(make_status(
-        2,
-        "ETHUSDT",
-        OrderWorkerStatus::SellSet,
-        1,
-    )));
+fn panic_sell_all_lights_only_retained_sell_orders() {
+    let mut orders = OrderState::new();
+    apply(
+        &mut orders,
+        image(811, 1, desc("BTC"), state(OrderWorkerStatus::SellSet, 0)),
+        APP_TOKEN,
+        true,
+    );
+    apply(
+        &mut orders,
+        image(812, 1, desc("BTC"), state(OrderWorkerStatus::BuySet, 0)),
+        APP_TOKEN,
+        true,
+    );
+    apply(
+        &mut orders,
+        image(813, 1, desc("BTC"), state(OrderWorkerStatus::SellDone, 0)),
+        APP_TOKEN,
+        true,
+    );
 
-    let snapshot = orders.clone();
-    assert!(std::sync::Arc::ptr_eq(
-        orders.map.get(&1).unwrap(),
-        snapshot.map.get(&1).unwrap()
-    ));
-    assert!(std::sync::Arc::ptr_eq(
-        orders.map.get(&2).unwrap(),
-        snapshot.map.get(&2).unwrap()
-    ));
-
-    let stops = StopSettings {
-        stop_loss_on: DelphiBool::TRUE,
-        sl_level: 12.5,
-        ..StopSettings::default()
-    };
-    assert!(orders.send_stops_if_changed(1, &stops).is_some());
-
-    assert!(!std::sync::Arc::ptr_eq(
-        orders.map.get(&1).unwrap(),
-        snapshot.map.get(&1).unwrap()
-    ));
-    assert!(std::sync::Arc::ptr_eq(
-        orders.map.get(&2).unwrap(),
-        snapshot.map.get(&2).unwrap()
-    ));
+    assert!(orders.mark_panic_sell_all());
+    assert!(orders.get(811).unwrap().panic_sell);
+    assert!(!orders.get(812).unwrap().panic_sell);
+    assert!(!orders.get(813).unwrap().panic_sell);
+    assert!(!orders.mark_panic_sell_all());
 }

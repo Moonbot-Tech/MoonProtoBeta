@@ -692,7 +692,13 @@ fn reader_handles_ping_response_without_main_loop_tick() {
     let ((hdr, response), events) = recv_client_packet_with_events(&server_sock, &mut client);
 
     assert_eq!(hdr.cmd, Command::Ping.to_byte());
-    assert_eq!(response.len(), control::PING_SIZE);
+    assert_eq!(
+        response.len(),
+        control::PING_SIZE + control::PING_MEMORY_INFO_SIZE,
+        "the first Ping response carries the periodic memory/core profile"
+    );
+    assert_eq!(response[56], control::PING_FLAG_MEMORY_INFO);
+    assert_ne!(response[61], 0, "logical CPU count must be reported");
     assert_eq!(
         u64::from_le_bytes(response[25..33].try_into().unwrap()),
         777

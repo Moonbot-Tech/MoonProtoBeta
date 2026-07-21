@@ -160,7 +160,9 @@ impl SettingsState {
             | UICommand::OrdersHistoryRequest(_)
             | UICommand::RestartNow { .. }
             | UICommand::KernelLicenseStateRequest { .. }
-            | UICommand::AutoDetect(_) => None,
+            | UICommand::AutoDetect(_)
+            | UICommand::NewsRelay(_)
+            | UICommand::NewsHistory(_) => None,
 
             UICommand::UpdateVersion(u) => Some(SettingsEvent::VersionUpdate {
                 #[cfg(any(test, feature = "diagnostics"))]

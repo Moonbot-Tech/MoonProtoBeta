@@ -483,12 +483,33 @@ fn post_init_reconnect_restores_domain_without_second_init_and_reopens_stream_ga
     );
     assert!(
         sent.iter().all(|item| {
-            item.cmd != Command::Order.to_byte()
-                && item.cmd != Command::UI.to_byte()
+            item.cmd != Command::UI.to_byte()
                 && item.cmd != Command::Balance.to_byte()
                 && item.cmd != Command::Strat.to_byte()
         }),
-        "Delphi post-init resync is not repeated by the client on reconnect"
+        "reconnect must not repeat unrelated post-init domain requests"
+    );
+    let order_pulls = sent
+        .iter()
+        .filter(|item| item.cmd == Command::Order.to_byte())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        order_pulls.len(),
+        1,
+        "each post-init Fine sends exactly one order full-pull"
+    );
+    assert_eq!(
+        order_pulls[0].data[0], 45,
+        "full-pull uses TOrderStatusRequest"
+    );
+    assert_eq!(
+        u64::from_le_bytes(order_pulls[0].data[2..10].try_into().unwrap()),
+        0,
+        "UID=0 requests the complete live order snapshot"
+    );
+    assert_eq!(
+        order_pulls[0].data[10], 0,
+        "ExactRev=0 requests an unconditional image"
     );
 
     client.tick_trades_reconnect_sequence(10_000, 0);
@@ -1149,10 +1170,11 @@ fn new_market_list_refresh_requests_immediate_prices() {
 
     assert!(dispatcher.markets().get("DOGEUSDT").is_some());
     assert!(
-        actions
-            .iter()
-            .any(|action| { matches!(action, crate::events::ActiveAction::RequestOrderSnapshot) }),
-        "Delphi AddNewMarket queues TAllStatusesReq after local market creation"
+        !actions.iter().any(|action| matches!(
+            action,
+            crate::events::ActiveAction::RequestOrderStatus { .. }
+        )),
+        "market-list growth attaches parked canonical mirrors locally and must not trigger a full order pull"
     );
     assert!(
         actions.iter().any(|action| {
@@ -1167,10 +1189,10 @@ fn new_market_list_refresh_requests_immediate_prices() {
     let sent = drain_send_items(&client);
     let methods = api_methods(&sent);
     assert!(
-        sent.iter().any(|item| {
-            Command::from_byte(item.cmd) == Command::Order && item.data.first() == Some(&9)
+        !sent.iter().any(|item| {
+            Command::from_byte(item.cmd) == Command::Order && item.data.first() == Some(&45)
         }),
-        "active action must enqueue TAllStatusesReq"
+        "local parked-mirror rescan must not enqueue a redundant full order request"
     );
     assert!(
         methods.contains(&(EngineMethod::UpdateMarketsList.to_byte())),

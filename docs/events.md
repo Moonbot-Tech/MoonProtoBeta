@@ -113,6 +113,8 @@ fn handle_event(event: Event) {
         Event::ChartText(rows) => redraw_chart_text(rows),
         Event::Report(report) => apply_typed_report_replication(report),
         Event::Settings(settings_event) => handle_settings_event(settings_event),
+        Event::KernelHealth(health) => update_core_health(health),
+        Event::News(news_event) => handle_news_event(news_event),
         Event::EngineAction(action) => handle_engine_action(action),
         Event::ServerLog(log) => append_server_log(log.time(), &log.msg),
         _ => {}
@@ -167,6 +169,8 @@ runtime publishes a fresh immutable snapshot.
 
 ```rust
 pub enum Event {
+    KernelHealth(KernelHealth),
+    News(NewsEvent),
     Order(OrderEvent),
     OrderBook(OrderBookEvent),
     Trade(TradesEvent),
@@ -175,6 +179,7 @@ pub enum Event {
     Account(AccountEvent),
     TransferAssets(TransferAssetsEvent),
     CoinCardCandles(CoinCardCandlesEvent),
+    LiveCandle(LiveCandleEvent),
     CandlesSnapshot(CandlesSnapshotEvent),
     Arb(ArbEvent),
     Strat(StratEvent),
@@ -189,6 +194,16 @@ pub enum Event {
     ServerLog(ServerLogEvent),
 }
 ```
+
+`Event::KernelHealth` reports the connected core's process CPU, whole-machine
+CPU, process memory, available physical memory, and logical CPU count. CPU is
+sampled every protocol Ping. Memory and CPU-count form a lower-rate profile;
+their `Option` fields are `None` until that profile first arrives and then keep
+the last reported values in `snapshot.kernel_health()`.
+
+`Event::News` covers startup history completion, live news, and live tags
+catalog updates. The retained JSON is available through `snapshot.news()`; see
+[`news.md`](news.md) for payload semantics and integration examples.
 
 Low-level diagnostic builds may also receive hidden raw/parse-failure/raw Engine
 API response events. They are for FireTest/protocol dumps only; they are not a
