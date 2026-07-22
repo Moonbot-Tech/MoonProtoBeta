@@ -10,6 +10,7 @@ use std::sync::Arc;
 const REPORT_SCHEMA_FORMAT_VERSION: u8 = 1;
 const REPORT_TEXT_MAX_BYTES: usize = 8192;
 const REPORT_REC_ID_FIELD_NAME: &str = "newRecID";
+const REPORT_DELETED_FIELD_NAME: &str = "deleted";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ReportFieldKind {
@@ -228,6 +229,20 @@ impl ReportRow {
         }
     }
 
+    fn set_integer(&mut self, field_index: u16, value: i64) -> bool {
+        let Ok(index) = self
+            .fields
+            .binary_search_by_key(&field_index, |field| field.field_index)
+        else {
+            return false;
+        };
+        let ReportValue::Integer(current) = &mut self.fields[index].value else {
+            return false;
+        };
+        *current = value;
+        true
+    }
+
     fn parse(data: &[u8], rec_id_field_index: u16, outer_rec_id: Option<i64>) -> Option<Self> {
         let mut pos = 0usize;
         let row = Self::parse_from(data, &mut pos, rec_id_field_index, outer_rec_id)?;
@@ -302,6 +317,110 @@ impl ReportRow {
             return None;
         }
         Some(rows)
+    }
+}
+
+/// Inclusive `newRecID` range used by report soft-delete/restore intents.
+///
+/// A reversed range (`from_rec_id > to_rec_id`) is valid and selects no rows,
+/// matching the core's SQL `BETWEEN` semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ReportRecIdRange {
+    pub from_rec_id: i64,
+    pub to_rec_id: i64,
+}
+
+impl ReportRecIdRange {
+    pub const fn new(from_rec_id: i64, to_rec_id: i64) -> Self {
+        Self {
+            from_rec_id,
+            to_rec_id,
+        }
+    }
+
+    pub const fn contains(self, rec_id: i64) -> bool {
+        self.from_rec_id <= rec_id && rec_id <= self.to_rec_id
+    }
+}
+
+/// One server-applied report soft-delete/restore operation.
+///
+/// The same value is used for outbound intent batches and inbound server echoes.
+/// An echo means the core committed the update to its report database.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportRowsDeleted {
+    pub deleted: bool,
+    pub ranges: Arc<[ReportRecIdRange]>,
+    pub singles: Arc<[i64]>,
+}
+
+impl ReportRowsDeleted {
+    pub fn new(
+        deleted: bool,
+        ranges: impl IntoIterator<Item = ReportRecIdRange>,
+        singles: impl IntoIterator<Item = i64>,
+    ) -> Self {
+        Self {
+            deleted,
+            ranges: ranges.into_iter().collect::<Vec<_>>().into(),
+            singles: singles.into_iter().collect::<Vec<_>>().into(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ranges.is_empty() && self.singles.is_empty()
+    }
+
+    pub fn affects(&self, rec_id: i64) -> bool {
+        self.ranges.iter().any(|range| range.contains(rec_id)) || self.singles.contains(&rec_id)
+    }
+
+    pub(crate) fn wire_batches(&self) -> Vec<Self> {
+        const HEADER_AND_COUNTS_BYTES: usize = 11 + 1 + 2 + 2;
+        const RANGE_BYTES: usize = 2 * std::mem::size_of::<i64>();
+        const SINGLE_BYTES: usize = std::mem::size_of::<i64>();
+
+        if self.is_empty() {
+            return Vec::new();
+        }
+
+        let mut batches = Vec::new();
+        let mut ranges = Vec::new();
+        let mut singles = Vec::new();
+        let mut wire_bytes = HEADER_AND_COUNTS_BYTES;
+
+        let flush = |batches: &mut Vec<Self>,
+                     ranges: &mut Vec<ReportRecIdRange>,
+                     singles: &mut Vec<i64>| {
+            if ranges.is_empty() && singles.is_empty() {
+                return;
+            }
+            batches.push(Self {
+                deleted: self.deleted,
+                ranges: std::mem::take(ranges).into(),
+                singles: std::mem::take(singles).into(),
+            });
+        };
+
+        for range in self.ranges.iter().copied() {
+            if wire_bytes + RANGE_BYTES > crate::commands::report::MAX_SET_ROWS_DELETED_WIRE_BYTES {
+                flush(&mut batches, &mut ranges, &mut singles);
+                wire_bytes = HEADER_AND_COUNTS_BYTES;
+            }
+            ranges.push(range);
+            wire_bytes += RANGE_BYTES;
+        }
+        for rec_id in self.singles.iter().copied() {
+            if wire_bytes + SINGLE_BYTES > crate::commands::report::MAX_SET_ROWS_DELETED_WIRE_BYTES
+            {
+                flush(&mut batches, &mut ranges, &mut singles);
+                wire_bytes = HEADER_AND_COUNTS_BYTES;
+            }
+            singles.push(rec_id);
+            wire_bytes += SINGLE_BYTES;
+        }
+        flush(&mut batches, &mut ranges, &mut singles);
+        batches
     }
 }
 
@@ -403,6 +522,8 @@ pub enum ReportEvent {
     RowDelete {
         rec_id: i64,
     },
+    /// Soft-delete/restore committed by the core and broadcast to all report subscribers.
+    RowsDeleted(ReportRowsDeleted),
     SyncStarted {
         ticket: ReportSyncTicket,
         request: ReportSyncRequest,
@@ -430,6 +551,7 @@ struct ActiveSync {
     total_rows: u32,
     awaiting_apply: Option<Arc<ReportSyncPage>>,
     live_touched: HashSet<i64>,
+    deleted_overrides: Vec<ReportRowsDeleted>,
 }
 
 impl ActiveSync {
@@ -443,6 +565,7 @@ impl ActiveSync {
             total_rows: 0,
             awaiting_apply: None,
             live_touched: HashSet::new(),
+            deleted_overrides: Vec::new(),
         }
     }
 }
@@ -649,6 +772,17 @@ impl ReportReplicationState {
         true
     }
 
+    pub(crate) fn apply_rows_deleted(
+        &mut self,
+        change: ReportRowsDeleted,
+        out: &mut Vec<ReportEvent>,
+    ) {
+        if let Some(active) = self.active.as_mut() {
+            active.deleted_overrides.push(change.clone());
+        }
+        out.push(ReportEvent::RowsDeleted(change));
+    }
+
     pub(crate) fn apply_sync_page(
         &mut self,
         wire: WireSyncPage,
@@ -703,6 +837,21 @@ impl ReportReplicationState {
         if !database_recreated && wire.last_rec_id > wire.max_rec_id {
             return false;
         }
+        if let Some(deleted_field) = schema
+            .field_by_name(REPORT_DELETED_FIELD_NAME)
+            .filter(|field| field.kind == ReportFieldKind::Integer)
+        {
+            for row in &mut rows {
+                if let Some(change) = active
+                    .deleted_overrides
+                    .iter()
+                    .rev()
+                    .find(|change| change.affects(row.rec_id))
+                {
+                    row.set_integer(deleted_field.index, if change.deleted { 1 } else { 0 });
+                }
+            }
+        }
         rows.retain(|row| !active.live_touched.contains(&row.rec_id));
         let page = Arc::new(ReportSyncPage {
             ticket: active.ticket,
@@ -756,6 +905,7 @@ impl ReportReplicationState {
             active.current_request = request;
             active.current_request_uid = request_uid;
             active.live_touched.clear();
+            active.deleted_overrides.clear();
             return ReportPageApplyAction::SendNext {
                 request_uid,
                 request,
@@ -906,6 +1056,23 @@ mod tests {
         schema_blob_with_status_spec("INT")
     }
 
+    fn schema_blob_with_deleted() -> Vec<u8> {
+        let mut raw = vec![1];
+        raw.extend_from_slice(&3u16.to_le_bytes());
+        for (name, sql_spec) in [
+            ("Status", "INT"),
+            ("newRecID", "sqlite3_int64 default 0"),
+            ("deleted", "INT default 0"),
+        ] {
+            raw.push(u8::try_from(name.len()).unwrap());
+            raw.extend_from_slice(name.as_bytes());
+            raw.push(1);
+            raw.push(u8::try_from(sql_spec.len()).unwrap());
+            raw.extend_from_slice(sql_spec.as_bytes());
+        }
+        synlz_compress(&raw)
+    }
+
     fn row(rec_id: i64, status: i64) -> Vec<u8> {
         let mut raw = Vec::new();
         raw.extend_from_slice(&2u16.to_le_bytes());
@@ -915,6 +1082,15 @@ mod tests {
         raw.extend_from_slice(&1u16.to_le_bytes());
         raw.push(1);
         raw.extend_from_slice(&rec_id.to_le_bytes());
+        raw
+    }
+
+    fn row_with_deleted(rec_id: i64, status: i64, deleted: i64) -> Vec<u8> {
+        let mut raw = row(rec_id, status);
+        raw[0..2].copy_from_slice(&3u16.to_le_bytes());
+        raw.extend_from_slice(&2u16.to_le_bytes());
+        raw.push(1);
+        raw.extend_from_slice(&deleted.to_le_bytes());
         raw
     }
 
@@ -931,6 +1107,56 @@ mod tests {
             &mut controls,
         ));
         state
+    }
+
+    fn ready_state_with_deleted() -> ReportReplicationState {
+        let mut state = ReportReplicationState::default();
+        let mut out = Vec::new();
+        let mut controls = Vec::new();
+        assert!(state.apply_schema(
+            WireSchema {
+                header: header(38),
+                data: schema_blob_with_deleted(),
+            },
+            &mut out,
+            &mut controls,
+        ));
+        state
+    }
+
+    #[test]
+    fn rows_deleted_batches_stay_near_one_kib_without_losing_selection() {
+        let ranges = (0..80)
+            .map(|index| ReportRecIdRange::new(index * 10, index * 10 + 9))
+            .collect::<Vec<_>>();
+        let singles = (1_000..1_180).collect::<Vec<_>>();
+        let change = ReportRowsDeleted::new(true, ranges.iter().copied(), singles.iter().copied());
+
+        let batches = change.wire_batches();
+        assert!(batches.len() > 1);
+        assert_eq!(
+            batches
+                .iter()
+                .flat_map(|batch| batch.ranges.iter().copied())
+                .collect::<Vec<_>>(),
+            ranges
+        );
+        assert_eq!(
+            batches
+                .iter()
+                .flat_map(|batch| batch.singles.iter().copied())
+                .collect::<Vec<_>>(),
+            singles
+        );
+        for batch in &batches {
+            assert!(
+                crate::commands::report::build_set_rows_deleted(1, batch).len()
+                    <= crate::commands::report::MAX_SET_ROWS_DELETED_WIRE_BYTES
+            );
+        }
+        assert!(ReportRowsDeleted::new(false, [], [])
+            .wire_batches()
+            .is_empty());
     }
 
     #[test]
@@ -1105,6 +1331,39 @@ mod tests {
             [8]
         );
         assert!(!page.is_complete());
+    }
+
+    #[test]
+    fn rows_deleted_echo_wins_over_an_older_copy_in_the_current_sync() {
+        let mut state = ready_state_with_deleted();
+        let schema = state.schema().unwrap().clone();
+        let ticket = ReportSyncTicket { sync_id: 46 };
+        let mut out = Vec::new();
+        let mut controls = Vec::new();
+        let request_uid = state.begin_sync(ticket, ReportSyncRequest::resume(5), &mut out);
+        out.clear();
+
+        let change = ReportRowsDeleted::new(true, [], [7]);
+        state.apply_rows_deleted(change.clone(), &mut out);
+        assert_eq!(out, [ReportEvent::RowsDeleted(change)]);
+        out.clear();
+
+        assert!(state.apply_sync_page(
+            WireSyncPage {
+                header: header(39),
+                request_uid,
+                last_rec_id: 7,
+                max_rec_id: 8,
+                row_count: 1,
+                blob: synlz_compress(&row_with_deleted(7, 1, 0)),
+            },
+            &mut out,
+            &mut controls,
+        ));
+        let ReportEvent::SyncPage(page) = &out[0] else {
+            panic!("expected page")
+        };
+        assert_eq!(page.rows[0].integer_by_name(&schema, "deleted"), Some(1));
     }
 
     #[test]

@@ -621,6 +621,37 @@ mod tests {
     }
 
     #[test]
+    fn runtime_report_set_rows_deleted_uses_the_high_priority_trade_path() {
+        let mut client = ready_client();
+        let mut dispatcher = crate::events::EventDispatcher::new();
+        let mut pending = RuntimePending::default();
+        let change = crate::state::ReportRowsDeleted::new(
+            true,
+            [crate::state::ReportRecIdRange::new(10, 20)],
+            [30, 40],
+        );
+
+        assert!(!handle_command(
+            &mut client,
+            &mut dispatcher,
+            RuntimeCommand::ReportSetRowsDeleted(vec![change].into()),
+            &mut pending,
+        ));
+
+        let (sliced, high, low) = client.take_send_queues_for_test();
+        assert!(sliced.is_empty() && low.is_empty());
+        assert_eq!(high.len(), 1);
+        match TradeCommand::parse(&high[0].data).expect("valid report mutation") {
+            TradeCommand::ReportSetRowsDeleted(command) => {
+                assert!(command.deleted);
+                assert_eq!(command.ranges, [(10, 20)]);
+                assert_eq!(command.singles, [30, 40]);
+            }
+            other => panic!("unexpected trade command: {other:?}"),
+        }
+    }
+
+    #[test]
     fn moon_trade_returns_route_error_before_base_check_fields() {
         let mut client = Client::new(dummy_cfg());
         client.testing_set_domain_ready(true);

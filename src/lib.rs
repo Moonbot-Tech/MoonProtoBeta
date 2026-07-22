@@ -234,9 +234,9 @@ pub use state::{
     TransferAssetsEvent, TransferAssetsState,
 };
 pub use state::{
-    ReportEvent, ReportFieldKind, ReportFieldValue, ReportHistoryDepth, ReportRow, ReportSchema,
-    ReportSchemaField, ReportSyncComplete, ReportSyncPage, ReportSyncRequest, ReportSyncTicket,
-    ReportValue,
+    ReportEvent, ReportFieldKind, ReportFieldValue, ReportHistoryDepth, ReportRecIdRange,
+    ReportRow, ReportRowsDeleted, ReportSchema, ReportSchemaField, ReportSyncComplete,
+    ReportSyncPage, ReportSyncRequest, ReportSyncTicket, ReportValue,
 };
 #[cfg(any(test, feature = "diagnostics"))]
 #[doc(hidden)]

@@ -300,6 +300,12 @@ pub(super) fn handle_command(
             client.send_report_open_rows_check_at(&rec_ids, client.now_ms());
             false
         }
+        RuntimeCommand::ReportSetRowsDeleted(batches) => {
+            for change in batches.iter() {
+                client.send_report_set_rows_deleted(change);
+            }
+            false
+        }
         #[cfg(any(test, feature = "diagnostics"))]
         RuntimeCommand::DebugOutgoingBlackhole(enabled) => {
             client.debug_set_outgoing_blackhole(enabled);

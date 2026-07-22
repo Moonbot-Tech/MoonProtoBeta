@@ -83,6 +83,52 @@ impl MoonReports {
             .send(RuntimeCommand::ReportCheckOpenRows(rec_ids.into()))
             .map_err(|_| MoonClientError::RuntimeStopped)
     }
+
+    /// Set or clear the report `deleted` flag and return the number of queued batches.
+    ///
+    /// The runtime keeps each High-priority command near 1 KiB. The core echoes
+    /// every non-empty committed batch as [`crate::ReportEvent::RowsDeleted`]
+    /// to all report subscribers, including this client. A zero return means the
+    /// selection was empty, so no packet or echo exists.
+    pub fn set_rows_deleted(
+        &self,
+        deleted: bool,
+        ranges: &[crate::state::ReportRecIdRange],
+        singles: &[i64],
+    ) -> Result<usize, MoonClientError> {
+        let change = crate::state::ReportRowsDeleted::new(
+            deleted,
+            ranges.iter().copied(),
+            singles.iter().copied(),
+        );
+        let batches = change.wire_batches();
+        let batch_count = batches.len();
+        if batch_count == 0 {
+            return Ok(0);
+        }
+        self.tx
+            .send(RuntimeCommand::ReportSetRowsDeleted(batches.into()))
+            .map_err(|_| MoonClientError::RuntimeStopped)?;
+        Ok(batch_count)
+    }
+
+    /// Soft-delete report rows. This never physically deletes database rows.
+    pub fn delete_rows(
+        &self,
+        ranges: &[crate::state::ReportRecIdRange],
+        singles: &[i64],
+    ) -> Result<usize, MoonClientError> {
+        self.set_rows_deleted(true, ranges, singles)
+    }
+
+    /// Restore report rows previously hidden by the soft-delete flag.
+    pub fn restore_rows(
+        &self,
+        ranges: &[crate::state::ReportRecIdRange],
+        singles: &[i64],
+    ) -> Result<usize, MoonClientError> {
+        self.set_rows_deleted(false, ranges, singles)
+    }
 }
 
 impl MoonOrders {

@@ -167,6 +167,20 @@ impl Client {
         sent
     }
 
+    pub(crate) fn send_report_set_rows_deleted(
+        &self,
+        change: &crate::state::ReportRowsDeleted,
+    ) -> bool {
+        if change.is_empty() {
+            return false;
+        }
+        let payload = crate::commands::report::build_set_rows_deleted(
+            Self::next_report_request_uid(),
+            change,
+        );
+        self.send_trade(payload)
+    }
+
     pub(crate) fn complete_report_open_rows_check(&self, server_token: u64) {
         if server_token == 0 || self.server_token != server_token {
             return;

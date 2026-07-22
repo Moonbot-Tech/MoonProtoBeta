@@ -4,7 +4,7 @@ use super::*;
 use crate::commands::registry::CURRENT_PROTO_CMD_VER;
 use crate::commands::report::{
     CMD_CHECK_ROWS_REQUEST, CMD_ROW_DELETE, CMD_ROW_UPSERT, CMD_SCHEMA, CMD_SCHEMA_REQUEST,
-    CMD_SYNC_PAGE, CMD_SYNC_REQUEST,
+    CMD_SET_ROWS_DELETED, CMD_SYNC_PAGE, CMD_SYNC_REQUEST,
 };
 use std::convert::TryInto;
 
@@ -27,6 +27,7 @@ pub enum TradeCommand {
     ReportSchema(crate::commands::report::RepSchema),
     ReportSyncPage(crate::commands::report::RepSyncPage),
     ReportCheckRowsRequest(crate::commands::report::RepCheckRowsRequest),
+    ReportSetRowsDeleted(crate::commands::report::RepSetRowsDeleted),
     OrderImage(OrderImage),
     OrderPatch(OrderPatch),
     OrdersSnapshot(OrdersSnapshot),
@@ -84,6 +85,9 @@ impl TradeCommand {
             CMD_CHECK_ROWS_REQUEST => Some(Self::ReportCheckRowsRequest(
                 crate::commands::report::RepCheckRowsRequest::read(input)?,
             )),
+            CMD_SET_ROWS_DELETED => Some(Self::ReportSetRowsDeleted(
+                crate::commands::report::RepSetRowsDeleted::read(input)?,
+            )),
             41 => Some(Self::OrderImage(OrderImage::read(input)?)),
             42 => Some(Self::OrderPatch(OrderPatch::read(input)?)),
             43 => Some(Self::OrdersSnapshot(OrdersSnapshot::read(input)?)),
@@ -111,6 +115,7 @@ impl TradeCommand {
             Self::ReportSchema(c) => c.header.uid,
             Self::ReportSyncPage(c) => c.header.uid,
             Self::ReportCheckRowsRequest(c) => c.header.uid,
+            Self::ReportSetRowsDeleted(c) => c.header.uid,
             Self::OrderImage(c) => c.header.uid,
             Self::OrderPatch(c) => c.header.uid,
             Self::OrdersSnapshot(c) => c.header.uid,

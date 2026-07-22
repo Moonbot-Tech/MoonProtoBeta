@@ -43,6 +43,18 @@ impl EventDispatcher {
                     Self::push_parse_failed(out, Command::Order, payload);
                 }
             }
+            Some(TradeCommand::ReportSetRowsDeleted(report)) => {
+                let change = crate::state::ReportRowsDeleted::new(
+                    report.deleted,
+                    report.ranges.into_iter().map(|(from_rec_id, to_rec_id)| {
+                        crate::state::ReportRecIdRange::new(from_rec_id, to_rec_id)
+                    }),
+                    report.singles,
+                );
+                let mut events = Vec::new();
+                self.reports.apply_rows_deleted(change, &mut events);
+                out.extend(events.into_iter().map(Event::Report));
+            }
             Some(TradeCommand::ReportSyncPage(report)) => {
                 let mut events = Vec::new();
                 if self
@@ -120,6 +132,33 @@ impl EventDispatcher {
     ) {
         if self.orders.has_due_tick_work(now_ms) {
             self.tick_orders_into(now_ms, out);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{ReportEvent, ReportRecIdRange, ReportRowsDeleted};
+
+    #[test]
+    fn set_rows_deleted_packet_becomes_a_typed_report_event() {
+        let expected = ReportRowsDeleted::new(
+            true,
+            [ReportRecIdRange::new(10, 20), ReportRecIdRange::new(90, 80)],
+            [30, 40],
+        );
+        let payload = crate::commands::report::build_set_rows_deleted(77, &expected);
+        let mut dispatcher = EventDispatcher::new();
+        let mut out = Vec::new();
+
+        dispatcher.client_new_data_order(&payload, 0, &mut out);
+
+        match out.as_slice() {
+            [Event::Report(ReportEvent::RowsDeleted(actual))] => {
+                assert_eq!(actual, &expected);
+            }
+            other => panic!("unexpected events: {other:?}"),
         }
     }
 }

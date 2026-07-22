@@ -1,6 +1,6 @@
 //! Wire payloads for the `MPC_Order` report-replication commands.
 
-use super::strict_read::{read_i64, read_u16, read_u32, read_u64};
+use super::strict_read::{read_i64, read_u16, read_u32, read_u64, read_u8};
 use super::trade::builders::write_base_command_header;
 use super::trade::BaseCommandHeader;
 
@@ -11,7 +11,9 @@ pub(crate) const CMD_SCHEMA_REQUEST: u8 = 37;
 pub(crate) const CMD_SCHEMA: u8 = 38;
 pub(crate) const CMD_SYNC_PAGE: u8 = 39;
 pub(crate) const CMD_CHECK_ROWS_REQUEST: u8 = 40;
+pub(crate) const CMD_SET_ROWS_DELETED: u8 = 48;
 pub(crate) const MAX_CHECK_ROW_IDS: usize = 100;
+pub(crate) const MAX_SET_ROWS_DELETED_WIRE_BYTES: usize = 1000;
 
 #[derive(Debug, Clone)]
 pub struct RepRowUpsert {
@@ -132,6 +134,49 @@ impl RepCheckRowsRequest {
 }
 
 #[derive(Debug, Clone)]
+pub struct RepSetRowsDeleted {
+    pub(crate) header: BaseCommandHeader,
+    pub(crate) deleted: bool,
+    pub(crate) ranges: Vec<(i64, i64)>,
+    pub(crate) singles: Vec<i64>,
+}
+
+impl RepSetRowsDeleted {
+    pub(crate) fn read(r: &mut &[u8]) -> Option<Self> {
+        let header = BaseCommandHeader::read(r)?;
+        let mut pos = 0usize;
+        let deleted = read_u8(r, &mut pos)? != 0;
+        let range_count = usize::from(read_u16(r, &mut pos)?);
+        let range_bytes = range_count.checked_mul(2 * std::mem::size_of::<i64>())?;
+        if range_bytes > r.len().saturating_sub(pos) {
+            return None;
+        }
+        let mut ranges = Vec::new();
+        ranges.try_reserve_exact(range_count).ok()?;
+        for _ in 0..range_count {
+            ranges.push((read_i64(r, &mut pos)?, read_i64(r, &mut pos)?));
+        }
+        let single_count = usize::from(read_u16(r, &mut pos)?);
+        let single_bytes = single_count.checked_mul(std::mem::size_of::<i64>())?;
+        if single_bytes > r.len().saturating_sub(pos) {
+            return None;
+        }
+        let mut singles = Vec::new();
+        singles.try_reserve_exact(single_count).ok()?;
+        for _ in 0..single_count {
+            singles.push(read_i64(r, &mut pos)?);
+        }
+        *r = &r[pos..];
+        Some(Self {
+            header,
+            deleted,
+            ranges,
+            singles,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct RepSchema {
     pub(crate) header: BaseCommandHeader,
     pub(crate) data: Vec<u8>,
@@ -168,6 +213,30 @@ pub(crate) fn build_check_rows_request(uid: u64, rec_ids: &[i64]) -> Vec<u8> {
     write_base_command_header(&mut out, CMD_CHECK_ROWS_REQUEST, uid);
     out.extend_from_slice(&(count as u16).to_le_bytes());
     for rec_id in &rec_ids[start..] {
+        out.extend_from_slice(&rec_id.to_le_bytes());
+    }
+    out
+}
+
+pub(crate) fn build_set_rows_deleted(
+    uid: u64,
+    change: &crate::state::ReportRowsDeleted,
+) -> Vec<u8> {
+    debug_assert!(change.ranges.len() <= u16::MAX as usize);
+    debug_assert!(change.singles.len() <= u16::MAX as usize);
+    let mut out = Vec::with_capacity(
+        16 + change.ranges.len() * 2 * std::mem::size_of::<i64>()
+            + change.singles.len() * std::mem::size_of::<i64>(),
+    );
+    write_base_command_header(&mut out, CMD_SET_ROWS_DELETED, uid);
+    out.push(u8::from(change.deleted));
+    out.extend_from_slice(&(change.ranges.len() as u16).to_le_bytes());
+    for range in change.ranges.iter() {
+        out.extend_from_slice(&range.from_rec_id.to_le_bytes());
+        out.extend_from_slice(&range.to_rec_id.to_le_bytes());
+    }
+    out.extend_from_slice(&(change.singles.len() as u16).to_le_bytes());
+    for rec_id in change.singles.iter() {
         out.extend_from_slice(&rec_id.to_le_bytes());
     }
     out
@@ -226,6 +295,22 @@ mod tests {
             expected.extend_from_slice(&rec_id.to_le_bytes());
         }
         assert_eq!(check, expected);
+
+        let change = crate::state::ReportRowsDeleted::new(
+            true,
+            [crate::state::ReportRecIdRange::new(10, 20)],
+            [30, 40],
+        );
+        let set_deleted = build_set_rows_deleted(0x4142_4344_4546_4748, &change);
+        let mut expected = header(CMD_SET_ROWS_DELETED, 0x4142_4344_4546_4748);
+        expected.push(1);
+        expected.extend_from_slice(&1u16.to_le_bytes());
+        expected.extend_from_slice(&10i64.to_le_bytes());
+        expected.extend_from_slice(&20i64.to_le_bytes());
+        expected.extend_from_slice(&2u16.to_le_bytes());
+        expected.extend_from_slice(&30i64.to_le_bytes());
+        expected.extend_from_slice(&40i64.to_le_bytes());
+        assert_eq!(set_deleted, expected);
     }
 
     #[test]
@@ -281,6 +366,20 @@ mod tests {
         assert_eq!(check.rec_ids, [7, 8, 9]);
         assert!(input.is_empty());
 
+        let change = crate::state::ReportRowsDeleted::new(
+            false,
+            [crate::state::ReportRecIdRange::new(90, 80)],
+            [70],
+        );
+        let set_deleted_raw = build_set_rows_deleted(uid, &change);
+        let mut input = set_deleted_raw.as_slice();
+        let set_deleted = RepSetRowsDeleted::read(&mut input).unwrap();
+        assert_eq!(set_deleted.header.uid, uid);
+        assert!(!set_deleted.deleted);
+        assert_eq!(set_deleted.ranges, [(90, 80)]);
+        assert_eq!(set_deleted.singles, [70]);
+        assert!(input.is_empty());
+
         let schema_request_raw = build_schema_request(uid);
         let mut input = schema_request_raw.as_slice();
         let schema_request = BaseCommandHeader::read(&mut input).unwrap();
@@ -322,5 +421,24 @@ mod tests {
         assert_eq!(page.last_rec_id, 998);
         assert_eq!(page.max_rec_id, 999);
         assert_eq!(page.row_count, 0);
+    }
+
+    #[test]
+    fn set_rows_deleted_rejects_truncated_ranges_or_singles() {
+        let uid = 7;
+        let mut truncated_range = header(CMD_SET_ROWS_DELETED, uid);
+        truncated_range.push(1);
+        truncated_range.extend_from_slice(&1u16.to_le_bytes());
+        truncated_range.extend_from_slice(&10i64.to_le_bytes());
+        let mut input = truncated_range.as_slice();
+        assert!(RepSetRowsDeleted::read(&mut input).is_none());
+
+        let mut truncated_single = header(CMD_SET_ROWS_DELETED, uid);
+        truncated_single.push(0);
+        truncated_single.extend_from_slice(&0u16.to_le_bytes());
+        truncated_single.extend_from_slice(&1u16.to_le_bytes());
+        truncated_single.extend_from_slice(&[1, 2, 3]);
+        let mut input = truncated_single.as_slice();
+        assert!(RepSetRowsDeleted::read(&mut input).is_none());
     }
 }

@@ -50,6 +50,9 @@ match event {
     moonproto::Event::Report(moonproto::ReportEvent::RowDelete { rec_id }) => {
         delete_local_row(rec_id)?;
     }
+    moonproto::Event::Report(moonproto::ReportEvent::RowsDeleted(change)) => {
+        set_local_deleted_flag(&change)?;
+    }
     moonproto::Event::Report(moonproto::ReportEvent::SyncComplete(done)) => {
         persist_cursor(done.next_from_rec_id)?;
     }
@@ -91,6 +94,44 @@ Missing page responses are retried automatically. A retry repeats only the
 current page, not the complete history, and keeps that page request's wire UID.
 Therefore a delayed response to an earlier transmission of the same page remains
 valid instead of being invalidated by the retry itself.
+
+## Soft-Delete And Restore
+
+Report rows are hidden by setting their `deleted` column; this does not
+physically remove them. Address rows by inclusive `newRecID` ranges and/or
+individual IDs:
+
+```rust
+use moonproto::ReportRecIdRange;
+
+let batches = client.reports().delete_rows(
+    &[ReportRecIdRange::new(first_rec_id, last_rec_id)],
+    &selected_rec_ids,
+)?;
+```
+
+`restore_rows` performs the same operation with `deleted=0`. Active Lib splits
+large selections into High-priority commands near 1 KiB and returns the number
+of non-empty batches. An empty selection returns zero and sends nothing.
+Reversed ranges are preserved and select no rows, matching the core's SQL
+`BETWEEN` semantics.
+
+After committing a batch to its report database, the core broadcasts
+`ReportEvent::RowsDeleted` to every report subscriber, including the sender.
+Apply that event as the equivalent local SQLite `UPDATE`; rows absent from the
+local replica are a no-op. One echo is expected per batch and may lag by about
+three seconds plus transport time. If an echo does not arrive, the same
+idempotent operation can be sent again. An older core without this operation
+does not echo it.
+
+Feed all `ReportEvent` values through one serialized database writer in delivery
+order. During catch-up, Active Lib also overlays committed soft-delete echoes on
+older rows from later sync pages. Rows already delivered to the application are
+kept correct by applying the event before subsequent queued report work.
+
+The application can hide `deleted=1` rows by default and offer an explicit
+"show deleted" view. Physical retention deletes remain `RowDelete` events and
+cannot be requested through this API.
 
 ## Open Rows After Reconnect
 

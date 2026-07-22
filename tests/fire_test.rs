@@ -130,6 +130,7 @@ const FIRETEST_COIN_CARD_KIND: DeepHistoryKind = DeepHistoryKind::Hour4;
 const FIRETEST_MIN_COIN_CARD_CANDLES: usize = 24;
 const FIRETEST_RETAINED_CANDLE_MAX_AGE_SECS: f64 = 11.0 * 60.0;
 const FIRETEST_REPORT_SYNC_TIMEOUT: Duration = Duration::from_secs(180);
+const FIRETEST_REPORT_MUTATION_TIMEOUT: Duration = Duration::from_secs(30);
 const FIRETEST_REPORT_TABLE: &str = "Orders";
 const FIRETEST_REPORT_PARTIAL_FIELDS: usize = 4;
 
@@ -761,6 +762,55 @@ struct Session {
     stats: Arc<Mutex<SessionStats>>,
     parse_failure_correlations_logged: usize,
     report_events: Vec<ReportEvent>,
+    order_state_events: Option<Vec<FireTestOrderStateEvent>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FireTestOrderStateEventKind {
+    Created,
+    Updated,
+    Removed,
+}
+
+#[derive(Clone, Debug)]
+struct FireTestOrderStateEvent {
+    kind: FireTestOrderStateEventKind,
+    uid: u64,
+    status: OrderWorkerStatus,
+    buy_actual_price: f64,
+    buy_mean_price: f64,
+    sell_actual_price: f64,
+    sell_mean_price: f64,
+    pending_buy_cond_price: Option<f64>,
+    bulk_replace_buy: bool,
+    bulk_replace_sell: bool,
+    panic_sell: bool,
+    job_is_done: bool,
+}
+
+impl FireTestOrderStateEvent {
+    fn from_event(event: &OrderEvent) -> Option<Self> {
+        let (kind, order) = match event {
+            OrderEvent::Created(order) => (FireTestOrderStateEventKind::Created, order.as_ref()),
+            OrderEvent::Updated(order) => (FireTestOrderStateEventKind::Updated, order.as_ref()),
+            OrderEvent::Removed(order) => (FireTestOrderStateEventKind::Removed, order.as_ref()),
+            _ => return None,
+        };
+        Some(Self {
+            kind,
+            uid: order.uid,
+            status: order.status,
+            buy_actual_price: order.buy_order.actual_price,
+            buy_mean_price: order.buy_order.mean_price,
+            sell_actual_price: order.sell_order.actual_price,
+            sell_mean_price: order.sell_order.mean_price,
+            pending_buy_cond_price: order.pending_buy_cond_price,
+            bulk_replace_buy: order.bulk_replace_buy,
+            bulk_replace_sell: order.bulk_replace_sell,
+            panic_sell: order.panic_sell,
+            job_is_done: order.job_is_done,
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -831,6 +881,7 @@ impl Session {
             stats,
             parse_failure_correlations_logged: 0,
             report_events: Vec::new(),
+            order_state_events: None,
         };
         assert!(
             pump_session_until(&mut session, cfg.connect_timeout, "connect ready", |s| {
@@ -871,12 +922,36 @@ impl Session {
             if let Event::Report(report) = &event {
                 self.report_events.push(report.clone());
             }
+            if let Event::Order(order) = &event {
+                if let (Some(captured), Some(state)) = (
+                    self.order_state_events.as_mut(),
+                    FireTestOrderStateEvent::from_event(order),
+                ) {
+                    captured.push(state);
+                }
+            }
             record_event(&self.stats, &event, snapshot.as_deref(), None);
         }
     }
 
     fn take_report_events(&mut self) -> Vec<ReportEvent> {
         std::mem::take(&mut self.report_events)
+    }
+
+    fn begin_order_state_capture(&mut self) {
+        self.order_state_events = Some(Vec::new());
+    }
+
+    fn end_order_state_capture(&mut self) {
+        self.order_state_events = None;
+    }
+
+    fn order_state_event_count(&self) -> usize {
+        self.order_state_events.as_ref().map_or(0, Vec::len)
+    }
+
+    fn captured_order_states(&self) -> &[FireTestOrderStateEvent] {
+        self.order_state_events.as_deref().unwrap_or_default()
     }
 
     fn record_lifecycle_event(&self, event: LifecycleEvent) {
@@ -3048,6 +3123,12 @@ fn record_event(
                 ReportEvent::RowDelete { rec_id } => {
                     format!("Report RowDelete rec_id={rec_id}")
                 }
+                ReportEvent::RowsDeleted(change) => format!(
+                    "Report RowsDeleted deleted={} ranges={} singles={}",
+                    change.deleted,
+                    change.ranges.len(),
+                    change.singles.len()
+                ),
                 ReportEvent::SyncStarted { ticket, request } => format!(
                     "Report SyncStarted sync_id={} from={} depth={}",
                     ticket.sync_id, request.from_rec_id, request.history_depth
@@ -6012,6 +6093,43 @@ fn apply_report_event_to_db(
                     panic!("FireTest report DB: delete rec_id={rec_id} failed: {err}")
                 });
         }
+        ReportEvent::RowsDeleted(change) => {
+            let deleted = if change.deleted { 1i64 } else { 0i64 };
+            let table = quote_sqlite_identifier(FIRETEST_REPORT_TABLE);
+            let rec_id = quote_sqlite_identifier("newRecID");
+            for range in change.ranges.iter() {
+                connection
+                    .execute(
+                        &format!(
+                            "UPDATE {table} SET {}=? WHERE {rec_id} BETWEEN ? AND ?",
+                            quote_sqlite_identifier("deleted")
+                        ),
+                        rusqlite::params![deleted, range.from_rec_id, range.to_rec_id],
+                    )
+                    .unwrap_or_else(|err| {
+                        panic!(
+                            "FireTest report DB: set deleted={} range={}..{} failed: {err}",
+                            change.deleted, range.from_rec_id, range.to_rec_id
+                        )
+                    });
+            }
+            for selected_rec_id in change.singles.iter() {
+                connection
+                    .execute(
+                        &format!(
+                            "UPDATE {table} SET {}=? WHERE {rec_id}=?",
+                            quote_sqlite_identifier("deleted")
+                        ),
+                        rusqlite::params![deleted, selected_rec_id],
+                    )
+                    .unwrap_or_else(|err| {
+                        panic!(
+                            "FireTest report DB: set deleted={} rec_id={} failed: {err}",
+                            change.deleted, selected_rec_id
+                        )
+                    });
+            }
+        }
         ReportEvent::SyncPage(page) => {
             assert!(
                 !page.database_recreated,
@@ -6037,7 +6155,7 @@ fn run_report_database_gate(cfg: &FireConfig, keys: ImportedKeys, pump_peer: &mu
     let seeded_strategy = firetest_strategy(cfg);
     let mut report_a = Session::connect("ReportDB-A", cfg, keys, Some(seeded_strategy.clone()));
     let schema = wait_report_schema(&mut report_a, cfg.connect_timeout);
-    for required in ["newRecID", "TaskID", "Status", "Emulator"] {
+    for required in ["newRecID", "TaskID", "Status", "Emulator", "deleted"] {
         assert!(
             schema.field_by_name(required).is_some(),
             "report schema must contain {required} for FireTest DB verification"
@@ -6059,6 +6177,8 @@ fn run_report_database_gate(cfg: &FireConfig, keys: ImportedKeys, pump_peer: &mu
     let order_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         run_order_lifecycle_gate_body(cfg, &mut report_a, pump_peer)
     }));
+    report_a.end_order_state_capture();
+    pump_peer.end_order_state_capture();
     restore_server_emulator_mode(cfg, &mut report_a, pump_peer, restore_emu_mode);
     let order_probe = match order_result {
         Ok(probe) => probe,
@@ -6230,6 +6350,99 @@ fn run_report_database_gate(cfg: &FireConfig, keys: ImportedKeys, pump_peer: &mu
         offline_from_rec_id,
         db_path.display()
     );
+
+    report_a.take_report_events();
+    report_b.take_report_events();
+    let delete_batches = report_a
+        .client
+        .reports()
+        .delete_rows(&[], &[closed_row.rec_id])
+        .expect("MoonReports::delete_rows must queue");
+    assert_eq!(delete_batches, 1);
+    let (delete_a, delete_b) = wait_report_rows_deleted_echo(
+        &mut report_a,
+        &mut report_b,
+        &connection,
+        &b_schema,
+        closed_row.rec_id,
+        true,
+        FIRETEST_REPORT_MUTATION_TIMEOUT,
+    );
+
+    let restore_batches = report_a
+        .client
+        .reports()
+        .restore_rows(&[], &[closed_row.rec_id])
+        .expect("MoonReports::restore_rows must queue");
+    assert_eq!(restore_batches, 1);
+    let (restore_a, restore_b) = wait_report_rows_deleted_echo(
+        &mut report_a,
+        &mut report_b,
+        &connection,
+        &b_schema,
+        closed_row.rec_id,
+        false,
+        FIRETEST_REPORT_MUTATION_TIMEOUT,
+    );
+
+    assert!(
+        delete_a && delete_b && restore_a && restore_b,
+        "report soft-delete/restore echo missing: delete[A={delete_a} B={delete_b}] restore[A={restore_a} B={restore_b}]"
+    );
+    let restored: i64 = connection
+        .query_row(
+            &format!(
+                "SELECT {} FROM {} WHERE {}=?",
+                quote_sqlite_identifier("deleted"),
+                quote_sqlite_identifier(FIRETEST_REPORT_TABLE),
+                quote_sqlite_identifier("newRecID")
+            ),
+            [closed_row.rec_id],
+            |row| row.get(0),
+        )
+        .expect("FireTest report DB must retain the restored row");
+    assert_eq!(restored, 0);
+    println!(
+        "OK: report soft-delete + restore committed and echoed to both subscribers for rec_id={}",
+        closed_row.rec_id
+    );
+}
+
+fn wait_report_rows_deleted_echo(
+    report_a: &mut Session,
+    report_b: &mut Session,
+    connection: &rusqlite::Connection,
+    schema: &ReportSchema,
+    rec_id: i64,
+    deleted: bool,
+    timeout: Duration,
+) -> (bool, bool) {
+    let started = Instant::now();
+    let mut seen_a = false;
+    let mut seen_b = false;
+    while started.elapsed() < timeout {
+        report_a.pump(PUMP_SLICE);
+        report_b.pump(PUMP_SLICE);
+        for event in report_a.take_report_events() {
+            if let ReportEvent::RowsDeleted(change) = event {
+                if change.deleted == deleted && change.affects(rec_id) {
+                    seen_a = true;
+                }
+            }
+        }
+        for event in report_b.take_report_events() {
+            apply_report_event_to_db(connection, schema, &event);
+            if let ReportEvent::RowsDeleted(change) = event {
+                if change.deleted == deleted && change.affects(rec_id) {
+                    seen_b = true;
+                }
+            }
+        }
+        if seen_a && seen_b {
+            break;
+        }
+    }
+    (seen_a, seen_b)
 }
 
 fn run_order_lifecycle_gate(cfg: &FireConfig, a: &mut Session, b: &mut Session) {
@@ -6237,6 +6450,8 @@ fn run_order_lifecycle_gate(cfg: &FireConfig, a: &mut Session, b: &mut Session) 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _ = run_order_lifecycle_gate_body(cfg, a, b);
     }));
+    a.end_order_state_capture();
+    b.end_order_state_capture();
     restore_server_emulator_mode(cfg, a, b, restore_emu_mode);
     if let Err(payload) = result {
         std::panic::resume_unwind(payload);
@@ -6248,6 +6463,8 @@ fn run_real_order_cancel_gate(cfg: &FireConfig, a: &mut Session, b: &mut Session
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         run_real_order_cancel_gate_body(a, b);
     }));
+    a.end_order_state_capture();
+    b.end_order_state_capture();
     restore_server_emulator_mode(cfg, a, b, restore_emu_mode);
     if let Err(payload) = result {
         std::panic::resume_unwind(payload);
@@ -6255,6 +6472,8 @@ fn run_real_order_cancel_gate(cfg: &FireConfig, a: &mut Session, b: &mut Session
 }
 
 fn run_real_order_cancel_gate_body(a: &mut Session, b: &mut Session) {
+    a.begin_order_state_capture();
+    b.begin_order_state_capture();
     let market = FIRETEST_REAL_BALANCE_ORDER_MARKET;
     assert_balance_stream_seen(a);
     assert_balance_stream_seen(b);
@@ -6295,6 +6514,7 @@ fn run_real_order_cancel_gate_body(a: &mut Session, b: &mut Session) {
 
     let start = Instant::now();
     let mut server_uid = None;
+    let mut cancel_event_from = None;
     let mut logged_waiting_for_local_order = false;
     while start.elapsed() < FIRETEST_REAL_BALANCE_ORDER_TIMEOUT {
         a.pump(PUMP_SLICE);
@@ -6343,6 +6563,7 @@ fn run_real_order_cancel_gate_body(a: &mut Session, b: &mut Session) {
                 a.cancel_order(uid),
                 "cancel_order did not pass Delphi local gate for uid={uid} status={local_status:?}"
             );
+            cancel_event_from = Some((a.order_state_event_count(), b.order_state_event_count()));
             println!(
                 "FIRETEST real order cancel: server uid={} arrived after {:.2}s; cancel queued immediately",
                 uid,
@@ -6359,6 +6580,8 @@ fn run_real_order_cancel_gate_body(a: &mut Session, b: &mut Session) {
             FIRETEST_REAL_BALANCE_ORDER_TIMEOUT
         );
     };
+    let (a_cancel_event_from, b_cancel_event_from) =
+        cancel_event_from.expect("cancel event baseline must be captured with server uid");
 
     let cancel_start = Instant::now();
     let removed = loop {
@@ -6367,10 +6590,20 @@ fn run_real_order_cancel_gate_body(a: &mut Session, b: &mut Session) {
         }
         a.pump(PUMP_SLICE);
         b.pump(PUMP_SLICE);
-        if !order_is_present(a, server_uid) {
+        let terminal_a = captured_order_state_since(a, a_cancel_event_from, server_uid, |event| {
+            event.status == OrderWorkerStatus::BuyCancel && event.job_is_done
+        });
+        let terminal_b = captured_order_state_since(b, b_cancel_event_from, server_uid, |event| {
+            event.status == OrderWorkerStatus::BuyCancel && event.job_is_done
+        });
+        if !order_is_present(a, server_uid)
+            && !order_is_present(b, server_uid)
+            && terminal_a
+            && terminal_b
+        {
             let current = active_balance_probe(a, market);
             println!(
-                "FIRETEST real order cancel: order removed after cancel in {:.2}s uid={} current_balance=[{}]",
+                "FIRETEST real order cancel: terminal BuyCancel broadcast and order removed from both clients after {:.2}s uid={} current_balance=[{}]",
                 cancel_start.elapsed().as_secs_f64(),
                 server_uid,
                 current.summary()
@@ -6388,8 +6621,10 @@ fn run_real_order_cancel_gate_body(a: &mut Session, b: &mut Session) {
     };
     assert!(
         removed,
-        "FireTest real order cancel: {market} order uid={server_uid} was not removed within {:?} after cancel",
-        FIRETEST_REAL_BALANCE_ORDER_TIMEOUT
+        "FireTest real order cancel: {market} order uid={server_uid} did not broadcast terminal BuyCancel and disappear from both clients within {:?}; A.events=[{}] B.events=[{}]",
+        FIRETEST_REAL_BALANCE_ORDER_TIMEOUT,
+        describe_captured_order_states(a, server_uid),
+        describe_captured_order_states(b, server_uid)
     );
     assert_balance_stream_seen(a);
     assert_balance_stream_seen(b);
@@ -6867,9 +7102,8 @@ fn disable_firetest_moonshot_strategy(
     );
 }
 
-fn price_matches(a: f64, b: f64) -> bool {
-    let tolerance = (b.abs() * 1e-9).max(EPS);
-    (a - b).abs() <= tolerance
+fn price_is_close_enough(actual: f64, requested: f64) -> bool {
+    actual > 0.0 && (actual - requested).abs() <= (requested.abs() * 0.001).max(EPS)
 }
 
 fn format_order_for_debug(order: &Order) -> String {
@@ -6918,81 +7152,49 @@ fn describe_new_market_orders(session: &Session, before_uids: &[u64], market: &s
     }
 }
 
-fn replace_local_effect_seen(
-    order: &Order,
-    status_before: OrderWorkerStatus,
-    new_price: f64,
-) -> bool {
-    match status_before {
-        OrderWorkerStatus::None => {
-            order
-                .pending_buy_cond_price
-                .map(|price| price_matches(price, new_price))
-                .unwrap_or(false)
-                || matches!(
-                    order.status,
-                    OrderWorkerStatus::BuySet
-                        | OrderWorkerStatus::SellSet
-                        | OrderWorkerStatus::SellDone
-                )
-        }
-        OrderWorkerStatus::BuySet => {
-            price_matches(order.buy_price, new_price)
-                || order.bulk_replace_buy
-                || matches!(
-                    order.status,
-                    OrderWorkerStatus::SellSet | OrderWorkerStatus::SellDone
-                )
-        }
-        OrderWorkerStatus::SellSet => {
-            price_matches(order.sell_price, new_price)
-                || order.bulk_replace_sell
-                || order.status == OrderWorkerStatus::SellDone
-        }
-        _ => false,
-    }
+fn captured_order_state_since<F>(session: &Session, from: usize, uid: u64, mut predicate: F) -> bool
+where
+    F: FnMut(&FireTestOrderStateEvent) -> bool,
+{
+    session
+        .captured_order_states()
+        .get(from..)
+        .unwrap_or_default()
+        .iter()
+        .any(|event| event.uid == uid && predicate(event))
 }
 
-fn wait_order_replace_local_effect(
-    a: &mut Session,
-    b: &mut Session,
-    uid: u64,
-    status_before: OrderWorkerStatus,
-    new_price: f64,
-    timeout: Duration,
-) -> Result<(), String> {
-    let start = Instant::now();
-    while start.elapsed() < timeout {
-        a.pump(PUMP_SLICE);
-        b.pump(PUMP_SLICE);
-
-        let stats = a.snapshot();
-        if let Some(reason) = stats.order_ignored_by_uid.get(&uid).copied() {
-            return Err(format!(
-                "runtime owner ignored replace uid={uid} reason={reason:?} order=[{}]",
-                describe_session_order(a, uid)
-            ));
-        }
-
-        let snapshot = a.state_snapshot();
-        if let Some(order) = snapshot.orders().get(uid) {
-            if replace_local_effect_seen(order, status_before, new_price) {
-                println!(
-                    "OK: order replace local effect after {:.2}s: before={status_before:?} {}",
-                    start.elapsed().as_secs_f64(),
-                    format_order_for_debug(order)
-                );
-                return Ok(());
-            }
-        }
+fn describe_captured_order_states(session: &Session, uid: u64) -> String {
+    let rows = session
+        .captured_order_states()
+        .iter()
+        .filter(|event| event.uid == uid)
+        .rev()
+        .take(16)
+        .collect::<Vec<_>>();
+    if rows.is_empty() {
+        return "<none>".to_owned();
     }
-
-    Err(format!(
-        "timeout waiting local replace effect uid={uid} before={status_before:?} new_price={new_price:.8} order=[{}] stats=[{}] metrics=[{}]",
-        describe_session_order(a, uid),
-        a.snapshot().summary(),
-        a.protocol_summary()
-    ))
+    rows.into_iter()
+        .rev()
+        .map(|event| {
+            format!(
+                "{:?}/{:?} buy={:.8}/{:.8} sell={:.8}/{:.8} pending={:?} replacing={}/{} panic={} done={}",
+                event.kind,
+                event.status,
+                event.buy_actual_price,
+                event.buy_mean_price,
+                event.sell_actual_price,
+                event.sell_mean_price,
+                event.pending_buy_cond_price,
+                event.bulk_replace_buy,
+                event.bulk_replace_sell,
+                event.panic_sell,
+                event.job_is_done
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
 }
 
 fn run_order_lifecycle_gate_body(
@@ -7000,6 +7202,8 @@ fn run_order_lifecycle_gate_body(
     a: &mut Session,
     b: &mut Session,
 ) -> FireTestClosedOrderProbe {
+    a.begin_order_state_capture();
+    b.begin_order_state_capture();
     let before_uids = a
         .state_snapshot()
         .orders()
@@ -7065,30 +7269,41 @@ fn run_order_lifecycle_gate_body(
     let server_uid = candidates[0];
 
     assert!(
-        pump_pair_until(a, b, cfg.wait, "order waiting buy status", |a, _| {
-            matches!(
-                a.order_status_by_uid.get(&server_uid).copied(),
-                Some(OrderWorkerStatus::None | OrderWorkerStatus::BuySet)
-            )
-        }),
-        "new order uid={} did not stay in waiting buy status; correlation=canonical-state current_status={:?} selected=[{}] new_market_orders=[{}]",
+        pump_pair_until_sessions(
+            a,
+            b,
+            cfg.connect_timeout,
+            "order creation broadcast and BuySet",
+            |a, b| {
+                let created_a = captured_order_state_since(a, 0, server_uid, |event| {
+                    event.kind == FireTestOrderStateEventKind::Created
+                });
+                let created_b = captured_order_state_since(b, 0, server_uid, |event| {
+                    event.kind == FireTestOrderStateEventKind::Created
+                });
+                let buy_set = |session: &Session| {
+                    session
+                        .state_snapshot()
+                        .orders()
+                        .get(server_uid)
+                        .is_some_and(|order| order.status == OrderWorkerStatus::BuySet)
+                };
+                created_a && created_b && buy_set(a) && buy_set(b)
+            }
+        ),
+        "new order uid={} was not created and broadcast as BuySet to both clients; A.events=[{}] B.events=[{}] selected=[{}] new_market_orders=[{}]",
         server_uid,
-        a.snapshot().order_status_by_uid.get(&server_uid).copied(),
+        describe_captured_order_states(a, server_uid),
+        describe_captured_order_states(b, server_uid),
         describe_session_order(a, server_uid),
         describe_new_market_orders(a, &before_uids, &cfg.market)
     );
 
-    let status_before_replace = a
+    let pre_replace = a
         .state_snapshot()
         .orders()
         .get(server_uid)
-        .map(|order| {
-            println!(
-                "FIRETEST order flow: pre-replace {}",
-                format_order_for_debug(order)
-            );
-            order.status
-        })
+        .cloned()
         .unwrap_or_else(|| {
             panic!(
                 "new order uid={} disappeared before replace; stats=[{}]",
@@ -7096,32 +7311,83 @@ fn run_order_lifecycle_gate_body(
                 a.snapshot().summary()
             )
         });
+    println!(
+        "FIRETEST order flow: pre-replace {}",
+        format_order_for_debug(&pre_replace)
+    );
+    let a_replace_event_from = a.order_state_event_count();
+    let b_replace_event_from = b.order_state_event_count();
     assert!(
         a.replace_order(server_uid, fill_price),
         "replace_order intent was not queued into runtime for uid={server_uid}"
     );
-    wait_order_replace_local_effect(
-        a,
-        b,
-        server_uid,
-        status_before_replace,
-        fill_price,
-        cfg.wait,
-    )
-    .unwrap_or_else(|err| panic!("FireTest order replace local gate failed: {err}"));
     assert!(
-        pump_pair_until(
+        pump_pair_until_sessions(
             a,
             b,
             cfg.connect_timeout,
-            "order moved to SellSet",
-            |a, _| {
-                a.order_status_by_uid.get(&server_uid).copied() == Some(OrderWorkerStatus::SellSet)
+            "buy replace state broadcast",
+            |a, b| {
+                let authoritative_update = |session: &Session, from: usize| {
+                    captured_order_state_since(session, from, server_uid, |event| {
+                        event.kind == FireTestOrderStateEventKind::Updated
+                            && (event.bulk_replace_buy
+                                || (event.status == OrderWorkerStatus::BuyDone
+                                    && event.buy_mean_price > initial_price * 1.005))
+                    })
+                };
+                authoritative_update(a, a_replace_event_from)
+                    && authoritative_update(b, b_replace_event_from)
             }
         ),
-        "order uid={} did not reach SellSet after replace; order=[{}]",
+        "buy replace uid={} produced no server OrderEvent::Updated on both clients; A.events=[{}] B.events=[{}]",
         server_uid,
-        describe_session_order(a, server_uid)
+        describe_captured_order_states(a, server_uid),
+        describe_captured_order_states(b, server_uid)
+    );
+    assert!(
+        pump_pair_until_sessions(
+            a,
+            b,
+            cfg.connect_timeout,
+            "stable BuyDone state broadcast",
+            |a, b| {
+                let saw_buy_done = |session: &Session, from: usize| {
+                    captured_order_state_since(session, from, server_uid, |event| {
+                        event.status == OrderWorkerStatus::BuyDone
+                            && event.buy_mean_price > initial_price * 1.005
+                    })
+                };
+                saw_buy_done(a, a_replace_event_from)
+                    && saw_buy_done(b, b_replace_event_from)
+            }
+        ),
+        "order uid={} did not expose the stable BuyDone IMAGE to both clients; A.events=[{}] B.events=[{}]",
+        server_uid,
+        describe_captured_order_states(a, server_uid),
+        describe_captured_order_states(b, server_uid)
+    );
+    assert!(
+        pump_pair_until_sessions(
+            a,
+            b,
+            cfg.connect_timeout,
+            "order moved to SellSet on both clients",
+            |a, b| {
+                let sell_set = |session: &Session| {
+                    session
+                        .state_snapshot()
+                        .orders()
+                        .get(server_uid)
+                        .is_some_and(|order| order.status == OrderWorkerStatus::SellSet)
+                };
+                sell_set(a) && sell_set(b)
+            }
+        ),
+        "order uid={} did not reach SellSet on both clients after buy replace; A=[{}] B=[{}]",
+        server_uid,
+        describe_session_order(a, server_uid),
+        describe_session_order(b, server_uid)
     );
 
     let filled_order = a
@@ -7141,22 +7407,91 @@ fn run_order_lifecycle_gate_body(
         "filled order probe must contain canonical buy price and quantity: {closed_probe:?}"
     );
 
+    let sell_price_before = filled_order.sell_order.actual_price;
+    let moved_sell_price = sell_price_before.max(ask) * 1.05;
+    let a_sell_event_from = a.order_state_event_count();
+    let b_sell_event_from = b.order_state_event_count();
+    assert!(
+        a.replace_order(server_uid, moved_sell_price),
+        "sell replace intent was not queued into runtime for uid={server_uid}"
+    );
+    assert!(
+        pump_pair_until_sessions(
+            a,
+            b,
+            cfg.connect_timeout,
+            "sell replace state broadcast",
+            |a, b| {
+                let moved = |session: &Session, from: usize| {
+                    captured_order_state_since(session, from, server_uid, |event| {
+                        event.kind == FireTestOrderStateEventKind::Updated
+                            && event.status == OrderWorkerStatus::SellSet
+                            && (event.bulk_replace_sell
+                                || price_is_close_enough(
+                                    event.sell_actual_price,
+                                    moved_sell_price,
+                                ))
+                    })
+                };
+                moved(a, a_sell_event_from) && moved(b, b_sell_event_from)
+            }
+        ),
+        "sell replace uid={} produced no authoritative state on both clients; requested={:.8} A.events=[{}] B.events=[{}]",
+        server_uid,
+        moved_sell_price,
+        describe_captured_order_states(a, server_uid),
+        describe_captured_order_states(b, server_uid)
+    );
+    assert!(
+        pump_pair_until_sessions(
+            a,
+            b,
+            cfg.connect_timeout,
+            "sell replace REST result",
+            |a, b| {
+                let actual = |session: &Session| {
+                    session
+                        .state_snapshot()
+                        .orders()
+                        .get(server_uid)
+                        .map(|order| order.sell_order.actual_price)
+                };
+                actual(a).is_some_and(|price| price_is_close_enough(price, moved_sell_price))
+                    && actual(b).is_some_and(|price| price_is_close_enough(price, moved_sell_price))
+            }
+        ),
+        "sell replace uid={} was not materialized on both clients; requested={:.8} A=[{}] B=[{}]",
+        server_uid,
+        moved_sell_price,
+        describe_session_order(a, server_uid),
+        describe_session_order(b, server_uid)
+    );
+
+    let a_terminal_event_from = a.order_state_event_count();
+    let b_terminal_event_from = b.order_state_event_count();
     assert!(
         a.panic_sell_order(server_uid, true),
         "panic sell did not pass Delphi local gate for uid={server_uid}"
     );
     assert!(
-        pump_pair_until(
+        pump_pair_until_sessions(
             a,
             b,
             cfg.connect_timeout,
-            "order closed by panic sell",
-            |a, _| {
-                a.order_status_by_uid.get(&server_uid).copied() == Some(OrderWorkerStatus::SellDone)
+            "terminal SellDone state broadcast",
+            |a, b| {
+                let terminal = |session: &Session, from: usize| {
+                    captured_order_state_since(session, from, server_uid, |event| {
+                        event.status == OrderWorkerStatus::SellDone && event.job_is_done
+                    })
+                };
+                terminal(a, a_terminal_event_from) && terminal(b, b_terminal_event_from)
             }
         ),
-        "order uid={} did not reach SellDone after PanicSell",
-        server_uid
+        "order uid={} did not broadcast terminal SellDone to both clients after PanicSell; A.events=[{}] B.events=[{}]",
+        server_uid,
+        describe_captured_order_states(a, server_uid),
+        describe_captured_order_states(b, server_uid)
     );
 
     let snapshot = a.state_snapshot();

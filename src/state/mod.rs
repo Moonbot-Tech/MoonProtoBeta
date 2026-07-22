@@ -80,9 +80,9 @@ pub use orders::{
 pub(crate) use orders::{OrderRepair, OrderState};
 pub(crate) use report::{ReportControl, ReportPageApplyAction, ReportReplicationState};
 pub use report::{
-    ReportEvent, ReportFieldKind, ReportFieldValue, ReportHistoryDepth, ReportRow, ReportSchema,
-    ReportSchemaField, ReportSyncComplete, ReportSyncPage, ReportSyncRequest, ReportSyncTicket,
-    ReportValue,
+    ReportEvent, ReportFieldKind, ReportFieldValue, ReportHistoryDepth, ReportRecIdRange,
+    ReportRow, ReportRowsDeleted, ReportSchema, ReportSchemaField, ReportSyncComplete,
+    ReportSyncPage, ReportSyncRequest, ReportSyncTicket, ReportValue,
 };
 #[cfg(test)]
 pub(crate) use seq_ring::SeqRingWriter;
