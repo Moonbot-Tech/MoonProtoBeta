@@ -235,9 +235,12 @@ fn restore_candle_subscriptions_are_batched_with_tf_kind() {
     let mut client = Client::new(dummy_cfg());
     mark_post_init(&mut client);
     client.with_subscription_registry_mut(|registry| {
-        registry.candle_subs.insert("BTCUSDT".to_string());
-        registry.candle_subs.insert("ETHUSDT".to_string());
-        registry.candle_tf = Some(DeepHistoryKind::Hour4);
+        registry
+            .candle_subs
+            .insert("BTCUSDT".to_string(), DeepHistoryKind::Hour4);
+        registry
+            .candle_subs
+            .insert("ETHUSDT".to_string(), DeepHistoryKind::Hour4);
     });
     client.server_token = 1;
     client.restore_registry_subscriptions();
@@ -251,6 +254,45 @@ fn restore_candle_subscriptions_are_batched_with_tf_kind() {
     assert_eq!(
         engine_request_tf_param(&sent[0]),
         Some(DeepHistoryKind::Hour4.to_byte())
+    );
+}
+
+#[test]
+fn restore_candle_subscriptions_groups_each_market_by_its_own_timeframe() {
+    let mut client = Client::new(dummy_cfg());
+    mark_post_init(&mut client);
+    client.with_subscription_registry_mut(|registry| {
+        registry
+            .candle_subs
+            .insert("BTCUSDT".to_string(), DeepHistoryKind::Hour1);
+        registry
+            .candle_subs
+            .insert("ETHUSDT".to_string(), DeepHistoryKind::Hour4);
+        registry
+            .candle_subs
+            .insert("SOLUSDT".to_string(), DeepHistoryKind::Hour1);
+    });
+    client.server_token = 1;
+    client.restore_registry_subscriptions();
+    let sent = drain_api_requests(&client);
+    assert_eq!(sent.len(), 2);
+
+    let mut groups = sent
+        .iter()
+        .map(|payload| {
+            (
+                engine_request_tf_param(payload).expect("TF byte"),
+                market_names_count(payload).expect("market count"),
+            )
+        })
+        .collect::<Vec<_>>();
+    groups.sort_unstable();
+    assert_eq!(
+        groups,
+        vec![
+            (DeepHistoryKind::Hour1.to_byte(), 2),
+            (DeepHistoryKind::Hour4.to_byte(), 1),
+        ]
     );
 }
 

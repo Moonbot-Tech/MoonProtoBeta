@@ -1347,6 +1347,127 @@ fn successful_subscribe_all_trades_response_refreshes_reconnect_gate() {
 }
 
 #[test]
+fn candle_reconnect_replays_per_market_timeframes_and_waits_for_responses() {
+    let mut client = dummy_client();
+    client.set_domain_ready(true);
+    client.server_token = 0x2222;
+    client.with_subscription_registry_mut(|registry| {
+        registry
+            .candle_subs
+            .insert("BTCUSDT".to_string(), crate::DeepHistoryKind::Hour1);
+        registry
+            .candle_subs
+            .insert("ETHUSDT".to_string(), crate::DeepHistoryKind::Hour4);
+    });
+
+    client.tick_candle_reconnect_sequence(10_000);
+    let first = drain_send_items(&client);
+    assert_eq!(
+        api_methods(&first),
+        vec![
+            EngineMethod::SubscribeCandles.to_byte(),
+            EngineMethod::SubscribeCandles.to_byte(),
+        ]
+    );
+    assert_eq!(client.reconnect.pending_candle_subscribes.lock().len(), 2);
+
+    client.tick_candle_reconnect_sequence(15_000);
+    assert!(
+        drain_send_items(&client).is_empty(),
+        "the asynchronous port must preserve Delphi SendAndWait and not replay while replies are pending"
+    );
+
+    for item in first {
+        let uid = request_uid(&item.data).expect("candle subscribe request uid");
+        let response = build_engine_response_payload(uid, EngineMethod::SubscribeCandles, &[]);
+        let mut ignored = Vec::new();
+        client.client_new_data_decoded(
+            Command::API.to_byte(),
+            response,
+            false,
+            false,
+            &mut ignored,
+        );
+    }
+    assert_eq!(
+        client.reconnect.subscribed_candle_server_token,
+        client.server_token
+    );
+    assert!(client.reconnect.pending_candle_subscribes.lock().is_empty());
+}
+
+#[test]
+fn candle_reconnect_does_not_confirm_a_partial_timeframe_batch() {
+    let mut client = dummy_client();
+    client.set_domain_ready(true);
+    client.server_token = 0x2222;
+    client.with_subscription_registry_mut(|registry| {
+        registry
+            .candle_subs
+            .insert("BTCUSDT".to_string(), crate::DeepHistoryKind::Hour1);
+        registry
+            .candle_subs
+            .insert("ETHUSDT".to_string(), crate::DeepHistoryKind::Hour4);
+    });
+
+    client.tick_candle_reconnect_sequence(10_000);
+    let first = drain_send_items(&client);
+    let first_uid = request_uid(&first[0].data).expect("first candle subscribe uid");
+    let response = build_engine_response_payload(first_uid, EngineMethod::SubscribeCandles, &[]);
+    let mut ignored = Vec::new();
+    client.client_new_data_decoded(Command::API.to_byte(), response, false, false, &mut ignored);
+
+    assert_eq!(client.reconnect.subscribed_candle_server_token, 0);
+    assert_eq!(client.reconnect.pending_candle_subscribes.lock().len(), 1);
+
+    client.tick_candle_reconnect_sequence(10_000 + crate::api_pending::DEFAULT_PENDING_TIMEOUT_MS);
+    assert_eq!(
+        api_methods(&drain_send_items(&client)),
+        vec![
+            EngineMethod::SubscribeCandles.to_byte(),
+            EngineMethod::SubscribeCandles.to_byte(),
+        ],
+        "a missing timeframe-group response must replay the complete registry"
+    );
+}
+
+#[test]
+fn candle_reconnect_keeps_the_watermark_zero_if_any_group_fails() {
+    let mut client = dummy_client();
+    client.set_domain_ready(true);
+    client.server_token = 0x2222;
+    client.with_subscription_registry_mut(|registry| {
+        registry
+            .candle_subs
+            .insert("BTCUSDT".to_string(), crate::DeepHistoryKind::Hour1);
+        registry
+            .candle_subs
+            .insert("ETHUSDT".to_string(), crate::DeepHistoryKind::Hour4);
+    });
+
+    client.tick_candle_reconnect_sequence(10_000);
+    let requests = drain_send_items(&client);
+    for (index, item) in requests.into_iter().enumerate() {
+        let uid = request_uid(&item.data).expect("candle subscribe uid");
+        let mut response = build_engine_response_payload(uid, EngineMethod::SubscribeCandles, &[]);
+        if index == 0 {
+            response[20] = 0; // EngineResponse.Success
+        }
+        let mut ignored = Vec::new();
+        client.client_new_data_decoded(
+            Command::API.to_byte(),
+            response,
+            false,
+            false,
+            &mut ignored,
+        );
+    }
+
+    assert_eq!(client.reconnect.subscribed_candle_server_token, 0);
+    assert!(client.reconnect.pending_candle_subscribes.lock().is_empty());
+}
+
+#[test]
 // parity: MoonBot MoonProtoEngine.pas:SendAndWait
 fn queued_subscribe_all_trades_request_blocks_pre_response_reconnect() {
     let mut client = dummy_client();

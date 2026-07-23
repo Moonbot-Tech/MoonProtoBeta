@@ -40,21 +40,25 @@ pub(crate) const UK_CHART_TEXT_SNAPSHOT: u8 = 10;
 pub(crate) const UK_CHART_TEXT_STATE: u8 = 11;
 /// `UK_CandleUpdate`: per-client, per-market, per-TF live candle update key.
 pub(crate) const UK_CANDLE_UPDATE: u8 = 12;
+/// `UK_CandleTFState`: latest per-client, per-market candle timeframe state.
+pub(crate) const UK_CANDLE_TF_STATE: u8 = 13;
 
-pub(crate) const UK_ORDER_IMAGE: u8 = 13;
-pub(crate) const UK_ORDER_PATCH: u8 = 15;
-pub(crate) const UK_ORDERS_SNAPSHOT: u8 = 16;
-pub(crate) const UK_ORDERS_CATALOG: u8 = 17;
-pub(crate) const UK_ORDER_REQUEST: u8 = 18;
-pub(crate) const UK_ORDER_NOT_FOUND: u8 = 19;
-pub(crate) const UK_ORDER_CMD_BUY: u8 = 20;
-pub(crate) const UK_ORDER_CMD_SELL: u8 = 21;
-pub(crate) const UK_ORDER_CMD_STOPS: u8 = 22;
-pub(crate) const UK_ORDER_CMD_VSTOP: u8 = 23;
-pub(crate) const UK_ORDER_CMD_PANIC: u8 = 24;
-pub(crate) const UK_ORDER_CMD_IMMUNE: u8 = 25;
+pub(crate) const UK_ORDER_IMAGE: u8 = 14;
+#[cfg(test)]
+pub(crate) const UK_ORDER_IMAGE_TARGETED: u8 = 15;
+pub(crate) const UK_ORDER_PATCH: u8 = 16;
+pub(crate) const UK_ORDERS_SNAPSHOT: u8 = 17;
+pub(crate) const UK_ORDERS_CATALOG: u8 = 18;
+pub(crate) const UK_ORDER_REQUEST: u8 = 19;
+pub(crate) const UK_ORDER_NOT_FOUND: u8 = 20;
+pub(crate) const UK_ORDER_CMD_BUY: u8 = 21;
+pub(crate) const UK_ORDER_CMD_SELL: u8 = 22;
+pub(crate) const UK_ORDER_CMD_STOPS: u8 = 23;
+pub(crate) const UK_ORDER_CMD_VSTOP: u8 = 24;
+pub(crate) const UK_ORDER_CMD_PANIC: u8 = 25;
+pub(crate) const UK_ORDER_CMD_IMMUNE: u8 = 26;
 /// `UK_NewsHistory`: one targeted startup history per client id.
-pub(crate) const UK_NEWS_HISTORY: u8 = 26;
+pub(crate) const UK_NEWS_HISTORY: u8 = 27;
 
 /// Send priority as protocol metadata, independent from the concrete client
 /// queue implementation. Conversion to `SendPriority` happens at the send edge.
@@ -100,6 +104,7 @@ pub(crate) enum UKeyRule {
     StrategyId,
     SendContextClientId,
     CandleUpdate,
+    CandleTimeframeState,
 }
 
 /// Direction is client-side documentation/checking metadata. It does not change
@@ -861,6 +866,17 @@ pub(crate) const API_COMMANDS: &[CommandDescriptor] = &[
         ukey = UKeyRule::CandleUpdate,
         direction = Inbound
     ),
+    cmd_desc!(
+        Command::API,
+        4,
+        "TCandleTFStateCommand",
+        base = Base,
+        priority = High,
+        retries = None,
+        unique = UK_CANDLE_TF_STATE,
+        ukey = UKeyRule::CandleTimeframeState,
+        direction = Inbound
+    ),
 ];
 
 pub(crate) const COMMAND_DESCRIPTOR_DOMAINS: &[&[CommandDescriptor]] = &[
@@ -964,7 +980,7 @@ mod tests {
         assert_eq!(UI_COMMANDS.len(), 28);
         assert_eq!(STRAT_COMMANDS.len(), 11);
         assert_eq!(BALANCE_COMMANDS.len(), 7);
-        assert_eq!(API_COMMANDS.len(), 4);
+        assert_eq!(API_COMMANDS.len(), 5);
     }
 
     #[test]
@@ -1049,6 +1065,32 @@ mod tests {
         for kind in kinds {
             assert_ne!(kind, UK_NONE);
         }
+    }
+
+    #[test]
+    fn unique_kind_ordinals_match_candle_state_insertion() {
+        assert_eq!(UK_CANDLE_UPDATE, 12);
+        assert_eq!(UK_CANDLE_TF_STATE, 13);
+        assert_eq!(UK_ORDER_IMAGE, 14);
+        assert_eq!(UK_ORDER_IMAGE_TARGETED, 15);
+        assert_eq!(UK_ORDER_PATCH, 16);
+        assert_eq!(UK_ORDERS_SNAPSHOT, 17);
+        assert_eq!(UK_ORDERS_CATALOG, 18);
+        assert_eq!(UK_ORDER_REQUEST, 19);
+        assert_eq!(UK_ORDER_NOT_FOUND, 20);
+        assert_eq!(UK_ORDER_CMD_BUY, 21);
+        assert_eq!(UK_ORDER_CMD_SELL, 22);
+        assert_eq!(UK_ORDER_CMD_STOPS, 23);
+        assert_eq!(UK_ORDER_CMD_VSTOP, 24);
+        assert_eq!(UK_ORDER_CMD_PANIC, 25);
+        assert_eq!(UK_ORDER_CMD_IMMUNE, 26);
+        assert_eq!(UK_NEWS_HISTORY, 27);
+
+        let state = find_descriptor(Command::API, 4).expect("candle TF state descriptor");
+        assert_eq!(state.name, "TCandleTFStateCommand");
+        assert_eq!(state.priority, CommandPriority::High);
+        assert_eq!(state.unique_kind, UK_CANDLE_TF_STATE);
+        assert_eq!(state.ukey, UKeyRule::CandleTimeframeState);
     }
 
     #[test]

@@ -321,8 +321,10 @@ pub struct ClosedSellOrderReportEvent {
 ///
 /// `applied_to_history` is true only when Active Lib already had a loaded
 /// demand-history ring for the same market/TF and the row passed the core's
-/// candle-window checks. The raw pushed candle is always included so UI code
-/// can still react without guessing why retained history did not move.
+/// candle-window checks. For the currently subscribed TF, the raw pushed candle
+/// is always included so UI code can still react without guessing why retained
+/// history did not move. Stale pushes for another TF are dropped before event
+/// delivery.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LiveCandleEvent {
     pub market_name: String,
@@ -331,6 +333,18 @@ pub struct LiveCandleEvent {
     pub applied_to_history: bool,
     pub history_count: usize,
     pub history_revision: u64,
+}
+
+/// The core changed the effective live-candle timeframe for one subscribed market.
+///
+/// Multiple clients can control the same core. This event is the authoritative
+/// per-market result after revision ordering; `kind = None` means candles were
+/// disabled for that market.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CandleTimeframeStateEvent {
+    pub market_name: String,
+    pub kind: Option<crate::commands::candles::DeepHistoryKind>,
+    pub revision: i32,
 }
 
 /// Arbitrage relay was applied to retained market state.
@@ -394,6 +408,8 @@ pub enum Event {
     CoinCardCandles(crate::state::CoinCardCandlesEvent),
     /// Live TF candle update for a subscribed market.
     LiveCandle(LiveCandleEvent),
+    /// Authoritative per-market live-candle timeframe selected by the core.
+    CandleTimeframeState(CandleTimeframeStateEvent),
     /// Initial full 5m candles snapshot for retained Active Lib history.
     ///
     /// This is emitted only after the history worker acknowledges that the

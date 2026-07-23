@@ -78,6 +78,22 @@ impl Client {
             }
         }
 
+        if resp.method == EngineMethod::SubscribeCandles {
+            let completed = {
+                self.reconnect
+                    .pending_candle_subscribes
+                    .lock()
+                    .finish(resp.request_uid, resp.success)
+            };
+            if let Some(all_succeeded) = completed {
+                self.reconnect.subscribed_candle_server_token =
+                    if all_succeeded { self.server_token } else { 0 };
+                self.reconnect
+                    .last_candle_subscribe_request_ms
+                    .store(NEVER_TIME_MS, Ordering::Relaxed);
+            }
+        }
+
         // Delphi `TMoonProtoEngine.SubscribeAllTrades`: successful
         // `emk_SubscribeAllTrades` refreshes `LastReconnectCheck`.
         // Until the first TradesStream packet updates `FTradesServerToken`,

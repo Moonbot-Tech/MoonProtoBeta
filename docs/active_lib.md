@@ -67,7 +67,9 @@ state.
   candle from trades.
 - Demand-driven TF chart candles are requested through `client.candles()` and
   can be kept current with `streams().subscribe_candles*`; live pushes update
-  already-loaded TF history and emit `Event::LiveCandle`.
+  already-loaded TF history and emit `Event::LiveCandle`. The subscription
+  interval is retained per market; `Event::CandleTimeframeState` reports the
+  revision-ordered effective interval selected by the core.
 
 ## UI Shape
 

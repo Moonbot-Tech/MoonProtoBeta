@@ -28,6 +28,17 @@ impl Client {
                     Ordering::Relaxed,
                 );
             }
+            Some(EngineMethod::SubscribeCandles) => {
+                self.reconnect
+                    .last_candle_subscribe_request_ms
+                    .store(now_ms, Ordering::Relaxed);
+                if let Some(request_uid) = engine_request_uid(request_payload) {
+                    self.reconnect
+                        .pending_candle_subscribes
+                        .lock()
+                        .insert(request_uid);
+                }
+            }
             _ => {}
         }
     }

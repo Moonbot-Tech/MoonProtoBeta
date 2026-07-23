@@ -70,6 +70,8 @@ pub(crate) struct ClientSenderShared {
     pub(crate) last_trades_subscribe_request_ms: Arc<AtomicI64>,
     pub(crate) last_orderbook_subscribe_request_ms: Arc<AtomicI64>,
     pub(crate) last_orderbook_subscribe_request_uid: Arc<AtomicU64>,
+    pub(crate) last_candle_subscribe_request_ms: Arc<AtomicI64>,
+    pub(crate) pending_candle_subscribes: Arc<Mutex<super::subscriptions::PendingCandleSubscribes>>,
 }
 
 impl ClientSenderShared {
@@ -208,6 +210,17 @@ impl ClientSender {
                         request_uid.unwrap_or(NO_PENDING_ENGINE_REQUEST_UID),
                         Ordering::Relaxed,
                     );
+                }
+                Some(EngineMethod::SubscribeCandles) => {
+                    self.shared
+                        .last_candle_subscribe_request_ms
+                        .store(now_ms, Ordering::Relaxed);
+                    if let Some(request_uid) = request_uid {
+                        self.shared
+                            .pending_candle_subscribes
+                            .lock()
+                            .insert(request_uid);
+                    }
                 }
                 _ => {}
             }

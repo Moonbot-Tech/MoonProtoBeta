@@ -301,6 +301,15 @@ pub enum DeepHistoryKind {
 }
 
 impl DeepHistoryKind {
+    pub(crate) const ALL: [Self; 6] = [
+        Self::Min1,
+        Self::Min5,
+        Self::Min30,
+        Self::Hour1,
+        Self::Hour4,
+        Self::Day1,
+    ];
+
     pub const fn from_byte(value: u8) -> Option<Self> {
         match value {
             0 => Some(Self::Min1),
@@ -338,9 +347,25 @@ pub(crate) struct CandleUpdateCommand {
     pub(crate) candle: DeepPrice,
 }
 
+/// Versioned per-market candle timeframe selected by the core.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CandleTimeframeStateCommand {
+    pub(crate) uid: u64,
+    pub(crate) market_index: u16,
+    /// `-1` disables live candles for this market; `0..=5` maps to
+    /// [`DeepHistoryKind`].
+    pub(crate) timeframe: i8,
+    pub(crate) revision: i32,
+}
+
 #[inline]
 pub(crate) fn is_candle_update_payload(payload: &[u8]) -> bool {
     payload.first().copied() == Some(3)
+}
+
+#[inline]
+pub(crate) fn is_candle_timeframe_state_payload(payload: &[u8]) -> bool {
+    payload.first().copied() == Some(4)
 }
 
 // =============================================================================
@@ -427,6 +452,33 @@ pub(crate) fn parse_candle_update_command(data: &[u8]) -> Option<CandleUpdateCom
         market_index,
         kind,
         candle: DeepPrice::from_delphi_parts(open, close, high, low, volume, time),
+    })
+}
+
+/// Parse `TCandleTFStateCommand`.
+///
+/// Wire after the base command header:
+/// `MarketIndex:u16, TF:i8, Revision:i32`.
+pub(crate) fn parse_candle_timeframe_state_command(
+    data: &[u8],
+) -> Option<CandleTimeframeStateCommand> {
+    if data.len() < 11 || !is_candle_timeframe_state_payload(data) {
+        return None;
+    }
+    let ver = u16::from_le_bytes([data[1], data[2]]);
+    if ver > CURRENT_PROTO_CMD_VER {
+        return None;
+    }
+    let uid = u64::from_le_bytes(data[3..11].try_into().ok()?);
+    let mut pos = 11usize;
+    let market_index = u16::from_le_bytes(read_zero_tail::<2>(data, &mut pos));
+    let timeframe = read_zero_tail::<1>(data, &mut pos)[0] as i8;
+    let revision = i32::from_le_bytes(read_zero_tail::<4>(data, &mut pos));
+    Some(CandleTimeframeStateCommand {
+        uid,
+        market_index,
+        timeframe,
+        revision,
     })
 }
 

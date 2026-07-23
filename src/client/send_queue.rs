@@ -187,7 +187,8 @@ fn descriptor_u_key(
         UKeyRule::MarketIndex
         | UKeyRule::StrategyId
         | UKeyRule::SendContextClientId
-        | UKeyRule::CandleUpdate => None,
+        | UKeyRule::CandleUpdate
+        | UKeyRule::CandleTimeframeState => None,
     }
 }
 

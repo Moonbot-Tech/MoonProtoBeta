@@ -346,38 +346,21 @@ impl ClientSender {
         if !self.shared.app_queue_alive.load(Ordering::Relaxed) {
             return Err(SubscribeError::Disconnected);
         }
-        let mut to_unsubscribe = Vec::new();
         let mut to_subscribe = Vec::new();
         {
             let mut registry = self.shared.subscription_registry.lock();
-            let tf_changed = registry.candle_tf != Some(kind);
-            if tf_changed {
-                to_unsubscribe = registry.candle_subs.iter().cloned().collect();
-                to_unsubscribe.sort_unstable();
-            }
-            registry.candle_tf = Some(kind);
             for market_name in market_names {
-                let inserted = registry.candle_subs.insert(market_name.clone());
-                if inserted && !tf_changed {
-                    to_subscribe.push(market_name);
+                if registry.candle_subs.get(&market_name) == Some(&kind) {
+                    continue;
                 }
-            }
-            if tf_changed {
-                to_subscribe = registry.candle_subs.iter().cloned().collect();
-                to_subscribe.sort_unstable();
+                registry.candle_subs.insert(market_name.clone(), kind);
+                to_subscribe.push(market_name);
             }
         }
-        if self.domain_ready_for_typed_send() {
-            if !to_unsubscribe.is_empty() {
-                let refs: Vec<&str> = to_unsubscribe.iter().map(String::as_str).collect();
-                self.try_send_api_request(crate::commands::candles::unsubscribe_candles(&refs))?;
-            }
-            if !to_subscribe.is_empty() {
-                let refs: Vec<&str> = to_subscribe.iter().map(String::as_str).collect();
-                self.try_send_api_request(crate::commands::candles::subscribe_candles(
-                    &refs, kind,
-                ))?;
-            }
+        if !to_subscribe.is_empty() && self.domain_ready_for_typed_send() {
+            to_subscribe.sort_unstable();
+            let refs: Vec<&str> = to_subscribe.iter().map(String::as_str).collect();
+            self.try_send_api_request(crate::commands::candles::subscribe_candles(&refs, kind))?;
         }
         Ok(())
     }
@@ -406,12 +389,9 @@ impl ClientSender {
         {
             let mut registry = self.shared.subscription_registry.lock();
             for market_name in market_names {
-                if registry.candle_subs.remove(&market_name) {
+                if registry.candle_subs.remove(&market_name).is_some() {
                     removed.push(market_name);
                 }
-            }
-            if registry.candle_subs.is_empty() {
-                registry.candle_tf = None;
             }
         }
         if !removed.is_empty() && self.domain_ready_for_typed_send() {

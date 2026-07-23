@@ -71,8 +71,9 @@ pub(crate) use active::{ActiveAction, ActiveDispatchContext};
 pub use snapshot::MoonStateSnapshot;
 pub(crate) use types::StrategySnapshotReply;
 pub use types::{
-    ArbEvent, ClosedSellOrderReportEvent, DetectEvent, DetectWatcherRow, EngineActionEvent,
-    EngineActionKind, Event, LiveCandleEvent, ServerLogEvent, WatcherFillEvent, WatcherFillsEvent,
+    ArbEvent, CandleTimeframeStateEvent, ClosedSellOrderReportEvent, DetectEvent, DetectWatcherRow,
+    EngineActionEvent, EngineActionKind, Event, LiveCandleEvent, ServerLogEvent, WatcherFillEvent,
+    WatcherFillsEvent,
 };
 
 fn copy_max_leverage_from_markets_list(info: &ServerInfo) -> bool {
@@ -213,6 +214,12 @@ pub(crate) struct EventDispatcher {
     /// Internal report follow-up controls (schema-unblocked sync and completed
     /// subscription watermark).
     report_controls: Vec<ReportControl>,
+    /// Per-market candle timeframe changes that must update the client-owned
+    /// reconnect registry after dispatch.
+    candle_controls: Vec<(String, Option<crate::commands::candles::DeepHistoryKind>)>,
+    /// Last accepted `TCandleTFStateCommand.Revision` by server-local market
+    /// index. Revisions restart with every hard transport session.
+    candle_tf_revisions: std::collections::HashMap<u16, i32>,
     /// Addressed repair requests produced by the canonical order reducer.
     order_repairs: Vec<OrderRepair>,
     /// Optional retained-history writer. The dispatcher only queues typed
@@ -279,6 +286,8 @@ impl Default for EventDispatcher {
             order_book_events: Vec::new(),
             order_book_controls: Vec::new(),
             report_controls: Vec::new(),
+            candle_controls: Vec::new(),
+            candle_tf_revisions: std::collections::HashMap::new(),
             order_repairs: Vec::new(),
             market_history: None,
             owned_market_history: None,
@@ -792,7 +801,7 @@ impl EventDispatcher {
         now_ms: i64,
         out: &mut Vec<Event>,
     ) {
-        self.dispatch_into_with_history(cmd, payload, now_ms, None, out);
+        self.dispatch_into_with_history(cmd, payload, now_ms, None, None, out);
     }
 
     fn dispatch_into_with_history(
@@ -801,6 +810,7 @@ impl EventDispatcher {
         payload: &[u8],
         now_ms: i64,
         history_now_time_days: Option<f64>,
+        active_ctx: Option<&ActiveDispatchContext>,
         out: &mut Vec<Event>,
     ) {
         match cmd {
@@ -818,7 +828,9 @@ impl EventDispatcher {
             Command::Balance => self.client_new_data_balance(payload, history_now_time_days, out),
             Command::Strat => self.client_new_data_strat(payload, out),
             Command::UI => self.client_new_data_ui(payload, out),
-            Command::API => self.client_new_data_api(payload, now_ms, history_now_time_days, out),
+            Command::API => {
+                self.client_new_data_api(payload, now_ms, history_now_time_days, active_ctx, out)
+            }
             Command::LogMsg => self.client_new_data_log_msg(payload, out),
             #[cfg(any(test, feature = "diagnostics"))]
             _ => out.push(Event::Raw {

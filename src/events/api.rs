@@ -7,7 +7,9 @@
 //! caller after `SendAndWait`/receiver completion.
 
 use super::{copy_max_leverage_from_markets_list, Event, EventDispatcher};
-use crate::commands::candles::parse_candle_update_command;
+use crate::commands::candles::{
+    parse_candle_timeframe_state_command, parse_candle_update_command, DeepHistoryKind,
+};
 use crate::commands::engine_api::{
     parse_base_check_response, parse_engine_response, EngineMethod, EngineResponse,
 };
@@ -24,10 +26,15 @@ impl EventDispatcher {
         payload: &[u8],
         now_ms: i64,
         history_now_time_days: Option<f64>,
+        active_ctx: Option<&super::ActiveDispatchContext>,
         out: &mut Vec<Event>,
     ) {
+        if let Some(cmd) = parse_candle_timeframe_state_command(payload) {
+            self.process_candle_timeframe_state_command(cmd, active_ctx, out);
+            return;
+        }
         if let Some(cmd) = parse_candle_update_command(payload) {
-            self.process_candle_update_command(cmd, out);
+            self.process_candle_update_command(cmd, active_ctx, out);
             return;
         }
         match parse_engine_response(payload) {
@@ -39,12 +46,19 @@ impl EventDispatcher {
     fn process_candle_update_command(
         &mut self,
         cmd: crate::commands::candles::CandleUpdateCommand,
+        active_ctx: Option<&super::ActiveDispatchContext>,
         out: &mut Vec<Event>,
     ) {
         let Some(market_name) = self.markets.market_name_by_index(cmd.market_index) else {
             return;
         };
         let market_name = market_name.to_string();
+        if let Some(ctx) = active_ctx {
+            let registry = ctx.subscription_registry.lock();
+            if registry.candle_subs.get(&market_name) != Some(&cmd.kind) {
+                return;
+            }
+        }
         let apply = self
             .coin_card_candles
             .apply_live_update(&market_name, cmd.kind, cmd.candle);
@@ -62,6 +76,54 @@ impl EventDispatcher {
             history_count,
             history_revision,
         }));
+    }
+
+    fn process_candle_timeframe_state_command(
+        &mut self,
+        cmd: crate::commands::candles::CandleTimeframeStateCommand,
+        active_ctx: Option<&super::ActiveDispatchContext>,
+        out: &mut Vec<Event>,
+    ) {
+        let Some(market_name) = self.markets.market_name_by_index(cmd.market_index) else {
+            return;
+        };
+        let last_revision = self
+            .candle_tf_revisions
+            .entry(cmd.market_index)
+            .or_default();
+        if cmd.revision <= *last_revision {
+            return;
+        }
+        *last_revision = cmd.revision;
+
+        let Some(ctx) = active_ctx else {
+            return;
+        };
+        let current_kind = {
+            let registry = ctx.subscription_registry.lock();
+            registry.candle_subs.get(market_name).copied()
+        };
+        let Some(current_kind) = current_kind else {
+            return;
+        };
+        let kind = if cmd.timeframe < 0 {
+            None
+        } else {
+            DeepHistoryKind::from_byte(cmd.timeframe as u8)
+        };
+        if cmd.timeframe > DeepHistoryKind::Day1.to_byte() as i8 || kind == Some(current_kind) {
+            return;
+        }
+
+        let market_name = market_name.to_string();
+        self.candle_controls.push((market_name.clone(), kind));
+        out.push(Event::CandleTimeframeState(
+            crate::events::CandleTimeframeStateEvent {
+                market_name,
+                kind,
+                revision: cmd.revision,
+            },
+        ));
     }
 
     /// Active dispatcher counterpart of Delphi `TMoonProtoNetClient.ProcessApiCommand`.

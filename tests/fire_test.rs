@@ -763,6 +763,7 @@ struct Session {
     parse_failure_correlations_logged: usize,
     report_events: Vec<ReportEvent>,
     order_state_events: Option<Vec<FireTestOrderStateEvent>>,
+    candle_tf_state_events: Vec<moonproto::CandleTimeframeStateEvent>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -882,6 +883,7 @@ impl Session {
             parse_failure_correlations_logged: 0,
             report_events: Vec::new(),
             order_state_events: None,
+            candle_tf_state_events: Vec::new(),
         };
         assert!(
             pump_session_until(&mut session, cfg.connect_timeout, "connect ready", |s| {
@@ -929,6 +931,9 @@ impl Session {
                 ) {
                     captured.push(state);
                 }
+            }
+            if let Event::CandleTimeframeState(state) = &event {
+                self.candle_tf_state_events.push(state.clone());
             }
             record_event(&self.stats, &event, snapshot.as_deref(), None);
         }
@@ -3664,6 +3669,122 @@ where
     );
     log_err_emu_pair(label, a, b);
     false
+}
+
+fn active_candle_kind(session: &Session, market: &str) -> Option<DeepHistoryKind> {
+    session
+        .client
+        .active_subscriptions()
+        .live_candle_timeframes
+        .into_iter()
+        .find(|subscription| subscription.market.eq_ignore_ascii_case(market))
+        .map(|subscription| subscription.kind)
+}
+
+fn engine_response_count(session: &Session, method: EngineMethod) -> u64 {
+    session
+        .stats
+        .lock()
+        .unwrap()
+        .engine_method_counts
+        .get(&method.to_byte())
+        .copied()
+        .unwrap_or(0)
+}
+
+fn saw_candle_tf_state_since(
+    session: &Session,
+    from: usize,
+    market: &str,
+    kind: DeepHistoryKind,
+) -> bool {
+    session.candle_tf_state_events[from..]
+        .iter()
+        .any(|event| event.market_name.eq_ignore_ascii_case(market) && event.kind == Some(kind))
+}
+
+fn run_candle_timeframe_state_gate(cfg: &FireConfig, a: &mut Session, b: &mut Session) {
+    let initial_kind = DeepHistoryKind::Hour1;
+    let changed_kind = DeepHistoryKind::Hour4;
+    let a_response_before = engine_response_count(a, EngineMethod::SubscribeCandles);
+    let b_response_before = engine_response_count(b, EngineMethod::SubscribeCandles);
+    a.client
+        .streams()
+        .subscribe_candles([cfg.market.as_str()], initial_kind)
+        .expect("client A initial candle subscription must queue");
+    b.client
+        .streams()
+        .subscribe_candles([cfg.market.as_str()], initial_kind)
+        .expect("client B initial candle subscription must queue");
+    assert!(
+        pump_pair_until_sessions(
+            a,
+            b,
+            cfg.connect_timeout,
+            "per-market candle initial subscription",
+            |a, b| {
+                active_candle_kind(a, &cfg.market) == Some(initial_kind)
+                    && active_candle_kind(b, &cfg.market) == Some(initial_kind)
+                    && engine_response_count(a, EngineMethod::SubscribeCandles) > a_response_before
+                    && engine_response_count(b, EngineMethod::SubscribeCandles) > b_response_before
+            },
+        ),
+        "both clients must retain the initial candle timeframe for {}",
+        cfg.market
+    );
+
+    let b_event_from = b.candle_tf_state_events.len();
+    a.client
+        .streams()
+        .subscribe_candles([cfg.market.as_str()], changed_kind)
+        .expect("client A candle timeframe change must queue");
+    assert!(
+        pump_pair_until_sessions(
+            a,
+            b,
+            cfg.connect_timeout,
+            "cross-client candle timeframe state",
+            |a, b| {
+                active_candle_kind(a, &cfg.market) == Some(changed_kind)
+                    && active_candle_kind(b, &cfg.market) == Some(changed_kind)
+                    && saw_candle_tf_state_since(b, b_event_from, &cfg.market, changed_kind)
+            },
+        ),
+        "the core must broadcast the new {} candle timeframe to the other subscribed client",
+        cfg.market
+    );
+
+    let a_unsubscribe_before = engine_response_count(a, EngineMethod::UnsubscribeCandles);
+    let b_unsubscribe_before = engine_response_count(b, EngineMethod::UnsubscribeCandles);
+    a.client
+        .streams()
+        .unsubscribe_candles([cfg.market.as_str()])
+        .expect("client A candle unsubscribe must queue");
+    b.client
+        .streams()
+        .unsubscribe_candles([cfg.market.as_str()])
+        .expect("client B candle unsubscribe must queue");
+    assert!(
+        pump_pair_until_sessions(
+            a,
+            b,
+            cfg.connect_timeout,
+            "per-market candle unsubscribe",
+            |a, b| {
+                active_candle_kind(a, &cfg.market).is_none()
+                    && active_candle_kind(b, &cfg.market).is_none()
+                    && engine_response_count(a, EngineMethod::UnsubscribeCandles)
+                        > a_unsubscribe_before
+                    && engine_response_count(b, EngineMethod::UnsubscribeCandles)
+                        > b_unsubscribe_before
+            },
+        ),
+        "the core must acknowledge candle unsubscribe and remove retained intent for both clients"
+    );
+    println!(
+        "OK: per-market candle TF state market={} {:?}->{:?}",
+        cfg.market, initial_kind, changed_kind
+    );
 }
 
 fn has_nonblocking_api_refresh(st: &SessionStats) -> bool {
@@ -7805,6 +7926,7 @@ fn fire_test_active_library_health() {
         a.snapshot().market_probe_summary(),
         b.snapshot().market_probe_summary()
     );
+    run_candle_timeframe_state_gate(&cfg, &mut a, &mut b);
     log_err_emu_pair("initial health 10% gate", &a, &b);
     log_protocol_cpu_pair("initial health 10% gate", &a, &b);
 

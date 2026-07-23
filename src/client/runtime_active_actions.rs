@@ -73,6 +73,23 @@ impl Client {
                 crate::events::ActiveAction::ReportOpenRowsCheckCompleted { server_token } => {
                     self.complete_report_open_rows_check(server_token);
                 }
+                crate::events::ActiveAction::CandleTimeframeChanged { market_name, kind } => {
+                    let unsubscribe = {
+                        let mut registry = self.subscriptions.subscription_registry.lock();
+                        match kind {
+                            Some(kind) => {
+                                registry.candle_subs.insert(market_name.clone(), kind);
+                                false
+                            }
+                            None => registry.candle_subs.remove(&market_name).is_some(),
+                        }
+                    };
+                    if unsubscribe {
+                        self.send_api_request(&crate::commands::candles::unsubscribe_candles(&[
+                            &market_name,
+                        ]));
+                    }
+                }
             }
         }
     }

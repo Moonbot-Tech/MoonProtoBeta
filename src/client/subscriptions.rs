@@ -1,6 +1,6 @@
 use crate::commands::candles::DeepHistoryKind;
 use parking_lot::Mutex;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -28,6 +28,16 @@ pub struct TradesSubscription {
     pub want_mm: bool,
 }
 
+/// One maintained live-candle subscription.
+///
+/// Candle intervals are owned per market by the MoonBot core. A timeframe
+/// change for one market does not affect any other subscribed market.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveCandleSubscription {
+    pub market: String,
+    pub kind: DeepHistoryKind,
+}
+
 /// Read-only snapshot of the streams a session currently has subscribed.
 ///
 /// Returned by [`crate::MoonClient::active_subscriptions`]. Because the active library
@@ -45,8 +55,13 @@ pub struct ActiveSubscriptions {
     /// Market names with an active live TF-candles subscription, sorted for
     /// stable display.
     pub live_candles: Vec<String>,
-    /// The current live TF-candles interval. The MoonBot core keeps this as a
-    /// single chart-TF setting, so one session has one active TF for the batch.
+    /// Exact per-market live-candle subscriptions, sorted by market name.
+    pub live_candle_timeframes: Vec<LiveCandleSubscription>,
+    /// Common live-candle interval when every subscribed market uses the same
+    /// timeframe. `None` means either no candle subscriptions or mixed
+    /// per-market timeframes.
+    ///
+    /// New code should use [`Self::live_candle_timeframes`].
     pub live_candles_kind: Option<DeepHistoryKind>,
     /// Report DB catch-up intent maintained across hard reconnects.
     pub report_replication: Option<crate::state::ReportSyncRequest>,
@@ -68,8 +83,7 @@ pub(crate) struct SubscriptionRegistry {
     /// the new server-side client-state starts at false, so the active library must
     /// reproduce the last known intent in the init/API layer.
     pub mm_orders_sub: Option<bool>,
-    pub candle_subs: HashSet<String>,
-    pub candle_tf: Option<DeepHistoryKind>,
+    pub candle_subs: HashMap<String, DeepHistoryKind>,
     pub report_sync: Option<crate::state::ReportSyncRequest>,
     pub report_open_rows: Arc<[i64]>,
 }
@@ -79,14 +93,34 @@ impl SubscriptionRegistry {
     pub(crate) fn active_subscriptions(&self) -> ActiveSubscriptions {
         let mut orderbooks: Vec<String> = self.orderbook_subs.iter().cloned().collect();
         orderbooks.sort_unstable();
-        let mut live_candles: Vec<String> = self.candle_subs.iter().cloned().collect();
-        live_candles.sort_unstable();
+        let mut live_candle_timeframes: Vec<LiveCandleSubscription> = self
+            .candle_subs
+            .iter()
+            .map(|(market, &kind)| LiveCandleSubscription {
+                market: market.clone(),
+                kind,
+            })
+            .collect();
+        live_candle_timeframes.sort_unstable_by(|a, b| a.market.cmp(&b.market));
+        let live_candles = live_candle_timeframes
+            .iter()
+            .map(|sub| sub.market.clone())
+            .collect();
+        let live_candles_kind = live_candle_timeframes
+            .first()
+            .map(|first| first.kind)
+            .filter(|kind| {
+                live_candle_timeframes
+                    .iter()
+                    .all(|subscription| subscription.kind == *kind)
+            });
         ActiveSubscriptions {
             orderbooks,
             all_trades: self.trades_sub,
             mm_orders: self.mm_orders_sub.unwrap_or(false),
             live_candles,
-            live_candles_kind: self.candle_tf,
+            live_candle_timeframes,
+            live_candles_kind,
             report_replication: self.report_sync,
         }
     }
@@ -142,6 +176,48 @@ pub(crate) struct DomainRestoreIntent {
 pub(crate) struct PendingTradesUnsubscribe {
     pub(crate) request_uid: u64,
     pub(crate) sent_ms: i64,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct PendingCandleSubscribes {
+    request_uids: HashSet<u64>,
+    failed: bool,
+}
+
+impl PendingCandleSubscribes {
+    pub(crate) fn insert(&mut self, request_uid: u64) {
+        if self.request_uids.is_empty() {
+            self.failed = false;
+        }
+        self.request_uids.insert(request_uid);
+    }
+
+    pub(crate) fn finish(&mut self, request_uid: u64, success: bool) -> Option<bool> {
+        if !self.request_uids.remove(&request_uid) {
+            return None;
+        }
+        self.failed |= !success;
+        if !self.request_uids.is_empty() {
+            return None;
+        }
+        let all_succeeded = !self.failed;
+        self.failed = false;
+        Some(all_succeeded)
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.request_uids.is_empty()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.request_uids.len()
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.request_uids.clear();
+        self.failed = false;
+    }
 }
 
 /// Active-library subscription cluster carved out of [`super::Client`].
@@ -277,6 +353,15 @@ pub(crate) struct ReconnectRestore {
     /// `subscribed_book_server_token`.
     pub(crate) pending_orderbook_resubscribe_uid: Option<u64>,
 
+    /// Current hard-session token confirmed by a successful candle subscribe.
+    pub(crate) subscribed_candle_server_token: u64,
+    /// 5s retry throttle for full per-market candle subscription replay.
+    pub(crate) last_candle_reconnect_check_ms: i64,
+    /// Last queued candle subscribe, shared with `ClientSender`.
+    pub(crate) last_candle_subscribe_request_ms: Arc<AtomicI64>,
+    /// Candle subscribe batch still inside the Delphi `SendAndWait` window.
+    pub(crate) pending_candle_subscribes: Arc<Mutex<PendingCandleSubscribes>>,
+
     /// ServerToken for which a report page response verified the subscription.
     pub(crate) subscribed_report_server_token: AtomicU64,
     /// ServerToken for which the append-only report schema was validated.
@@ -318,6 +403,8 @@ impl ReconnectRestore {
         last_trades_subscribe_request_ms: Arc<AtomicI64>,
         last_orderbook_subscribe_request_ms: Arc<AtomicI64>,
         last_orderbook_subscribe_request_uid: Arc<AtomicU64>,
+        last_candle_subscribe_request_ms: Arc<AtomicI64>,
+        pending_candle_subscribes: Arc<Mutex<PendingCandleSubscribes>>,
     ) -> Self {
         Self {
             tracked_indexes_peer_app_token: 0,
@@ -332,6 +419,10 @@ impl ReconnectRestore {
             last_orderbook_subscribe_request_ms,
             last_orderbook_subscribe_request_uid,
             pending_orderbook_resubscribe_uid: None,
+            subscribed_candle_server_token: 0,
+            last_candle_reconnect_check_ms: super::constants::NEVER_TIME_MS,
+            last_candle_subscribe_request_ms,
+            pending_candle_subscribes,
             subscribed_report_server_token: AtomicU64::new(0),
             report_schema_server_token: AtomicU64::new(0),
             last_report_schema_request_ms: AtomicI64::new(super::constants::NEVER_TIME_MS),
@@ -363,6 +454,7 @@ mod tests {
         assert_eq!(empty.all_trades, None);
         assert!(!empty.mm_orders);
         assert!(empty.live_candles.is_empty());
+        assert!(empty.live_candle_timeframes.is_empty());
         assert_eq!(empty.live_candles_kind, None);
 
         // HashSet insertion order is non-deterministic; the snapshot must sort.
@@ -370,9 +462,10 @@ mod tests {
         reg.orderbook_subs.insert("BTCUSDT".to_string());
         reg.trades_sub = Some(TradesSubscription { want_mm: true });
         reg.mm_orders_sub = Some(true);
-        reg.candle_subs.insert("ETHUSDT".to_string());
-        reg.candle_subs.insert("BTCUSDT".to_string());
-        reg.candle_tf = Some(DeepHistoryKind::Hour1);
+        reg.candle_subs
+            .insert("ETHUSDT".to_string(), DeepHistoryKind::Hour4);
+        reg.candle_subs
+            .insert("BTCUSDT".to_string(), DeepHistoryKind::Hour1);
 
         let active = reg.active_subscriptions();
         assert_eq!(
@@ -388,7 +481,20 @@ mod tests {
             active.live_candles,
             vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]
         );
-        assert_eq!(active.live_candles_kind, Some(DeepHistoryKind::Hour1));
+        assert_eq!(
+            active.live_candle_timeframes,
+            vec![
+                LiveCandleSubscription {
+                    market: "BTCUSDT".to_string(),
+                    kind: DeepHistoryKind::Hour1,
+                },
+                LiveCandleSubscription {
+                    market: "ETHUSDT".to_string(),
+                    kind: DeepHistoryKind::Hour4,
+                },
+            ]
+        );
+        assert_eq!(active.live_candles_kind, None);
     }
 }
 

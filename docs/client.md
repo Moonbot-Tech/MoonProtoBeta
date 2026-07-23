@@ -534,6 +534,14 @@ successful full-registry `SubscribeOrderBook` response confirms the current
 `ServerToken`, the library repeats the batched subscribe no more often than
 once per 5000 ms. The retry resets local orderbook sequence/cache state but
 keeps the last visible snapshot levels.
+Live-candle subscriptions retain a separate timeframe for every market.
+Calling `subscribe_candles` again changes only the listed markets; it does not
+require an unsubscribe and does not alter other candle subscriptions. The core
+broadcasts the effective per-market choice as
+`Event::CandleTimeframeState`, including changes made by another client.
+`active_subscriptions().live_candle_timeframes` is the current read model.
+Hard reconnect groups the retained markets by timeframe and replays every
+group before confirming the candle subscription watermark.
 All-trades is opt-in in the Rust library. If the registry has no all-trades
 subscription intent, incoming `TradesStream` / `TradesResendResponse` packets
 are treated as unexpected and are dropped instead of becoming public events.

@@ -168,8 +168,8 @@ pub use client::ProtocolMetricsSnapshot;
 pub use client::{
     ActiveSubscriptions, ClientConfig, ClosePositionParams, CoinCardCandlesTicket, ConnectConfig,
     ConnectError, EngineActionTicket, InitConfig, InitError, InitialStrategies, LifecycleEvent,
-    MoonAccount, MoonBalances, MoonCandles, MoonChartAlerts, MoonChartText, MoonClient,
-    MoonClientError, MoonClientEvent, MoonClientSnapshot, MoonEmulator, MoonEventQueue,
+    LiveCandleSubscription, MoonAccount, MoonBalances, MoonCandles, MoonChartAlerts, MoonChartText,
+    MoonClient, MoonClientError, MoonClientEvent, MoonClientSnapshot, MoonEmulator, MoonEventQueue,
     MoonEventSink, MoonOrders, MoonReports, MoonSettings, MoonStrategies, MoonStreams, MoonTrade,
     NewOrderParams, NewOrderTicket, OrderSide, OrderTarget, RefreshConfig, SellOrderParams,
     SplitOrderParams, TradeContextError, TradesStreamMode, TradesSubscription, TransportMode,
@@ -217,9 +217,9 @@ pub use commands::candles::{DeepHistoryKind, DeepPrice};
 pub use commands::trade::{MoveAllBuysParams, MoveAllSellsParams};
 pub use commands::ui::{EmuPencilPoint, EmuTradePoint};
 pub use events::{
-    ArbEvent, ClosedSellOrderReportEvent, DetectEvent, DetectWatcherRow, EngineActionEvent,
-    EngineActionKind, Event, MoonStateSnapshot, ServerLogEvent, WatcherFillEvent,
-    WatcherFillsEvent,
+    ArbEvent, CandleTimeframeStateEvent, ClosedSellOrderReportEvent, DetectEvent, DetectWatcherRow,
+    EngineActionEvent, EngineActionKind, Event, MoonStateSnapshot, ServerLogEvent,
+    WatcherFillEvent, WatcherFillsEvent,
 };
 pub use key_import::{
     import_key, parse_key_info, ImportedIpVersion, ImportedKeyFormat, ImportedKeyInfo,

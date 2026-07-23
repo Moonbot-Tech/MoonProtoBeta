@@ -31,6 +31,7 @@ pub(crate) struct ActiveDispatchContext {
     pub(crate) server_base_currency_code: Option<BaseCurrency>,
     pub(crate) exchange_code: crate::commands::market::ExchangeCode,
     pub(crate) kernel_health: crate::state::KernelHealth,
+    pub(crate) subscription_registry: Arc<parking_lot::Mutex<crate::client::SubscriptionRegistry>>,
 }
 
 impl ActiveDispatchContext {
@@ -56,6 +57,7 @@ impl ActiveDispatchContext {
                 .exchange_code
                 .unwrap_or(crate::commands::market::ExchangeCode::None),
             kernel_health: client.kernel_health(),
+            subscription_registry: client.subscription_registry_handle(),
         }
     }
 }
@@ -97,6 +99,10 @@ pub(crate) enum ActiveAction {
     },
     ReportOpenRowsCheckCompleted {
         server_token: u64,
+    },
+    CandleTimeframeChanged {
+        market_name: String,
+        kind: Option<crate::commands::candles::DeepHistoryKind>,
     },
 }
 
@@ -185,6 +191,7 @@ impl EventDispatcher {
         {
             self.trades.full_reset_at(now_ms);
             self.order_books.reset_caches_keep_books();
+            self.candle_tf_revisions.clear();
             // A hard session creates a fresh server-side client and SrvConnect
             // sends the authoritative news ring again. Drop the previous local
             // ring first; live frames that overtake the sliced history are then
@@ -237,7 +244,14 @@ impl EventDispatcher {
         }
 
         let start_len = out.len();
-        self.dispatch_into_with_history(cmd, payload, now_ms, Some(ctx.now_time_days), out);
+        self.dispatch_into_with_history(
+            cmd,
+            payload,
+            now_ms,
+            Some(ctx.now_time_days),
+            Some(ctx),
+            out,
+        );
         self.sync_market_history_storage();
         for repair in self.order_repairs.drain(..) {
             actions.push(ActiveAction::RequestOrderStatus {
@@ -276,6 +290,9 @@ impl EventDispatcher {
                     });
                 }
             }
+        }
+        for (market_name, kind) in self.candle_controls.drain(..) {
+            actions.push(ActiveAction::CandleTimeframeChanged { market_name, kind });
         }
         if self.force_markets_list_refresh
             || (self.markets.markets_list_refresh_needed()

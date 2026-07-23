@@ -109,7 +109,7 @@ pub use init::{ConnectConfig, ConnectError, InitConfig, InitError, InitialStrate
 pub use metrics::ProtocolMetricsSnapshot;
 pub(crate) use send_queue::{SendPriority, UniqueKey};
 pub(crate) use sender::{ClientSender, SubscribeError};
-pub use subscriptions::{ActiveSubscriptions, TradesSubscription};
+pub use subscriptions::{ActiveSubscriptions, LiveCandleSubscription, TradesSubscription};
 
 use app_dispatch::{metric_api_method, RunMode};
 pub(crate) use candles::{EngineResponseMeta, PartialCandles};
@@ -553,6 +553,9 @@ impl Client {
         let last_orderbook_subscribe_request_ms = Arc::new(AtomicI64::new(NEVER_TIME_MS));
         let last_orderbook_subscribe_request_uid =
             Arc::new(AtomicU64::new(NO_PENDING_ENGINE_REQUEST_UID));
+        let last_candle_subscribe_request_ms = Arc::new(AtomicI64::new(NEVER_TIME_MS));
+        let pending_candle_subscribes =
+            Arc::new(Mutex::new(subscriptions::PendingCandleSubscribes::default()));
 
         // Active library F8: acquire the Delphi-style process-level NTP syncer
         // when cfg.ntp_host is set. It periodically updates GlobalMPTimeOffset
@@ -657,6 +660,8 @@ impl Client {
                 last_trades_subscribe_request_ms,
                 last_orderbook_subscribe_request_ms,
                 last_orderbook_subscribe_request_uid,
+                last_candle_subscribe_request_ms,
+                pending_candle_subscribes,
             ),
             _ntp_process_guard: ntp_process_guard,
             server_time_delta_handle: Arc::new(std::sync::atomic::AtomicU64::new(0)),

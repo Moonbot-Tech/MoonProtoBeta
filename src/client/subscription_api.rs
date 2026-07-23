@@ -45,9 +45,19 @@ impl Client {
                 last_orderbook_subscribe_request_uid: Arc::clone(
                     &self.reconnect.last_orderbook_subscribe_request_uid,
                 ),
+                last_candle_subscribe_request_ms: Arc::clone(
+                    &self.reconnect.last_candle_subscribe_request_ms,
+                ),
+                pending_candle_subscribes: Arc::clone(&self.reconnect.pending_candle_subscribes),
             }),
             start: self._start,
         }
+    }
+
+    pub(crate) fn subscription_registry_handle(
+        &self,
+    ) -> Arc<parking_lot::Mutex<SubscriptionRegistry>> {
+        Arc::clone(&self.subscriptions.subscription_registry)
     }
 
     #[cfg(test)]
@@ -262,14 +272,17 @@ impl Client {
         delay_orderbooks: bool,
         delay_trades: bool,
     ) {
-        let (trades_sub, mm_orders_sub, orderbook_subs, candle_subs, candle_tf) = {
+        let (trades_sub, mm_orders_sub, orderbook_subs, candle_subs) = {
             let registry = self.subscriptions.subscription_registry.lock();
             (
                 registry.trades_sub,
                 registry.mm_orders_sub,
                 registry.orderbook_subs.iter().cloned().collect::<Vec<_>>(),
-                registry.candle_subs.iter().cloned().collect::<Vec<_>>(),
-                registry.candle_tf,
+                registry
+                    .candle_subs
+                    .iter()
+                    .map(|(market, &kind)| (market.clone(), kind))
+                    .collect::<Vec<_>>(),
             )
         };
 
@@ -292,7 +305,7 @@ impl Client {
         } else if let Some(subscribe) = mm_orders_sub {
             self.send_mm_orders_subscribe_cmd(subscribe);
         }
-        self.restore_candle_subscriptions(candle_subs, candle_tf);
+        self.restore_candle_subscriptions(candle_subs, self.now_ms());
         if delay_orderbooks {
             return;
         }
@@ -301,17 +314,25 @@ impl Client {
 
     fn restore_candle_subscriptions(
         &self,
-        candle_subs: Vec<String>,
-        candle_tf: Option<crate::commands::candles::DeepHistoryKind>,
+        candle_subs: Vec<(String, crate::commands::candles::DeepHistoryKind)>,
+        now_ms: i64,
     ) {
-        let Some(kind) = candle_tf else {
-            return;
-        };
-        let refs: Vec<&str> = candle_subs.iter().map(String::as_str).collect();
-        if refs.is_empty() {
-            return;
+        for kind in crate::commands::candles::DeepHistoryKind::ALL {
+            let mut markets: Vec<&str> = candle_subs
+                .iter()
+                .filter_map(|(market, market_kind)| {
+                    (*market_kind == kind).then_some(market.as_str())
+                })
+                .collect();
+            if markets.is_empty() {
+                continue;
+            }
+            markets.sort_unstable();
+            self.send_api_request_at(
+                &crate::commands::candles::subscribe_candles(&markets, kind),
+                now_ms,
+            );
         }
-        self.send_api_request(&crate::commands::candles::subscribe_candles(&refs, kind));
     }
 
     fn registry_trades_want_mm(&self) -> Option<bool> {
@@ -446,6 +467,51 @@ impl Client {
         self.restore_orderbook_subscriptions_as_reconnect_batch(orderbook_subs, now_ms)
     }
 
+    pub(crate) fn tick_candle_reconnect_sequence(&mut self, now_ms: i64) {
+        if !self.subscriptions.domain_ready || self.server_token == 0 {
+            return;
+        }
+        let last_request_ms = self
+            .reconnect
+            .last_candle_subscribe_request_ms
+            .load(Ordering::Relaxed);
+        let request_wait_active = !self.reconnect.pending_candle_subscribes.lock().is_empty()
+            && last_request_ms != NEVER_TIME_MS
+            && (now_ms - last_request_ms).abs() < crate::api_pending::DEFAULT_PENDING_TIMEOUT_MS;
+        if request_wait_active {
+            return;
+        }
+        if last_request_ms != NEVER_TIME_MS {
+            self.reconnect.pending_candle_subscribes.lock().clear();
+            self.reconnect
+                .last_candle_subscribe_request_ms
+                .store(NEVER_TIME_MS, Ordering::Relaxed);
+            self.reconnect.subscribed_candle_server_token = 0;
+        }
+        if self.server_token == self.reconnect.subscribed_candle_server_token {
+            return;
+        }
+        let candle_subs = {
+            let registry = self.subscriptions.subscription_registry.lock();
+            registry
+                .candle_subs
+                .iter()
+                .map(|(market, &kind)| (market.clone(), kind))
+                .collect::<Vec<_>>()
+        };
+        if candle_subs.is_empty() {
+            return;
+        }
+        if (now_ms - self.reconnect.last_candle_reconnect_check_ms).abs()
+            < CANDLE_RECONNECT_THROTTLE_MS
+        {
+            return;
+        }
+        self.reconnect.last_candle_reconnect_check_ms = now_ms;
+        self.reconnect.subscribed_candle_server_token = 0;
+        self.restore_candle_subscriptions(candle_subs, now_ms);
+    }
+
     fn restore_orderbook_subscriptions_as_reconnect_batch(
         &mut self,
         orderbook_subs: Vec<String>,
@@ -510,13 +576,16 @@ impl Client {
             return;
         }
 
-        let (trades_sub, orderbook_subs, candle_subs, candle_tf) = {
+        let (trades_sub, orderbook_subs, candle_subs) = {
             let registry = self.subscriptions.subscription_registry.lock();
             (
                 registry.trades_sub,
                 registry.orderbook_subs.iter().cloned().collect::<Vec<_>>(),
-                registry.candle_subs.iter().cloned().collect::<Vec<_>>(),
-                registry.candle_tf,
+                registry
+                    .candle_subs
+                    .iter()
+                    .map(|(market, &kind)| (market.clone(), kind))
+                    .collect::<Vec<_>>(),
             )
         };
 
@@ -535,6 +604,6 @@ impl Client {
                 &refs,
             ));
         }
-        self.restore_candle_subscriptions(candle_subs, candle_tf);
+        self.restore_candle_subscriptions(candle_subs, self.now_ms());
     }
 }

@@ -107,6 +107,7 @@ fn handle_event(event: Event) {
         Event::Balance(balance_event) => handle_balance_event(balance_event),
         Event::Account(account_event) => handle_account_event(account_event),
         Event::CandlesSnapshot(candles_event) => handle_candles_ready(candles_event),
+        Event::CandleTimeframeState(state) => update_chart_timeframe(state),
         Event::Strat(strat_event) => handle_strategy_event(strat_event),
         Event::Detect(detect_event) => handle_detect_fact(detect_event),
         Event::ChartAlert(alert_event) => handle_alert_object_state(alert_event),
@@ -180,6 +181,7 @@ pub enum Event {
     TransferAssets(TransferAssetsEvent),
     CoinCardCandles(CoinCardCandlesEvent),
     LiveCandle(LiveCandleEvent),
+    CandleTimeframeState(CandleTimeframeStateEvent),
     CandlesSnapshot(CandlesSnapshotEvent),
     Arb(ArbEvent),
     Strat(StratEvent),
@@ -218,6 +220,12 @@ event or the next normal UI update.
 `CandlesSnapshotEvent::Ready` is emitted after the initial full 5m candles
 snapshot has been processed by the history worker. At that point
 `market_history_readers_for(&market).candles_5m` already sees the retained rows.
+
+`CandleTimeframeStateEvent` is the core's revision-ordered effective live
+candle interval for one market. It can reflect a change made by another client.
+The same state is retained in
+`active_subscriptions().live_candle_timeframes`; `kind == None` means disabled.
+Live candle packets for a different interval are stale and are not emitted.
 
 `DetectEvent` is a detect/watch/chart-alert fact built by the core. It covers
 ordinary strategy detect messages, watcher rows, chart-only markers, and

@@ -86,6 +86,7 @@ impl ProtocolCore<'_> {
         // successful trades packets, like Delphi `ProcessTradesStream`.
         self.periodic_trades_reconnect_tick(cur_tm, mode);
         self.periodic_orderbook_reconnect_tick(cur_tm, mode);
+        self.client.tick_candle_reconnect_sequence(cur_tm);
         self.periodic_report_replication_tick(cur_tm, mode);
         self.periodic_orders_tick(cur_tm, mode);
 

@@ -1,4 +1,5 @@
 use super::*;
+use crate::client::subscriptions::PendingCandleSubscribes;
 use crate::commands::candles::DeepHistoryKind;
 use crate::commands::engine_api::EngineMethod;
 
@@ -21,6 +22,8 @@ fn make_sender() -> (
     let last_orderbook_subscribe_request_ms = Arc::new(AtomicI64::new(i64::MIN / 2));
     let last_orderbook_subscribe_request_uid =
         Arc::new(AtomicU64::new(NO_PENDING_ENGINE_REQUEST_UID));
+    let last_candle_subscribe_request_ms = Arc::new(AtomicI64::new(NEVER_TIME_MS));
+    let pending_candle_subscribes = Arc::new(Mutex::new(PendingCandleSubscribes::default()));
     (
         ClientSender {
             shared: Arc::new(ClientSenderShared {
@@ -34,6 +37,8 @@ fn make_sender() -> (
                 last_trades_subscribe_request_ms,
                 last_orderbook_subscribe_request_ms,
                 last_orderbook_subscribe_request_uid,
+                last_candle_subscribe_request_ms,
+                pending_candle_subscribes,
             }),
             start: Instant::now(),
         },
@@ -124,27 +129,24 @@ fn subscribe_candles_tf_change_preserves_existing_markets_and_sends_request() {
     let second = take_send_items(&send_q);
     assert_eq!(
         second.len(),
-        2,
-        "changing TF mirrors the core client: unsubscribe old batch, subscribe current batch"
+        1,
+        "per-market TF changes are idempotent subscribe updates; no unsubscribe is sent"
     );
     assert_eq!(
         method_id(&second[0].data),
-        Some(EngineMethod::UnsubscribeCandles.to_byte())
+        Some(EngineMethod::SubscribeCandles.to_byte())
     );
     assert_eq!(market_names_count(&second[0].data), Some(1));
     assert_eq!(
-        method_id(&second[1].data),
-        Some(EngineMethod::SubscribeCandles.to_byte())
-    );
-    assert_eq!(market_names_count(&second[1].data), Some(1));
-    assert_eq!(
-        engine_request_tf_param(&second[1].data),
+        engine_request_tf_param(&second[0].data),
         Some(DeepHistoryKind::Hour1.to_byte())
     );
 
     let registry = registry.lock();
-    assert!(registry.candle_subs.contains("BTCUSDT"));
-    assert_eq!(registry.candle_tf, Some(DeepHistoryKind::Hour1));
+    assert_eq!(
+        registry.candle_subs.get("BTCUSDT"),
+        Some(&DeepHistoryKind::Hour1)
+    );
 }
 
 #[test]

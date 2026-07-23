@@ -32,6 +32,33 @@ fn deep_price_roundtrip() {
 }
 
 #[test]
+fn candle_timeframe_state_wire_matches_delphi_layout() {
+    let mut payload = Vec::new();
+    payload.push(4);
+    payload.extend_from_slice(&CURRENT_PROTO_CMD_VER.to_le_bytes());
+    payload.extend_from_slice(&0x1122_3344_5566_7788u64.to_le_bytes());
+    payload.extend_from_slice(&321u16.to_le_bytes());
+    payload.push((-1i8) as u8);
+    payload.extend_from_slice(&12345i32.to_le_bytes());
+
+    let parsed =
+        parse_candle_timeframe_state_command(&payload).expect("valid TCandleTFStateCommand");
+    assert_eq!(payload.len(), 18);
+    assert_eq!(parsed.uid, 0x1122_3344_5566_7788);
+    assert_eq!(parsed.market_index, 321);
+    assert_eq!(parsed.timeframe, -1);
+    assert_eq!(parsed.revision, 12345);
+}
+
+#[test]
+fn candle_timeframe_state_rejects_newer_command_version() {
+    let mut payload = vec![4];
+    payload.extend_from_slice(&(CURRENT_PROTO_CMD_VER + 1).to_le_bytes());
+    payload.extend_from_slice(&[0; 15]);
+    assert!(parse_candle_timeframe_state_command(&payload).is_none());
+}
+
+#[test]
 fn deep_price_pack_uses_private_wire_struct() {
     let mut bytes = Vec::new();
     write_deep_price_pack(&mut bytes, 101.0, -0.0, 12.5, 45_000.25);

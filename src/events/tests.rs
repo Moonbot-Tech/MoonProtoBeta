@@ -692,6 +692,33 @@ fn api_response_payload_ver(ver: u16, method: EngineMethod, data: &[u8]) -> Vec<
     out
 }
 
+fn candle_timeframe_state_payload(market_index: u16, timeframe: i8, revision: i32) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.push(4);
+    out.extend_from_slice(&CURRENT_PROTO_CMD_VER.to_le_bytes());
+    out.extend_from_slice(&0xAAu64.to_le_bytes());
+    out.extend_from_slice(&market_index.to_le_bytes());
+    out.push(timeframe as u8);
+    out.extend_from_slice(&revision.to_le_bytes());
+    out
+}
+
+fn live_candle_payload(market_index: u16, kind: crate::DeepHistoryKind) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.push(3);
+    out.extend_from_slice(&CURRENT_PROTO_CMD_VER.to_le_bytes());
+    out.extend_from_slice(&0xBBu64.to_le_bytes());
+    out.extend_from_slice(&market_index.to_le_bytes());
+    out.push(kind.to_byte());
+    out.extend_from_slice(&100.0f32.to_le_bytes());
+    out.extend_from_slice(&101.0f32.to_le_bytes());
+    out.extend_from_slice(&102.0f32.to_le_bytes());
+    out.extend_from_slice(&99.0f32.to_le_bytes());
+    out.extend_from_slice(&12.5f32.to_le_bytes());
+    out.extend_from_slice(&45_000.0f64.to_le_bytes());
+    out
+}
+
 fn markets_list_v1_payload_without_futures_type(market: &Market) -> Vec<u8> {
     let mut market_bytes = Vec::new();
     write_market(&mut market_bytes, market, 1);
@@ -702,6 +729,199 @@ fn markets_list_v1_payload_without_futures_type(market: &Market) -> Vec<u8> {
     out.extend_from_slice(&market_bytes);
     out.extend_from_slice(&0i32.to_le_bytes());
     out
+}
+
+#[test]
+fn candle_timeframe_state_is_revisioned_per_market_and_updates_subscription_intent() {
+    let mut dispatcher = EventDispatcher::new();
+    seed_event_markets(&mut dispatcher, &["BTCUSDT"]);
+    dispatcher
+        .markets
+        .apply_markets_indexes(vec!["BTCUSDT".to_string()]);
+
+    let mut client = crate::client::Client::new(dummy_client_cfg());
+    client.testing_set_domain_ready(true);
+    client.testing_set_server_token(0x100);
+    client.with_subscription_registry_mut(|registry| {
+        registry
+            .candle_subs
+            .insert("BTCUSDT".to_string(), crate::DeepHistoryKind::Hour1);
+    });
+
+    let mut out = Vec::new();
+    let mut actions = Vec::new();
+    dispatch_active_packet_for_test(
+        &mut dispatcher,
+        Command::API,
+        &candle_timeframe_state_payload(0, crate::DeepHistoryKind::Hour4.to_byte() as i8, 7),
+        1_000,
+        &mut out,
+        &client,
+        &mut actions,
+    );
+    assert!(matches!(
+        out.as_slice(),
+        [Event::CandleTimeframeState(CandleTimeframeStateEvent {
+            market_name,
+            kind: Some(crate::DeepHistoryKind::Hour4),
+            revision: 7,
+        })] if market_name == "BTCUSDT"
+    ));
+    apply_active_actions_for_test(&client, &mut actions);
+    assert_eq!(
+        client
+            .subscription_registry_handle()
+            .lock()
+            .candle_subs
+            .get("BTCUSDT"),
+        Some(&crate::DeepHistoryKind::Hour4)
+    );
+
+    out.clear();
+    dispatch_active_packet_for_test(
+        &mut dispatcher,
+        Command::API,
+        &candle_timeframe_state_payload(0, crate::DeepHistoryKind::Min1.to_byte() as i8, 6),
+        1_001,
+        &mut out,
+        &client,
+        &mut actions,
+    );
+    assert!(out.is_empty(), "older state must not roll the market back");
+    assert!(actions.is_empty());
+
+    dispatch_active_packet_for_test(
+        &mut dispatcher,
+        Command::API,
+        &candle_timeframe_state_payload(0, -1, 8),
+        1_002,
+        &mut out,
+        &client,
+        &mut actions,
+    );
+    assert!(matches!(
+        out.as_slice(),
+        [Event::CandleTimeframeState(CandleTimeframeStateEvent {
+            kind: None,
+            revision: 8,
+            ..
+        })]
+    ));
+    apply_active_actions_for_test(&client, &mut actions);
+    assert!(!client
+        .subscription_registry_handle()
+        .lock()
+        .candle_subs
+        .contains_key("BTCUSDT"));
+    let sent = drain_client_send_items(&client);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        sent[0].data.get(11).copied(),
+        Some(EngineMethod::UnsubscribeCandles.to_byte())
+    );
+}
+
+#[test]
+fn live_candle_requires_the_current_per_market_timeframe() {
+    let mut dispatcher = EventDispatcher::new();
+    seed_event_markets(&mut dispatcher, &["BTCUSDT"]);
+    dispatcher
+        .markets
+        .apply_markets_indexes(vec!["BTCUSDT".to_string()]);
+
+    let mut client = crate::client::Client::new(dummy_client_cfg());
+    client.testing_set_domain_ready(true);
+    client.testing_set_server_token(0x100);
+    client.with_subscription_registry_mut(|registry| {
+        registry
+            .candle_subs
+            .insert("BTCUSDT".to_string(), crate::DeepHistoryKind::Hour4);
+    });
+
+    let mut out = Vec::new();
+    let mut actions = Vec::new();
+    dispatch_active_packet_for_test(
+        &mut dispatcher,
+        Command::API,
+        &live_candle_payload(0, crate::DeepHistoryKind::Hour1),
+        1_000,
+        &mut out,
+        &client,
+        &mut actions,
+    );
+    assert!(
+        out.is_empty(),
+        "live candle from the old TF must be dropped"
+    );
+
+    dispatch_active_packet_for_test(
+        &mut dispatcher,
+        Command::API,
+        &live_candle_payload(0, crate::DeepHistoryKind::Hour4),
+        1_001,
+        &mut out,
+        &client,
+        &mut actions,
+    );
+    assert!(matches!(
+        out.as_slice(),
+        [Event::LiveCandle(LiveCandleEvent {
+            market_name,
+            kind: crate::DeepHistoryKind::Hour4,
+            ..
+        })] if market_name == "BTCUSDT"
+    ));
+}
+
+#[test]
+fn hard_session_change_resets_candle_timeframe_revisions() {
+    let mut dispatcher = EventDispatcher::new();
+    seed_event_markets(&mut dispatcher, &["BTCUSDT"]);
+    dispatcher
+        .markets
+        .apply_markets_indexes(vec!["BTCUSDT".to_string()]);
+
+    let mut client = crate::client::Client::new(dummy_client_cfg());
+    client.testing_set_domain_ready(true);
+    client.testing_set_server_token(0x100);
+    client.with_subscription_registry_mut(|registry| {
+        registry
+            .candle_subs
+            .insert("BTCUSDT".to_string(), crate::DeepHistoryKind::Hour1);
+    });
+
+    let mut out = Vec::new();
+    let mut actions = Vec::new();
+    dispatch_active_packet_for_test(
+        &mut dispatcher,
+        Command::API,
+        &candle_timeframe_state_payload(0, crate::DeepHistoryKind::Hour4.to_byte() as i8, 50),
+        1_000,
+        &mut out,
+        &client,
+        &mut actions,
+    );
+    apply_active_actions_for_test(&client, &mut actions);
+    out.clear();
+
+    client.testing_set_server_token(0x200);
+    dispatch_active_packet_for_test(
+        &mut dispatcher,
+        Command::API,
+        &candle_timeframe_state_payload(0, crate::DeepHistoryKind::Min5.to_byte() as i8, 1),
+        2_000,
+        &mut out,
+        &client,
+        &mut actions,
+    );
+    assert!(matches!(
+        out.as_slice(),
+        [Event::CandleTimeframeState(CandleTimeframeStateEvent {
+            kind: Some(crate::DeepHistoryKind::Min5),
+            revision: 1,
+            ..
+        })]
+    ));
 }
 
 #[test]
@@ -2232,6 +2452,9 @@ fn active_dispatch_emits_typed_watcher_fills() {
         server_base_currency_code: Some(BaseCurrency::BTC),
         exchange_code: ExchangeCode::None,
         kernel_health: crate::state::KernelHealth::default(),
+        subscription_registry: Arc::new(parking_lot::Mutex::new(
+            crate::client::SubscriptionRegistry::default(),
+        )),
     };
     let mut out = Vec::new();
     let mut actions = Vec::new();
@@ -2336,6 +2559,9 @@ fn active_dispatch_queues_update_markets_last_price_into_history_worker() {
         server_base_currency_code: Some(BaseCurrency::BTC),
         exchange_code: ExchangeCode::None,
         kernel_health: crate::state::KernelHealth::default(),
+        subscription_registry: Arc::new(parking_lot::Mutex::new(
+            crate::client::SubscriptionRegistry::default(),
+        )),
     };
     let mut out = Vec::new();
     let mut actions = Vec::new();

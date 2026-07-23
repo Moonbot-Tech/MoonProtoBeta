@@ -134,7 +134,8 @@ Desktop UI code should use the non-blocking request plus event/snapshot state.
 ## Live TF Candle Updates
 
 After a chart loads its base TF history, subscribe to live updates for the
-visible markets:
+visible markets. The interval is retained per market, so changing BTC does not
+change ETH:
 
 ```rust
 use moonproto::DeepHistoryKind;
@@ -145,10 +146,14 @@ client
     .subscribe_candles_for([&market], DeepHistoryKind::Hour4)?;
 
 for event in client.drain_events() {
-    if let Event::LiveCandle(ev) = event {
-        if ev.applied_to_history {
+    match event {
+        Event::CandleTimeframeState(ev) => {
+            update_timeframe_control(ev.market_name, ev.kind, ev.revision);
+        }
+        Event::LiveCandle(ev) if ev.applied_to_history => {
             redraw_chart(ev.market_name, ev.kind, ev.history_revision);
         }
+        _ => {}
     }
 }
 
@@ -160,8 +165,23 @@ if let Some(rows) = client
 }
 ```
 
+The core owns the effective timeframe for each market. The most recent
+subscription request for that market wins, including a request made by another
+client connected to the same core. `Event::CandleTimeframeState` reports the
+revision-ordered result; Active Lib also updates
+`active_subscriptions().live_candle_timeframes`. `kind == None` means the core
+disabled live candles for that market. A remote state update never enables a
+market that this client has locally unsubscribed.
+
+Changing a market's interval uses another `subscribe_candles` call. An
+unsubscribe/subscribe pair is neither required nor desirable. Hard reconnect
+replays the registry in one batch per distinct timeframe and confirms the new
+session only after every batch succeeds.
+
 Live TF updates do not create a full history by themselves. They replace the
 last loaded row or append the next row using the core candle-window rule. If the
 base `request_coin_card_for(..., kind)` history has not been applied yet,
 `Event::LiveCandle` still reports the pushed candle, but
-`applied_to_history == false` and `tf_candles_for` remains empty.
+`applied_to_history == false` and `tf_candles_for` remains empty. A push whose
+timeframe does not match the current per-market subscription is stale data and
+is dropped before it becomes a public event.
