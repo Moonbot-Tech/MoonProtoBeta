@@ -13,7 +13,7 @@ fn make_sender() -> (
 ) {
     let subscription_registry = Arc::new(Mutex::new(SubscriptionRegistry::default()));
     let subscription_summary = Arc::new(SubscriptionRegistrySummary::default());
-    let subscription_trades_scope = Arc::new(parking_lot::RwLock::new(None));
+    let subscription_trade_storage_intent = Arc::new(parking_lot::RwLock::new(None));
     let send_lock = Arc::new(Mutex::new(SendLockState::default()));
     let app_queue_alive = Arc::new(AtomicBool::new(true));
     let domain_ready = Arc::new(AtomicBool::new(true));
@@ -32,7 +32,7 @@ fn make_sender() -> (
                 send_lock: Arc::clone(&send_lock),
                 subscription_registry: Arc::clone(&subscription_registry),
                 subscription_summary,
-                subscription_trades_scope,
+                subscription_trade_storage_intent,
                 server_update_sent: Arc::clone(&server_update_sent),
                 last_trades_subscribe_request_ms,
                 last_orderbook_subscribe_request_ms,

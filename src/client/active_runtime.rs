@@ -1049,6 +1049,8 @@ fn supervise_runtime_loop(
             }
         }
     }
+
+    *snapshot.write() = None;
 }
 
 fn panic_payload_message(payload: &(dyn Any + Send)) -> String {
@@ -1105,6 +1107,25 @@ mod tests {
             "shutdown waited for startup timeout instead of interrupting it: {:?}",
             started.elapsed()
         );
+    }
+
+    #[test]
+    fn wait_finished_releases_internal_snapshot_but_not_user_arc() {
+        let cfg = ClientConfig::new("127.0.0.1", 9, [0; 16], [0; 16]).without_ntp();
+        let client = MoonClient::connect(
+            cfg,
+            ConnectConfig::new(InitConfig::default()).with_connect_timeout(Duration::from_secs(30)),
+        )
+        .expect("runtime should start");
+        let state = Arc::new(crate::events::EventDispatcher::new().snapshot());
+        *client.snapshot.write() = Some(MoonClientSnapshot::new(1, Arc::clone(&state)));
+        let user_snapshot = client.snapshot().expect("test snapshot");
+
+        client.disconnect().expect("shutdown should be queued");
+        client.wait_finished().expect("runtime should exit");
+
+        assert!(client.snapshot().is_none());
+        assert!(Arc::ptr_eq(&state, &user_snapshot));
     }
 
     #[test]

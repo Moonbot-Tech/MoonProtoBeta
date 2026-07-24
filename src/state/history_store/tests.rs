@@ -1,4 +1,6 @@
+use super::config::scale_capacity_rounded_to_8;
 use super::*;
+use crate::commands::market::ExchangeCode;
 use crate::state::history::{CandleVolumeSnapshot, DerivedDeltaSnapshot};
 use crate::time::SECONDS_PER_DAY;
 
@@ -15,30 +17,24 @@ fn mt(days: f64) -> MoonTime {
 }
 
 #[test]
-fn memory_sized_config_stays_inside_budget() {
-    let total = 16 * GIB;
-    let market_count = 1_000;
-    let cfg = MarketHistoryConfig::from_total_memory_bytes(total, market_count);
-    let total_estimated = cfg.estimated_bytes_per_market() * market_count;
+fn auto_config_matches_production_depth_and_ignores_unused_market_count() {
+    let total = 64 * GB;
+    let one_market = MarketHistoryConfig::from_total_memory_bytes(total, 1);
+    let thousand_markets = MarketHistoryConfig::from_total_memory_bytes(total, 1_000);
 
-    assert!(cfg.futures_trades_capacity > cfg.spot_trades_capacity);
-    assert!(
-        total_estimated <= MarketHistoryConfig::history_budget_bytes(total),
-        "history defaults should fit the configured memory budget"
-    );
+    assert_eq!(one_market, thousand_markets);
+    assert_eq!(one_market.futures_trades_capacity, 44_000);
+    assert_eq!(one_market.spot_trades_capacity, 44_000);
+    assert_eq!(one_market.liquidation_capacity, 27_280);
+    assert_eq!(one_market.mm_orders_capacity, 25_000);
+    assert_eq!(one_market.last_price_capacity, 27_280);
+    assert_eq!(one_market.mini_candles_capacity, 25_000);
+    assert_eq!(one_market.candles_5m_capacity, 500);
 }
 
 #[test]
-fn small_memory_config_uses_larger_fraction() {
-    let small = 4 * GIB;
-    let large = 16 * GIB;
-    assert_eq!(MarketHistoryConfig::history_budget_bytes(small), small / 4);
-    assert_eq!(MarketHistoryConfig::history_budget_bytes(large), large / 5);
-}
-
-#[test]
-fn auto_budget_percent_clamps_and_scales_memory_budget() {
-    let total = 16 * GIB;
+fn auto_budget_percent_clamps_and_scales_heavy_histories() {
+    let total = 64 * GB;
 
     assert_eq!(
         MarketHistorySizing::clamp_budget_percent(1),
@@ -48,47 +44,130 @@ fn auto_budget_percent_clamps_and_scales_memory_budget() {
         MarketHistorySizing::clamp_budget_percent(900),
         MarketHistorySizing::MAX_BUDGET_PERCENT
     );
-    assert_eq!(
-        MarketHistoryConfig::history_budget_bytes_with_budget_percent(total, 250),
-        MarketHistoryConfig::history_budget_bytes(total) * 250 / 100
-    );
-    assert_eq!(
-        MarketHistoryConfig::history_budget_bytes_with_budget_percent(total, 1),
-        MarketHistoryConfig::history_budget_bytes(total)
-    );
-    assert_eq!(
-        MarketHistoryConfig::history_budget_bytes_with_budget_percent(total, 900),
-        MarketHistoryConfig::history_budget_bytes(total) * 800 / 100
-    );
+
+    let reduced =
+        MarketHistoryConfig::from_total_memory_bytes_with_budget_percent(total, 1_000, 75);
+    assert_eq!(reduced.futures_trades_capacity, 33_000);
+    assert_eq!(reduced.liquidation_capacity, 20_464);
+    assert_eq!(reduced.mm_orders_capacity, 18_752);
+    assert_eq!(reduced.mini_candles_capacity, 20_464);
+    assert_eq!(reduced.candles_5m_capacity, 500);
+
+    let extended =
+        MarketHistoryConfig::from_total_memory_bytes_with_budget_percent(total, 1_000, 800);
+    assert_eq!(extended.futures_trades_capacity, 98_000);
+    assert_eq!(extended.liquidation_capacity, 27_280);
+    assert_eq!(extended.mm_orders_capacity, 25_000);
+    assert_eq!(extended.mini_candles_capacity, 25_000);
+    assert_eq!(extended.candles_5m_capacity, 500);
 }
 
 #[test]
-fn auto_sizing_with_budget_percent_preserves_fixed_variant_compatibility() {
-    let total = 16 * GIB;
-    let market_count = 500;
-    let base = MarketHistoryConfig::from_total_memory_bytes(total, market_count);
-    let bigger =
-        MarketHistoryConfig::from_total_memory_bytes_with_budget_percent(total, market_count, 400);
+fn auto_config_applies_exchange_specific_production_caps() {
+    let total = 64 * GB;
+    let fbinance = MarketHistoryConfig::from_total_memory_bytes_for_exchange(
+        total,
+        100,
+        Some(ExchangeCode::FBinance),
+    );
+    let qbinance = MarketHistoryConfig::from_total_memory_bytes_for_exchange(
+        total,
+        100,
+        Some(ExchangeCode::QBinance),
+    );
+    let gate = MarketHistoryConfig::from_total_memory_bytes_for_exchange(
+        total,
+        100,
+        Some(ExchangeCode::Gate),
+    );
 
-    assert!(bigger.futures_trades_capacity >= base.futures_trades_capacity);
-    assert!(bigger.last_price_capacity >= base.last_price_capacity);
+    assert_eq!(fbinance.futures_trades_capacity, 48_000);
+    assert_eq!(fbinance.last_price_capacity, 27_280);
+    assert_eq!(qbinance.futures_trades_capacity, 58_000);
+    assert_eq!(qbinance.last_price_capacity, 81_840);
+    assert_eq!(gate.futures_trades_capacity, 18_600);
+    assert_eq!(gate.last_price_capacity, 9_300);
+}
 
+#[test]
+fn auto_config_matches_production_machine_memory_tiers() {
+    let cases = [
+        (2 * GB, 5_280, 15_840),
+        (3 * GB, 7_040, 21_120),
+        (4 * GB, 10_560, 31_680),
+        (6 * GB, 17_600, 44_000),
+        (9 * GB, 22_880, 44_000),
+        (18 * GB, 27_280, 44_000),
+    ];
+
+    for (total, price_capacity, trades_capacity) in cases {
+        let config = MarketHistoryConfig::from_total_memory_bytes(total, 500);
+        assert_eq!(config.last_price_capacity, price_capacity);
+        assert_eq!(config.liquidation_capacity, price_capacity);
+        assert_eq!(config.futures_trades_capacity, trades_capacity);
+    }
+}
+
+#[test]
+fn capacity_scaling_uses_delphi_bankers_rounding() {
+    assert_eq!(scale_capacity_rounded_to_8(1, 400), 0);
+    assert_eq!(scale_capacity_rounded_to_8(3, 400), 16);
+}
+
+#[test]
+fn fixed_sizing_preserves_exact_user_capacities() {
     let fixed = MarketHistoryConfig::default();
     assert_eq!(
-        MarketHistorySizing::fixed(fixed).resolve(market_count),
+        MarketHistorySizing::fixed(fixed).resolve(Some(ExchangeCode::FBinance)),
         fixed
     );
 }
 
 #[test]
-fn default_config_is_safe_for_all_markets_subscription() {
-    let cfg = MarketHistoryConfig::default();
-    let assumed_large_market_universe = 1_000;
-    assert!(
-            cfg.estimated_bytes_per_market() * assumed_large_market_universe
-                < MarketHistoryConfig::history_budget_bytes(8 * GIB),
-            "default config must not become multi-GB when subscribe_all_trades creates stores for all markets"
-        );
+fn market_store_allocates_only_categories_that_receive_data() {
+    let mut store = MarketHistoryStore::new(MarketHistoryConfig {
+        futures_trades_capacity: 4,
+        spot_trades_capacity: 4,
+        liquidation_capacity: 4,
+        mm_orders_capacity: 4,
+        last_price_capacity: 4,
+        mini_candles_capacity: 4,
+        candles_5m_capacity: 4,
+    });
+    let readers = store.readers();
+
+    assert!(!readers.futures_trades.as_ref().unwrap().is_allocated());
+    assert!(!readers.spot_trades.as_ref().unwrap().is_allocated());
+    assert!(!readers.mm_orders.as_ref().unwrap().is_allocated());
+    assert!(!readers.mm_order_companion.as_ref().unwrap().is_allocated());
+
+    store.append_futures_trade(trade(1.0, 100.0, 1.0));
+    assert!(readers.futures_trades.as_ref().unwrap().is_allocated());
+    assert!(!readers.spot_trades.as_ref().unwrap().is_allocated());
+
+    store.append_mm_order_with_companion(
+        MMOrderHistoryRow {
+            time: mt(1.0),
+            volume: 1.0,
+            q: 1.0,
+        },
+        None,
+    );
+    assert!(readers.mm_orders.as_ref().unwrap().is_allocated());
+    assert!(!readers.mm_order_companion.as_ref().unwrap().is_allocated());
+
+    store.append_mm_order_with_companion(
+        MMOrderHistoryRow {
+            time: mt(2.0),
+            volume: 2.0,
+            q: 2.0,
+        },
+        Some(MMOrderCompanionData {
+            taker: [7; 20],
+            color: 0xFF00_0000,
+        }),
+    );
+    assert!(readers.mm_order_companion.as_ref().unwrap().is_allocated());
 }
 
 #[test]
@@ -122,6 +201,31 @@ fn registry_configures_trade_storage_scope_from_known_markets() {
 
     assert_eq!(registry.configure_markets(&markets, None), 0);
     assert!(registry.is_empty());
+}
+
+#[test]
+fn registering_large_market_universe_does_not_allocate_dense_histories() {
+    let config = MarketHistoryConfig::from_total_memory_bytes(64 * GB, 1_000);
+    let mut registry = MarketHistoryRegistry::new(config);
+    let markets = (0..1_000)
+        .map(|idx| format!("M{idx}USDT"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        registry.configure_markets(&markets, Some(&TradeStorageScope::All)),
+        markets.len()
+    );
+    for market in &markets {
+        let readers = registry.readers(market).unwrap();
+        assert!(!readers.futures_trades.as_ref().unwrap().is_allocated());
+        assert!(!readers.spot_trades.as_ref().unwrap().is_allocated());
+        assert!(!readers.liquidations.as_ref().unwrap().is_allocated());
+        assert!(!readers.mm_orders.as_ref().unwrap().is_allocated());
+        assert!(!readers.last_prices.as_ref().unwrap().is_allocated());
+        assert!(!readers.mark_prices.as_ref().unwrap().is_allocated());
+        assert!(!readers.mini_candles.as_ref().unwrap().is_allocated());
+        assert!(!readers.candles_5m.as_ref().unwrap().is_allocated());
+    }
 }
 
 #[test]

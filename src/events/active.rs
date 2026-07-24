@@ -24,7 +24,7 @@ pub(crate) struct ActiveDispatchContext {
     pub(crate) server_time_delta_source: Arc<AtomicU64>,
     pub(crate) now_time_days: f64,
     pub(crate) domain_ready: bool,
-    pub(crate) trades_storage_scope: Option<Arc<crate::state::TradeStorageScope>>,
+    pub(crate) trade_storage_intent: Option<crate::client::TradeStorageIntent>,
     pub(crate) copy_max_leverage_from_markets_list: bool,
     pub(crate) eps_profile: EpsProfile,
     pub(crate) server_base_currency_name: Option<Arc<str>>,
@@ -45,7 +45,7 @@ impl ActiveDispatchContext {
             server_time_delta_source: client.server_time_delta_handle(),
             now_time_days: crate::client::delphi_now_raw(),
             domain_ready: client.is_domain_ready(),
-            trades_storage_scope: client.trades_storage_scope_intent(),
+            trade_storage_intent: client.trade_storage_intent(),
             copy_max_leverage_from_markets_list: copy_max_leverage_from_markets_list(
                 client.server_info(),
             ),
@@ -158,10 +158,10 @@ impl EventDispatcher {
             self.kernel_health = ctx.kernel_health;
             out.push(Event::KernelHealth(ctx.kernel_health));
         }
-        self.set_trade_storage_scope(ctx.trades_storage_scope.as_deref(), ctx.now_time_days);
+        self.set_trade_storage_intent(ctx.trade_storage_intent.as_ref(), ctx.now_time_days);
 
         if matches!(cmd, Command::TradesStream | Command::TradesResendResponse)
-            && ctx.trades_storage_scope.is_none()
+            && ctx.trade_storage_intent.is_none()
         {
             log::warn!(target: "moonproto::events",
                 "unexpected {:?} received without all-trades subscription; active packet dropped", cmd);

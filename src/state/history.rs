@@ -414,8 +414,9 @@ impl SeqRingQtyRow for Candle5mRow {
 
 /// Mini-candle used to compact evicted detailed trades.
 ///
-/// Compact 24-byte row: time, trade count, min/max price, buy volume, and sell
-/// volume.
+/// Compact row: time, trade count, min/max price, buy volume, and sell volume.
+/// The native Rust layout is intentionally aligned for fast scans; sizing uses
+/// `size_of::<MiniCandle>()`, so padding is included in memory estimates.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 #[repr(C)]
 pub struct MiniCandle {

@@ -5,7 +5,6 @@ use super::*;
 use crate::client::metrics::{ProfilePhase, ProtocolMetrics};
 use crate::state::markets::CandleDeltaBaseline;
 use crate::time::MILLIS_PER_HOUR;
-use std::collections::HashSet;
 #[cfg(any(test, feature = "diagnostics"))]
 use std::time::{Duration, Instant};
 
@@ -186,6 +185,15 @@ impl EventDispatcher {
         }
     }
 
+    pub(crate) fn set_trade_storage_intent(
+        &mut self,
+        intent: Option<&crate::client::TradeStorageIntent>,
+        now_time_days: f64,
+    ) {
+        self.retain_mm_orders = intent.is_some_and(|intent| intent.retain_mm_orders);
+        self.set_trade_storage_scope(intent.map(|intent| intent.scope.as_ref()), now_time_days);
+    }
+
     pub(crate) fn set_deltas_by_trades(&mut self, enabled: bool) {
         if self.deltas_by_trades == enabled {
             return;
@@ -196,7 +204,7 @@ impl EventDispatcher {
         }
     }
 
-    fn ensure_default_market_history_worker(&mut self, active_market_count: usize) {
+    fn ensure_default_market_history_worker(&mut self, has_active_market: bool) {
         if self.trade_storage_scope.is_none() {
             if self.owned_market_history.is_some() {
                 self.market_history = None;
@@ -206,14 +214,16 @@ impl EventDispatcher {
             }
             return;
         }
-        if active_market_count == 0 {
+        if !has_active_market {
             return;
         }
         if !self.market_history_auto_enabled || self.market_history.is_some() {
             return;
         }
-        let worker =
-            MarketHistoryWorker::spawn(self.market_history_sizing.resolve(active_market_count));
+        let worker = MarketHistoryWorker::spawn(
+            self.market_history_sizing
+                .resolve(self.session_server_info.exchange_code),
+        );
         self.market_history = Some(worker.handle());
         self.owned_market_history = Some(worker);
         if let Some(handle) = &self.market_history {
@@ -245,17 +255,14 @@ impl EventDispatcher {
             .collect()
     }
 
-    fn active_market_history_market_count(&self, market_slots: &[Option<Arc<str>>]) -> usize {
+    fn has_active_market_history_market(&self, market_slots: &[Option<Arc<str>>]) -> bool {
         let Some(scope) = self.trade_storage_scope.as_ref() else {
-            return 0;
+            return false;
         };
-        let mut names = HashSet::new();
-        for market_name in market_slots.iter().filter_map(Option::as_deref) {
-            if scope.contains(market_name) {
-                names.insert(market_name);
-            }
-        }
-        names.len()
+        market_slots
+            .iter()
+            .filter_map(Option::as_deref)
+            .any(|market_name| scope.contains(market_name))
     }
 
     pub(super) fn sync_market_history_storage(&mut self) {
@@ -266,8 +273,8 @@ impl EventDispatcher {
             return;
         }
         let market_slots = self.market_history_market_slots();
-        let active_market_count = self.active_market_history_market_count(&market_slots);
-        self.ensure_default_market_history_worker(active_market_count);
+        let has_active_market = self.has_active_market_history_market(&market_slots);
+        self.ensure_default_market_history_worker(has_active_market);
         let Some(handle) = &self.market_history else {
             return;
         };

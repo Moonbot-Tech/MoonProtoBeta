@@ -143,7 +143,7 @@ pub(crate) use sender::ClientSenderShared;
 use socket::{set_dont_fragment_for_socket, set_socket_buffers, ClientTransport};
 pub(crate) use subscriptions::{
     refresh_subscription_summary, DomainRestoreIntent, PendingTradesUnsubscribe, ReconnectRestore,
-    SubscriptionRegistry, SubscriptionRegistrySummary, Subscriptions,
+    SubscriptionRegistry, SubscriptionRegistrySummary, Subscriptions, TradeStorageIntent,
 };
 pub(crate) use transport_state::{
     DataReadState, ReaderSlicedStats, RecvState, SentSliced, SlicedAck,
@@ -192,8 +192,8 @@ impl HelloWaitState {
 pub(crate) struct ClientSharedState {
     pub(crate) subscription_registry: Arc<Mutex<SubscriptionRegistry>>,
     pub(crate) subscription_summary: Arc<SubscriptionRegistrySummary>,
-    pub(crate) subscription_trades_scope:
-        Arc<parking_lot::RwLock<Option<Arc<crate::state::TradeStorageScope>>>>,
+    pub(crate) subscription_trade_storage_intent:
+        Arc<parking_lot::RwLock<Option<subscriptions::TradeStorageIntent>>>,
     pub(crate) server_update_sent: Arc<AtomicBool>,
     pub(crate) protocol_metrics: Arc<ProtocolMetrics>,
     #[cfg(any(test, feature = "diagnostics"))]
@@ -207,7 +207,7 @@ impl ClientSharedState {
         Self {
             subscription_registry: Arc::new(Mutex::new(SubscriptionRegistry::default())),
             subscription_summary: Arc::new(SubscriptionRegistrySummary::default()),
-            subscription_trades_scope: Arc::new(parking_lot::RwLock::new(None)),
+            subscription_trade_storage_intent: Arc::new(parking_lot::RwLock::new(None)),
             server_update_sent: Arc::new(AtomicBool::new(false)),
             protocol_metrics: Arc::new(ProtocolMetrics::default()),
             #[cfg(any(test, feature = "diagnostics"))]
@@ -515,13 +515,11 @@ impl Client {
         self.subscriptions.subscription_summary.trades_subscribed()
     }
 
-    pub(crate) fn trades_storage_scope_intent(
-        &self,
-    ) -> Option<Arc<crate::state::TradeStorageScope>> {
-        if !self.subscriptions.subscription_summary.trades_subscribed() {
-            return None;
-        }
-        self.subscriptions.subscription_trades_scope.read().clone()
+    pub(crate) fn trade_storage_intent(&self) -> Option<subscriptions::TradeStorageIntent> {
+        self.subscriptions
+            .subscription_trade_storage_intent
+            .read()
+            .clone()
     }
 
     /// Create a client session from [`ClientConfig`].
@@ -653,7 +651,7 @@ impl Client {
             subscriptions: Subscriptions::new_with_registry(
                 Arc::clone(&shared.subscription_registry),
                 Arc::clone(&shared.subscription_summary),
-                Arc::clone(&shared.subscription_trades_scope),
+                Arc::clone(&shared.subscription_trade_storage_intent),
                 domain_ready_flag,
             ),
             reconnect: ReconnectRestore::new(

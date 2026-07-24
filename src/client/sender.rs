@@ -64,8 +64,8 @@ pub(crate) struct ClientSenderShared {
     pub(crate) send_lock: Arc<Mutex<SendLockState>>,
     pub(crate) subscription_registry: Arc<Mutex<SubscriptionRegistry>>,
     pub(crate) subscription_summary: Arc<SubscriptionRegistrySummary>,
-    pub(crate) subscription_trades_scope:
-        Arc<parking_lot::RwLock<Option<Arc<crate::state::TradeStorageScope>>>>,
+    pub(crate) subscription_trade_storage_intent:
+        Arc<parking_lot::RwLock<Option<super::subscriptions::TradeStorageIntent>>>,
     pub(crate) server_update_sent: Arc<AtomicBool>,
     pub(crate) last_trades_subscribe_request_ms: Arc<AtomicI64>,
     pub(crate) last_orderbook_subscribe_request_ms: Arc<AtomicI64>,
@@ -78,7 +78,7 @@ impl ClientSenderShared {
     fn refresh_subscription_summary(&self, registry: &SubscriptionRegistry) {
         refresh_subscription_summary(
             &self.subscription_summary,
-            &self.subscription_trades_scope,
+            &self.subscription_trade_storage_intent,
             registry,
         );
     }

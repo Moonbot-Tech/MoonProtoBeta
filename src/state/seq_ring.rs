@@ -1,16 +1,17 @@
 //! Dense retained ring for hot active-library histories.
 //!
 //! The UDP protocol path does not take this history lock; it queues typed
-//! batches to `StoreWorker`, the single writer. Rows live in a dense `Vec<T>`
-//! behind a short `parking_lot::RwLock`, so large reads scan contiguous memory
-//! while staying sound around overwrite slots.
+//! batches to `StoreWorker`, the single writer. The dense backing array is
+//! allocated on the first retained row, then stays behind a short
+//! `parking_lot::RwLock`, so unused markets consume only ring metadata while
+//! active histories still scan contiguous memory.
 //! That cache-friendly layout is what charts and rolling analytics need:
 //! rendering bulk-copies ranges, derived calculations scan borrowed slices, and
 //! neither path pays per-row atomics.
 
 use std::sync::Arc;
 
-use parking_lot::RwLock;
+use parking_lot::{RwLock, RwLockReadGuard};
 
 use crate::MoonTime;
 
@@ -250,6 +251,8 @@ struct SeqRingInner<T: SeqRingRow> {
 }
 
 struct SeqRingState<T: SeqRingRow> {
+    /// Empty until the first materialized row. `capacity` remains the public
+    /// retention limit even while no backing array is needed.
     rows: Box<[T]>,
     capacity: usize,
     next_seq: u64,
@@ -263,10 +266,9 @@ impl<T: SeqRingRow> SeqRingWriter<T> {
         if capacity == 0 {
             return Err(SeqRingError::ZeroCapacity);
         }
-        let rows = vec![T::default(); capacity].into_boxed_slice();
         let inner = Arc::new(SeqRingInner {
             state: RwLock::new(SeqRingState {
-                rows,
+                rows: Box::new([]),
                 capacity,
                 next_seq: 0,
                 #[cfg(any(test, feature = "diagnostics"))]
@@ -293,6 +295,7 @@ impl<T: SeqRingRow> SeqRingWriter<T> {
     /// aggregates instead of disappearing silently.
     pub(crate) fn push_with_evicted(&mut self, row: T) -> (u64, Option<T>) {
         let mut state = self.inner.state.write();
+        state.ensure_rows();
         let seq = state.next_seq;
         let idx = state.slot_index(seq);
         let evicted = if state.len == state.capacity {
@@ -307,6 +310,23 @@ impl<T: SeqRingRow> SeqRingWriter<T> {
         (seq, evicted)
     }
 
+    /// Advance the ring with a default-valued slot without materializing the
+    /// backing array. Used by slot-aligned optional companion histories.
+    pub(crate) fn push_default_lazy(&mut self) -> u64 {
+        let mut state = self.inner.state.write();
+        let seq = state.next_seq;
+        let idx = state.slot_index(seq);
+        if !state.rows.is_empty() {
+            state.rows[idx] = T::default();
+        }
+        if state.len < state.capacity {
+            state.len += 1;
+        }
+        state.next_seq = state.next_seq.wrapping_add(1);
+        state.bump_revision();
+        seq
+    }
+
     pub(crate) fn push_batch(&mut self, rows: &[T]) {
         let mut ignored_evicted = Vec::new();
         self.push_batch_with_evicted(rows, &mut ignored_evicted);
@@ -318,7 +338,11 @@ impl<T: SeqRingRow> SeqRingWriter<T> {
     /// writers that compact old detailed rows into coarse rows must use this
     /// instead of `push_batch` so eviction side effects are not silently lost.
     pub(crate) fn push_batch_with_evicted(&mut self, rows: &[T], evicted: &mut Vec<T>) {
+        if rows.is_empty() {
+            return;
+        }
         let mut state = self.inner.state.write();
+        state.ensure_rows();
         for &row in rows {
             let seq = state.next_seq;
             let idx = state.slot_index(seq);
@@ -330,9 +354,7 @@ impl<T: SeqRingRow> SeqRingWriter<T> {
             state.rows[idx] = row;
             state.next_seq = state.next_seq.wrapping_add(1);
         }
-        if !rows.is_empty() {
-            state.bump_revision();
-        }
+        state.bump_revision();
     }
 
     #[cfg(test)]
@@ -341,6 +363,7 @@ impl<T: SeqRingRow> SeqRingWriter<T> {
         if !state.contains_seq(seq) {
             return false;
         }
+        state.ensure_rows();
         let idx = state.slot_index(seq);
         state.rows[idx] = row;
         state.bump_revision();
@@ -366,6 +389,11 @@ impl<T: SeqRingRow> SeqRingReader<T> {
         self.inner.state.read().bounds()
     }
 
+    #[cfg(test)]
+    pub(crate) fn is_allocated(&self) -> bool {
+        !self.inner.state.read().rows.is_empty()
+    }
+
     pub fn cursor_from_oldest(&self) -> SeqRingCursor {
         SeqRingCursor::from_next_seq(self.bounds().oldest_seq)
     }
@@ -377,7 +405,7 @@ impl<T: SeqRingRow> SeqRingReader<T> {
     #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
     pub fn read_at_seq(&self, seq: u64) -> Option<T> {
-        let state = self.inner.state.read();
+        let state = self.inner.read_materialized();
         if !state.contains_seq(seq) {
             return None;
         }
@@ -499,7 +527,7 @@ impl<T: SeqRingRow> SeqRingReader<T> {
     where
         F: FnOnce(SeqRingReadView<'_, T>) -> R,
     {
-        let state = self.inner.state.read();
+        let state = self.inner.read_materialized();
         let (meta, end_seq) = state.read_meta(start_seq, limit);
         let (first, second) = state.slices(meta.actual_start_seq, end_seq);
         f(SeqRingReadView {
@@ -535,7 +563,7 @@ impl<T: SeqRingRow> SeqRingReader<T> {
     where
         F: FnOnce(SeqRingReadView<'_, T>) -> R,
     {
-        let state = self.inner.state.read();
+        let state = self.inner.read_materialized();
         let bounds = state.bounds();
         let limit = limit.min(bounds.len);
         let start_seq = bounds.next_seq - limit as u64;
@@ -558,8 +586,7 @@ impl<T: SeqRingTimedRow> SeqRingReader<T> {
     pub fn cursor_at_or_after_time(&self, time: MoonTime) -> SeqRingCursor {
         SeqRingCursor::from_next_seq(
             self.inner
-                .state
-                .read()
+                .read_materialized()
                 .first_seq_at_or_after_time_ms(time.unix_millis()),
         )
     }
@@ -584,7 +611,7 @@ impl<T: SeqRingTimedRow> SeqRingReader<T> {
         limit: usize,
         out: &mut Vec<T>,
     ) -> SeqRingReadMeta {
-        let state = self.inner.state.read();
+        let state = self.inner.read_materialized();
         let (start_seq, time_clipped) =
             state.first_seq_at_or_after_time_with_clip_ms(time.unix_millis());
         let (mut meta, end_seq) = state.read_meta(start_seq, limit);
@@ -656,7 +683,7 @@ impl<T: SeqRingTimedRow> SeqRingReader<T> {
     where
         F: FnMut(R, &T) -> R,
     {
-        let state = self.inner.state.read();
+        let state = self.inner.read_materialized();
         let bounds = state.bounds();
         let (start_seq, time_clipped) = state.first_seq_at_or_after_time_with_clip_ms(from_ms);
         let start_seq = start_seq.max(bounds.oldest_seq).min(bounds.next_seq);
@@ -798,6 +825,12 @@ impl<T: SeqRingQtyRow> SeqRingReader<T> {
 }
 
 impl<T: SeqRingRow> SeqRingState<T> {
+    fn ensure_rows(&mut self) {
+        if self.rows.is_empty() {
+            self.rows = vec![T::default(); self.capacity].into_boxed_slice();
+        }
+    }
+
     fn bounds(&self) -> SeqRingBounds {
         let oldest_seq = self.next_seq.saturating_sub(self.len as u64);
         SeqRingBounds {
@@ -867,6 +900,21 @@ impl<T: SeqRingRow> SeqRingState<T> {
             &self.rows[start..start + first_len],
             &self.rows[0..second_len],
         )
+    }
+}
+
+impl<T: SeqRingRow> SeqRingInner<T> {
+    fn read_materialized(&self) -> RwLockReadGuard<'_, SeqRingState<T>> {
+        let state = self.state.read();
+        if state.len == 0 || !state.rows.is_empty() {
+            return state;
+        }
+        drop(state);
+
+        let mut state = self.state.write();
+        state.ensure_rows();
+        drop(state);
+        self.state.read()
     }
 }
 

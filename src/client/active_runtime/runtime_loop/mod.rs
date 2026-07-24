@@ -92,18 +92,16 @@ pub(super) fn runtime_loop(
             match init_poll {
                 RuntimeInitPoll::Pending { changed } => changed,
                 RuntimeInitPoll::Ready(_result) => {
-                    if client.trades_storage_scope_intent().is_some() {
-                        sync_runtime_trade_storage_scope(&client, &mut dispatcher);
-                        schedule_auto_candles_snapshot(&mut client, &mut pending);
-                    }
-                    // Carry server/account identity (BaseCheck/AuthCheck) into the
-                    // published snapshot so `MoonClient` consumers can read it
-                    // without holding the low-level client. Set once Init has
-                    // resolved both checks; reconnect-with-reinit re-runs this.
+                    // History sizing depends on the connected exchange, so
+                    // publish session identity before creating the auto worker.
                     dispatcher.set_session_identity(
                         client.server_info().clone(),
                         client.auth_info().cloned(),
                     );
+                    if client.trade_storage_intent().is_some() {
+                        sync_runtime_trade_storage_scope(&client, &mut dispatcher);
+                        schedule_auto_candles_snapshot(&mut client, &mut pending);
+                    }
                     publish_snapshot_profiled(&client, &dispatcher, &snapshot);
                     client.fire_lifecycle(LifecycleEvent::InitStepCompleted {
                         step: "StartupSnapshot",
@@ -146,7 +144,7 @@ pub(super) fn runtime_loop(
                     u8::MAX,
                     pending.auto_candles.len() + pending.auto_candles_apply.len(),
                 );
-            if !pending.auto_candles_requested && client.trades_storage_scope_intent().is_some() {
+            if !pending.auto_candles_requested && client.trade_storage_intent().is_some() {
                 schedule_auto_candles_snapshot(&mut client, &mut pending);
             }
             #[cfg(any(test, feature = "diagnostics"))]

@@ -195,7 +195,9 @@ impl EventDispatcher {
                             }
                         }
                         let collect_market_history = market_name.is_some_and(|name| {
-                            collect_history && self.active_trade_storage_allows_market(name)
+                            collect_history
+                                && self.retain_mm_orders
+                                && self.active_trade_storage_allows_market(name)
                         });
                         let history_start = history_mm_order_rows.len();
                         if collect_market_history {

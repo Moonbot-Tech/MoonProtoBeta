@@ -400,9 +400,11 @@ impl ClientConfig {
         self
     }
 
-    /// Override retained-history capacity sizing for trades/candles/price
-    /// lines. Use `MarketHistorySizing::Auto` for memory-aware defaults or
-    /// `MarketHistorySizing::fixed(config)` for exact per-market capacities.
+    /// Configure retained-history depth for trades/candles/price lines.
+    ///
+    /// `Auto` is exchange/memory aware and allocates each dense ring only on
+    /// first use. `auto_with_budget_percent(75..=800)` is the normal user
+    /// control; `100` is the production baseline.
     pub fn with_market_history(mut self, market_history: impl Into<MarketHistorySizing>) -> Self {
         self.market_history = market_history.into();
         self

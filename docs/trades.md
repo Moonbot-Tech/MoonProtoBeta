@@ -444,71 +444,29 @@ signal deltas remain in `snapshot.markets()`.
 ## Storage Configuration
 
 ```rust
-use moonproto::{ClientConfig, state::{MarketHistoryConfig, MarketHistorySizing}};
-
-pub struct MarketHistoryConfig {
-    pub futures_trades_capacity: usize,
-    pub spot_trades_capacity: usize,
-    pub liquidation_capacity: usize,
-    pub mm_orders_capacity: usize,
-    pub last_price_capacity: usize,
-    pub mini_candles_capacity: usize,
-    pub candles_5m_capacity: usize,
-}
-
-impl MarketHistoryConfig {
-    pub fn from_system_memory(market_count: usize) -> Self;
-    pub fn from_system_memory_with_budget_percent(
-        market_count: usize,
-        budget_percent: u16,
-    ) -> Self;
-    pub fn from_total_memory_bytes(total_memory_bytes: usize, market_count: usize) -> Self;
-    pub fn from_total_memory_bytes_with_budget_percent(
-        total_memory_bytes: usize,
-        market_count: usize,
-        budget_percent: u16,
-    ) -> Self;
-    pub fn history_budget_bytes(total_memory_bytes: usize) -> usize;
-    pub fn history_budget_bytes_with_budget_percent(
-        total_memory_bytes: usize,
-        budget_percent: u16,
-    ) -> usize;
-    pub fn estimated_bytes_per_market(&self) -> usize;
-}
+use moonproto::{ClientConfig, state::MarketHistorySizing};
 
 let cfg = ClientConfig::new(host, port, master_key, mac_key)
     .with_market_history(MarketHistorySizing::Auto);
 
+// Shorter retained tails for a memory-constrained terminal.
 let cfg = ClientConfig::new(host, port, master_key, mac_key)
-    .with_market_history(MarketHistorySizing::auto_with_budget_percent(300));
-
-let cfg = ClientConfig::new(host, port, master_key, mac_key)
-    .with_market_history(MarketHistorySizing::fixed(MarketHistoryConfig {
-        futures_trades_capacity: 100_000,
-        spot_trades_capacity: 20_000,
-        liquidation_capacity: 10_000,
-        mm_orders_capacity: 10_000,
-        last_price_capacity: 20_000,
-        mini_candles_capacity: 20_000,
-        candles_5m_capacity: 20_000,
-    }));
+    .with_market_history(MarketHistorySizing::auto_with_budget_percent(75));
 ```
 
-Each capacity is a row count per retained market, not a byte count. For example,
-`futures_trades_capacity: 100_000` keeps up to 100,000 futures trade rows for
-each market whose trades are retained. Capacities set to `0` disable that
-retained public history category.
-`mm_orders_capacity` governs both the MM-order ring and its taker/color
-companion ring; they push and evict in lockstep so an order and its companion
-can never desync. This keeps the same dense hot-path shape as the production
-core: compact rows, predictable scans, and no per-item allocation.
+The reader handles exist immediately, but their dense backing arrays are
+allocated only when that market/category receives its first row. An unused
+spot/liquidation/MM/price history therefore costs metadata, not
+`capacity * row_size`. Once active, the ring remains a dense single-allocation
+array for predictable chart scans and append latency.
 `MarketHistorySizing::Auto` is the default: `MoonClient` waits until the market
-list and the requested trade-storage scope are known, then sizes per-market
-rings from system memory. `MarketHistorySizing::auto_with_budget_percent(value)`
-keeps the same memory-aware split but scales the retained-history budget; values
-are clamped to `100..=800`, with `100` equal to the default. Use
-`MarketHistorySizing::fixed(config)` when the application wants exact capacities
-or wants to disable selected retained categories with `0`.
+list, connected exchange, and requested trade-storage scope are known, then
+derives per-market depths from the production core's memory tiers and
+exchange-specific caps. `MarketHistorySizing::auto_with_budget_percent(value)`
+accepts `75..=800`, with `100` equal to the production baseline. Values below
+`100` shorten the heavy trade/MM/price histories; larger values extend detailed
+trade history up to its production cap without multiplying every auxiliary
+ring.
 `MarketHistorySizing` is non-exhaustive: application code that matches it should
 include a wildcard branch so new sizing policies do not become a source-level
 break.
@@ -516,6 +474,22 @@ break.
 `MoonClient` creates and owns the default history worker automatically when the
 trades subscription scope becomes active. Regular applications use
 `MoonClient` snapshots and readers; they do not create workers manually.
+Sizing is a startup choice on `ClientConfig`; recreate the client to apply a
+different policy. Use `subscribe_trades_for(...)` when the application only
+needs retained chart history for selected markets.
+After the runtime has stopped, MoonProto releases its current snapshot and
+owned histories. A snapshot or history reader explicitly retained by
+application code remains valid, and therefore keeps its referenced rings alive,
+until that application-owned handle is dropped.
+
+`TradesStreamMode::TradesOnly` retains trades, liquidations, prices, and
+candles, but not market-maker rows. The core uses one shared trades packet, so
+that packet may physically contain MM sections requested by another connected
+client; MoonProto parses and skips those sections without allocating MM
+history. `TradesAndMarketMakers` retains them on platforms that produce them:
+Binance/FBinance, ByBit/FBybit, and Hyper/FHyper. Wallet/taker companion data is
+available only on Hyper/FHyper. MM rows and companions use aligned sequence
+slots so they cannot drift apart.
 
 The retained-history worker queue is intentionally unbounded. It must not
 backpressure the protocol reader or silently drop trade/order/LastPrice rows

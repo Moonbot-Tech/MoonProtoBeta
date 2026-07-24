@@ -3,15 +3,19 @@
 use std::collections::BTreeSet;
 use std::mem::size_of;
 
+use crate::commands::market::ExchangeCode;
 use crate::state::history::{
     Candle5mRow, LastPricePoint, MMOrderCompanionData, MMOrderHistoryRow, MarkPricePoint,
     MiniCandle, TradeHistoryRow,
 };
 
-pub(super) const GIB: usize = 1024 * 1024 * 1024;
+pub(super) const GB: usize = 1_000_000_000;
+const GIB: usize = 1024 * 1024 * 1024;
 const DEFAULT_HISTORY_BUDGET_PERCENT: u16 = 100;
-const MIN_HISTORY_BUDGET_PERCENT: u16 = 100;
+const MIN_HISTORY_BUDGET_PERCENT: u16 = 75;
 const MAX_HISTORY_BUDGET_PERCENT: u16 = 800;
+const DEFAULT_MM_ORDERS_CAPACITY: usize = 25_000;
+const DEEP_5M_CAPACITY: usize = 500;
 const TRADE_SLOT_BYTES: usize = size_of::<TradeHistoryRow>();
 const MM_ORDER_SLOT_BYTES: usize = size_of::<MMOrderHistoryRow>();
 const MM_COMPANION_SLOT_BYTES: usize = size_of::<MMOrderCompanionData>();
@@ -64,6 +68,7 @@ impl TradeStorageScope {
     }
 }
 
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MarketHistoryConfig {
     pub futures_trades_capacity: usize,
@@ -80,10 +85,9 @@ pub struct MarketHistoryConfig {
 
 /// Capacity policy for Active Lib retained market history.
 ///
-/// `Auto` sizes per-market rings from total system memory once the active trade
-/// storage scope and known market list are available. `Fixed` uses the supplied
-/// capacities verbatim; set individual capacities to `0` to disable that
-/// retained public history category.
+/// `Auto` derives per-market depth from system memory and the connected
+/// exchange, then allocates each dense ring only when that market/category
+/// receives data. Normal applications choose `Auto` or one percentage.
 ///
 /// This enum is non-exhaustive because retained-history sizing can gain new
 /// policies as UI memory controls become more precise. Match with a wildcard
@@ -93,12 +97,13 @@ pub struct MarketHistoryConfig {
 pub enum MarketHistorySizing {
     #[default]
     Auto,
-    /// Auto sizing with a user-visible memory budget multiplier.
+    /// Auto sizing with a user-visible retained-depth percentage.
     ///
-    /// `100` means the default memory-aware budget. Larger values keep the same
-    /// proportional split between rings but allow more retained rows, clamped to
-    /// `100..=800` like MoonBot's chart/trade memory setting.
+    /// `100` is the production-core baseline. `75` keeps shorter heavy
+    /// histories for memory-constrained terminals; values above `100` extend
+    /// detailed trade history up to the same production caps.
     AutoBudgetPercent(u16),
+    #[doc(hidden)]
     Fixed(MarketHistoryConfig),
 }
 
@@ -107,10 +112,15 @@ impl MarketHistorySizing {
     pub const MIN_BUDGET_PERCENT: u16 = MIN_HISTORY_BUDGET_PERCENT;
     pub const MAX_BUDGET_PERCENT: u16 = MAX_HISTORY_BUDGET_PERCENT;
 
+    #[doc(hidden)]
     pub fn fixed(config: MarketHistoryConfig) -> Self {
         Self::Fixed(config)
     }
 
+    /// Use the production memory/exchange policy with a retained-depth control.
+    ///
+    /// Values are clamped to [`Self::MIN_BUDGET_PERCENT`] through
+    /// [`Self::MAX_BUDGET_PERCENT`]; `100` is the production baseline.
     pub fn auto_with_budget_percent(percent: u16) -> Self {
         Self::AutoBudgetPercent(Self::clamp_budget_percent(percent))
     }
@@ -119,11 +129,14 @@ impl MarketHistorySizing {
         percent.clamp(MIN_HISTORY_BUDGET_PERCENT, MAX_HISTORY_BUDGET_PERCENT)
     }
 
-    pub(crate) fn resolve(self, market_count: usize) -> MarketHistoryConfig {
+    pub(crate) fn resolve(self, exchange_code: Option<ExchangeCode>) -> MarketHistoryConfig {
         match self {
-            Self::Auto => MarketHistoryConfig::from_system_memory(market_count),
+            Self::Auto => MarketHistoryConfig::from_system_memory_for_exchange(exchange_code),
             Self::AutoBudgetPercent(percent) => {
-                MarketHistoryConfig::from_system_memory_with_budget_percent(market_count, percent)
+                MarketHistoryConfig::from_system_memory_for_exchange_with_budget_percent(
+                    exchange_code,
+                    percent,
+                )
             }
             Self::Fixed(config) => config,
         }
@@ -138,34 +151,41 @@ impl From<MarketHistoryConfig> for MarketHistorySizing {
 
 impl Default for MarketHistoryConfig {
     fn default() -> Self {
-        Self {
-            futures_trades_capacity: 10_000,
-            spot_trades_capacity: 5_000,
-            liquidation_capacity: 2_000,
-            mm_orders_capacity: 2_000,
-            last_price_capacity: 5_000,
-            mini_candles_capacity: 5_000,
-            candles_5m_capacity: 5_000,
-        }
+        Self::from_total_memory_bytes_for_exchange(4 * GB, DEFAULT_HISTORY_BUDGET_PERCENT, None)
     }
 }
 
 impl MarketHistoryConfig {
+    /// Build production-shaped capacities for the current machine.
+    ///
+    /// `market_count` is retained for source compatibility. Auto histories are
+    /// now allocated per category on first use, so an unused market no longer
+    /// needs a pre-divided share of one process-wide eager-allocation budget.
     pub fn from_system_memory(market_count: usize) -> Self {
         Self::from_system_memory_with_budget_percent(market_count, DEFAULT_HISTORY_BUDGET_PERCENT)
     }
 
     pub fn from_system_memory_with_budget_percent(
-        market_count: usize,
+        _market_count: usize,
+        budget_percent: u16,
+    ) -> Self {
+        Self::from_system_memory_for_exchange_with_budget_percent(None, budget_percent)
+    }
+
+    fn from_system_memory_for_exchange(exchange_code: Option<ExchangeCode>) -> Self {
+        Self::from_system_memory_for_exchange_with_budget_percent(
+            exchange_code,
+            DEFAULT_HISTORY_BUDGET_PERCENT,
+        )
+    }
+
+    fn from_system_memory_for_exchange_with_budget_percent(
+        exchange_code: Option<ExchangeCode>,
         budget_percent: u16,
     ) -> Self {
         system_total_memory_bytes()
             .map(|total| {
-                Self::from_total_memory_bytes_with_budget_percent(
-                    total,
-                    market_count,
-                    budget_percent,
-                )
+                Self::from_total_memory_bytes_for_exchange(total, budget_percent, exchange_code)
             })
             .unwrap_or_default()
     }
@@ -180,66 +200,92 @@ impl MarketHistoryConfig {
 
     pub fn from_total_memory_bytes_with_budget_percent(
         total_memory_bytes: usize,
-        market_count: usize,
+        _market_count: usize,
         budget_percent: u16,
     ) -> Self {
-        let market_count = market_count.max(1);
-        let budget =
-            Self::history_budget_bytes_with_budget_percent(total_memory_bytes, budget_percent);
-        let per_market_budget = budget / market_count;
+        Self::from_total_memory_bytes_for_exchange(total_memory_bytes, budget_percent, None)
+    }
 
-        let futures_trades_capacity =
-            capacity_from_share(per_market_budget, 32, 100, TRADE_SLOT_BYTES, 200_000);
-        let spot_trades_capacity =
-            capacity_from_share(per_market_budget, 18, 100, TRADE_SLOT_BYTES, 150_000);
-        let liquidation_capacity =
-            capacity_from_share(per_market_budget, 7, 100, TRADE_SLOT_BYTES, 50_000);
-        // Single MM-order ring carries both the row and its taker/color companion
-        // (Delphi single-`FSize` parallel arrays). Budget the combined per-slot cost
-        // with the former orders+companion share (7%+7%) so retained count and memory
-        // footprint are unchanged versus the previous two-ring sizing.
-        let mm_orders_capacity = capacity_from_share(
-            per_market_budget,
-            14,
-            100,
-            MM_ORDER_SLOT_BYTES + MM_COMPANION_SLOT_BYTES,
-            50_000,
-        );
-        let last_price_capacity =
-            capacity_from_share(per_market_budget, 8, 100, LAST_PRICE_SLOT_BYTES, 80_000);
-        let mini_candles_capacity =
-            capacity_from_share(per_market_budget, 6, 100, MINI_CANDLE_SLOT_BYTES, 50_000);
-        let candles_5m_capacity =
-            capacity_from_share(per_market_budget, 3, 100, CANDLE_5M_SLOT_BYTES, 20_000);
+    pub(super) fn from_total_memory_bytes_for_exchange(
+        total_memory_bytes: usize,
+        budget_percent: u16,
+        exchange_code: Option<ExchangeCode>,
+    ) -> Self {
+        // The production policy chooses retained row depth from machine memory
+        // and exchange traffic shape. It is not a fraction of total RAM per
+        // known market: category-lazy rings make unused capacities free.
+        let budget_percent = MarketHistorySizing::clamp_budget_percent(budget_percent);
+        let base = base_history_len(total_memory_bytes);
+        let gate = exchange_code == Some(ExchangeCode::Gate);
+        let mut price_history_capacity = if gate {
+            base.saturating_mul(3) / 2
+        } else {
+            base.saturating_mul(22) / 10 * 2
+        };
+        let base_trades_capacity = match exchange_code {
+            Some(ExchangeCode::QBinance) => price_history_capacity.saturating_mul(4).min(58_000),
+            Some(ExchangeCode::FBinance) => price_history_capacity.saturating_mul(3).min(48_000),
+            Some(ExchangeCode::Gate) => price_history_capacity.saturating_mul(2).min(28_000),
+            _ => price_history_capacity.saturating_mul(3).min(44_000),
+        };
+
+        let scale_extended = total_memory_bytes > 4 * GB || budget_percent < 100;
+        let futures_trades_capacity = if scale_extended {
+            scale_capacity_rounded_to_8(base_trades_capacity, budget_percent).min(98_000)
+        } else {
+            base_trades_capacity
+        };
+        let mini_candles_capacity = if scale_extended {
+            scale_capacity_rounded_to_8(price_history_capacity, budget_percent).min(25_000)
+        } else {
+            price_history_capacity
+        };
+
+        if exchange_code == Some(ExchangeCode::QBinance) {
+            price_history_capacity = price_history_capacity.saturating_mul(3);
+        }
+        if budget_percent < 100 {
+            price_history_capacity =
+                scale_capacity_rounded_to_8(price_history_capacity, budget_percent);
+        }
+        let mm_orders_capacity = if budget_percent < 100 {
+            scale_capacity_rounded_to_8(DEFAULT_MM_ORDERS_CAPACITY, budget_percent)
+        } else {
+            DEFAULT_MM_ORDERS_CAPACITY
+        };
 
         Self {
             futures_trades_capacity,
-            spot_trades_capacity,
-            liquidation_capacity,
+            spot_trades_capacity: futures_trades_capacity,
+            liquidation_capacity: price_history_capacity,
             mm_orders_capacity,
-            last_price_capacity,
+            last_price_capacity: price_history_capacity,
             mini_candles_capacity,
-            candles_5m_capacity,
+            candles_5m_capacity: DEEP_5M_CAPACITY,
         }
     }
 
+    /// Legacy eager-budget estimate retained for source compatibility.
+    ///
+    /// Auto sizing no longer divides this value between known markets. Dense
+    /// histories are allocated lazily by category; use
+    /// [`Self::estimated_bytes_per_market`] for the all-categories materialized
+    /// size of a resolved configuration.
+    #[deprecated(
+        note = "Auto history is category-lazy; use estimated_bytes_per_market on the resolved config"
+    )]
     pub fn history_budget_bytes(total_memory_bytes: usize) -> usize {
-        Self::history_budget_bytes_with_budget_percent(
-            total_memory_bytes,
-            DEFAULT_HISTORY_BUDGET_PERCENT,
-        )
+        legacy_history_budget_bytes(total_memory_bytes, DEFAULT_HISTORY_BUDGET_PERCENT)
     }
 
+    #[deprecated(
+        note = "Auto history is category-lazy; use estimated_bytes_per_market on the resolved config"
+    )]
     pub fn history_budget_bytes_with_budget_percent(
         total_memory_bytes: usize,
         budget_percent: u16,
     ) -> usize {
-        let budget_percent = MarketHistorySizing::clamp_budget_percent(budget_percent) as usize;
-        if total_memory_bytes < 8 * GIB {
-            (total_memory_bytes / 4).saturating_mul(budget_percent) / 100
-        } else {
-            (total_memory_bytes / 5).saturating_mul(budget_percent) / 100
-        }
+        legacy_history_budget_bytes(total_memory_bytes, budget_percent)
     }
 
     pub fn estimated_bytes_per_market(&self) -> usize {
@@ -255,17 +301,40 @@ impl MarketHistoryConfig {
     }
 }
 
-fn capacity_from_share(
-    budget: usize,
-    numerator: usize,
-    denominator: usize,
-    row_bytes: usize,
-    max_capacity: usize,
-) -> usize {
-    if budget == 0 || row_bytes == 0 || denominator == 0 {
-        return 0;
+fn base_history_len(total_memory_bytes: usize) -> usize {
+    // The production core computes TotalMemGB with decimal gigabytes.
+    if total_memory_bytes < 3 * GB {
+        1_200
+    } else if total_memory_bytes < 4 * GB {
+        1_600
+    } else if total_memory_bytes < 6 * GB {
+        2_400
+    } else if total_memory_bytes < 9 * GB {
+        4_000
+    } else if total_memory_bytes < 18 * GB {
+        5_200
+    } else {
+        6_200
     }
-    ((budget / denominator) * numerator / row_bytes).min(max_capacity)
+}
+
+pub(super) fn scale_capacity_rounded_to_8(capacity: usize, percent: u16) -> usize {
+    let numerator = capacity as u64 * u64::from(percent);
+    let mut scaled_units = numerator / 800;
+    let remainder = numerator % 800;
+    if remainder > 400 || (remainder == 400 && scaled_units % 2 != 0) {
+        scaled_units += 1;
+    }
+    usize::try_from(scaled_units.saturating_mul(8)).unwrap_or(usize::MAX)
+}
+
+fn legacy_history_budget_bytes(total_memory_bytes: usize, budget_percent: u16) -> usize {
+    let budget_percent = MarketHistorySizing::clamp_budget_percent(budget_percent) as usize;
+    if total_memory_bytes < 8 * GIB {
+        (total_memory_bytes / 4).saturating_mul(budget_percent) / 100
+    } else {
+        (total_memory_bytes / 5).saturating_mul(budget_percent) / 100
+    }
 }
 
 fn system_total_memory_bytes() -> Option<usize> {

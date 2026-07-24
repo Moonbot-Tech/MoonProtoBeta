@@ -238,6 +238,10 @@ pub(crate) struct EventDispatcher {
     /// `None` means trades stream is not subscribed and retained trade/candle/
     /// derived state must stay disabled.
     trade_storage_scope: Option<TradeStorageScope>,
+    /// Local MM-history intent. The server broadcasts one shared trades packet,
+    /// so MM sections may be present even when this client requested
+    /// `TradesOnly`; only explicit local intent may retain them.
+    retain_mm_orders: bool,
     /// Delphi `cfg.DeltasByTrades` analogue for retained derived analytics.
     /// Default is false: 1m/5m deltas come from robust candle/last-price paths,
     /// and raw-trade deltas are opt-in legacy behavior.
@@ -294,6 +298,7 @@ impl Default for EventDispatcher {
             market_history_auto_enabled: true,
             market_history_sizing: MarketHistorySizing::default(),
             trade_storage_scope: None,
+            retain_mm_orders: false,
             deltas_by_trades: false,
             eps_profile: EpsProfile::default(),
             last_market_history_scope: None,

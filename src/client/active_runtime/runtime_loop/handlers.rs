@@ -346,9 +346,10 @@ pub(super) fn handle_command(
 }
 
 pub(super) fn schedule_auto_candles_snapshot(client: &mut Client, pending: &mut RuntimePending) {
-    let Some(scope) = client.trades_storage_scope_intent() else {
+    let Some(intent) = client.trade_storage_intent() else {
         return;
     };
+    let scope = intent.scope;
     if pending.auto_candles_scope.as_deref() != Some(scope.as_ref()) {
         clear_auto_candles_pending(client, pending);
         pending.auto_candles_scope = Some(scope);
@@ -455,8 +456,8 @@ pub(super) fn sync_runtime_trade_storage_scope(
     client: &Client,
     dispatcher: &mut crate::events::EventDispatcher,
 ) {
-    let scope = client.trades_storage_scope_intent();
-    dispatcher.set_trade_storage_scope(scope.as_deref(), crate::client::delphi_now_raw());
+    let intent = client.trade_storage_intent();
+    dispatcher.set_trade_storage_intent(intent.as_ref(), crate::client::delphi_now_raw());
 }
 
 fn handle_ui_command(
@@ -471,6 +472,7 @@ fn handle_ui_command(
         }
         UiRuntimeCommand::MmSubscribe(subscribe) => {
             client.ui_mm_subscribe(subscribe);
+            sync_runtime_trade_storage_scope(client, dispatcher);
             false
         }
         UiRuntimeCommand::SendSettings(settings) => {

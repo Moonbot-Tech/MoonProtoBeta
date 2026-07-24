@@ -71,6 +71,7 @@ impl ClientSender {
         {
             let mut registry = self.shared.subscription_registry.lock();
             registry.mm_orders_sub = Some(subscribe);
+            self.shared.refresh_subscription_summary(&registry);
         }
         let uid = rand::random();
         let raw = crate::commands::ui::build_mm_orders_subscribe(uid, subscribe);

@@ -32,8 +32,8 @@ impl Client {
                 send_lock: Arc::clone(&self.send_lock),
                 subscription_registry: Arc::clone(&self.subscriptions.subscription_registry),
                 subscription_summary: Arc::clone(&self.subscriptions.subscription_summary),
-                subscription_trades_scope: Arc::clone(
-                    &self.subscriptions.subscription_trades_scope,
+                subscription_trade_storage_intent: Arc::clone(
+                    &self.subscriptions.subscription_trade_storage_intent,
                 ),
                 server_update_sent: Arc::clone(&self.refresh_clocks.server_update_sent),
                 last_trades_subscribe_request_ms: Arc::clone(
@@ -596,6 +596,7 @@ impl Client {
             ));
             let mut registry = self.subscriptions.subscription_registry.lock();
             registry.mm_orders_sub = Some(want_mm);
+            self.refresh_subscription_summary(&registry);
         }
 
         let refs: Vec<&str> = orderbook_subs.iter().map(String::as_str).collect();

@@ -2409,6 +2409,93 @@ fn active_dispatch_queues_all_retained_stream_section_kinds_into_history_worker(
 }
 
 #[test]
+fn trades_only_skips_shared_mm_sections_until_local_mm_intent_is_enabled() {
+    let worker = crate::state::MarketHistoryWorker::spawn(crate::state::MarketHistoryConfig {
+        futures_trades_capacity: 8,
+        spot_trades_capacity: 0,
+        liquidation_capacity: 0,
+        mm_orders_capacity: 8,
+        last_price_capacity: 0,
+        mini_candles_capacity: 0,
+        candles_5m_capacity: 0,
+    });
+
+    let mut d = EventDispatcher::new();
+    d.set_market_history_handle(worker.handle());
+    seed_event_markets(&mut d, &["BTCUSDT"]);
+    d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
+
+    let mut client = crate::client::Client::new(dummy_client_cfg());
+    client.testing_set_domain_ready(true);
+    client.subscribe_all_trades(false);
+    let mut out = Vec::new();
+    let mut actions = Vec::new();
+
+    dispatch_active_packet_for_test(
+        &mut d,
+        Command::TradesStream,
+        &trades_payload_with_all_history_sections(803, 0),
+        7_000,
+        &mut out,
+        &client,
+        &mut actions,
+    );
+    assert!(worker.flush(mt(45_000.0)));
+
+    let mm_orders = worker
+        .readers("BTCUSDT")
+        .unwrap()
+        .mm_orders
+        .expect("configured MM reader");
+    let futures_trades = worker
+        .readers("BTCUSDT")
+        .unwrap()
+        .futures_trades
+        .expect("configured futures reader");
+    assert_eq!(
+        futures_trades.bounds().len,
+        1,
+        "TradesOnly must retain ordinary trades from the same packet"
+    );
+    assert_eq!(mm_orders.bounds().len, 0);
+    assert!(
+        !mm_orders.is_allocated(),
+        "another client's server-side MM subscription must not allocate local TradesOnly history"
+    );
+
+    client.ui_mm_subscribe(true);
+    dispatch_active_packet_for_test(
+        &mut d,
+        Command::TradesStream,
+        &trades_payload_with_all_history_sections(804, 0),
+        7_001,
+        &mut out,
+        &client,
+        &mut actions,
+    );
+    assert!(worker.flush(mt(45_000.0)));
+    assert_eq!(mm_orders.bounds().len, 1);
+    assert!(mm_orders.is_allocated());
+
+    client.ui_mm_subscribe(false);
+    dispatch_active_packet_for_test(
+        &mut d,
+        Command::TradesStream,
+        &trades_payload_with_all_history_sections(805, 0),
+        7_002,
+        &mut out,
+        &client,
+        &mut actions,
+    );
+    assert!(worker.flush(mt(45_000.0)));
+    assert_eq!(
+        mm_orders.bounds().len,
+        1,
+        "disabling local MM intent must stop retaining later shared MM sections"
+    );
+}
+
+#[test]
 // parity: MoonBot EngineBase.pas:TMarketEngine.ProcessWatcherFillsDetect
 fn active_dispatch_emits_typed_watcher_fills() {
     let mut d = EventDispatcher::new();
@@ -2445,7 +2532,10 @@ fn active_dispatch_emits_typed_watcher_fills() {
         server_time_delta_source: Arc::new(AtomicU64::new(0)),
         now_time_days: 45_000.5,
         domain_ready: true,
-        trades_storage_scope: Some(Arc::new(TradeStorageScope::All)),
+        trade_storage_intent: Some(crate::client::TradeStorageIntent {
+            scope: Arc::new(TradeStorageScope::All),
+            retain_mm_orders: false,
+        }),
         copy_max_leverage_from_markets_list: false,
         eps_profile: EpsProfile::default(),
         server_base_currency_name: Some("BTC".into()),
@@ -2552,7 +2642,10 @@ fn active_dispatch_queues_update_markets_last_price_into_history_worker() {
         server_time_delta_source: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         now_time_days: 45_000.5,
         domain_ready: true,
-        trades_storage_scope: Some(Arc::new(TradeStorageScope::All)),
+        trade_storage_intent: Some(crate::client::TradeStorageIntent {
+            scope: Arc::new(TradeStorageScope::All),
+            retain_mm_orders: false,
+        }),
         copy_max_leverage_from_markets_list: false,
         eps_profile: EpsProfile::default(),
         server_base_currency_name: Some("BTC".into()),

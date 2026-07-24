@@ -360,9 +360,9 @@ fn unsubscribe_all_trades_clears_registry() {
     client.subscribe_all_trades(true);
     client.unsubscribe_all_trades();
     assert!(client.with_subscription_registry(|registry| registry.trades_sub.is_none()));
-    assert!(client.trades_storage_scope_intent().is_none());
+    assert!(client.trade_storage_intent().is_none());
     assert!(crate::events::ActiveDispatchContext::from_client(&client)
-        .trades_storage_scope
+        .trade_storage_intent
         .is_none());
     assert_eq!(
         client.with_subscription_registry(|registry| registry.mm_orders_sub),

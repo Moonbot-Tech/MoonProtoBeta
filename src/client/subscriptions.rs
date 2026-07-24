@@ -149,17 +149,22 @@ impl SubscriptionRegistrySummary {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TradeStorageIntent {
+    pub(crate) scope: Arc<crate::state::TradeStorageScope>,
+    pub(crate) retain_mm_orders: bool,
+}
+
 pub(crate) fn refresh_subscription_summary(
     summary: &SubscriptionRegistrySummary,
-    trades_scope: &parking_lot::RwLock<Option<Arc<crate::state::TradeStorageScope>>>,
+    storage_intent: &parking_lot::RwLock<Option<TradeStorageIntent>>,
     registry: &SubscriptionRegistry,
 ) {
     summary.update_from(registry);
-    let scope = registry
-        .trades_sub
-        .is_some()
-        .then(|| Arc::new(registry.trades_storage_scope.clone()));
-    *trades_scope.write() = scope;
+    *storage_intent.write() = registry.trades_sub.map(|subscription| TradeStorageIntent {
+        scope: Arc::new(registry.trades_storage_scope.clone()),
+        retain_mm_orders: registry.mm_orders_sub.unwrap_or(subscription.want_mm),
+    });
 }
 
 /// What the single user-level Init requested from the domain layer.
@@ -223,7 +228,7 @@ impl PendingCandleSubscribes {
 /// Active-library subscription cluster carved out of [`super::Client`].
 ///
 /// Groups what the application subscribed (`subscription_registry` plus its
-/// atomic `subscription_summary` mirror and the `subscription_trades_scope`
+/// atomic `subscription_summary` mirror and the `subscription_trade_storage_intent`
 /// retained-data filter), the Delphi `InitDone` domain gate
 /// (`domain_ready` and its `Arc<AtomicBool>` mirror `domain_ready_flag` shared
 /// with `ClientSender`), and the saved single-Init restore intent
@@ -235,8 +240,8 @@ pub(crate) struct Subscriptions {
     /// reconnect restores the registry itself via the current keys / market mapping.
     pub(crate) subscription_registry: Arc<Mutex<SubscriptionRegistry>>,
     pub(crate) subscription_summary: Arc<SubscriptionRegistrySummary>,
-    pub(crate) subscription_trades_scope:
-        Arc<parking_lot::RwLock<Option<Arc<crate::state::TradeStorageScope>>>>,
+    pub(crate) subscription_trade_storage_intent:
+        Arc<parking_lot::RwLock<Option<TradeStorageIntent>>>,
     /// Delphi `InitDone`: transport auth is already complete, but domain pushes
     /// (`Order`/`Strat`/`Balance`/`Trades*`/`OrderBook`/`UI`) can only be applied
     /// after the full init bootstrap. Before that, `dispatch_into_active`
@@ -257,15 +262,13 @@ impl Subscriptions {
     pub(crate) fn new_with_registry(
         subscription_registry: Arc<Mutex<SubscriptionRegistry>>,
         subscription_summary: Arc<SubscriptionRegistrySummary>,
-        subscription_trades_scope: Arc<
-            parking_lot::RwLock<Option<Arc<crate::state::TradeStorageScope>>>,
-        >,
+        subscription_trade_storage_intent: Arc<parking_lot::RwLock<Option<TradeStorageIntent>>>,
         domain_ready_flag: Arc<AtomicBool>,
     ) -> Self {
         Self {
             subscription_registry,
             subscription_summary,
-            subscription_trades_scope,
+            subscription_trade_storage_intent,
             domain_ready: false,
             domain_ready_flag,
             domain_restore: DomainRestoreIntent::default(),

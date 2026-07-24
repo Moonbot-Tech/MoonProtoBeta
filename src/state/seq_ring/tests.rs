@@ -34,6 +34,44 @@ fn rejects_zero_capacity() {
 }
 
 #[test]
+fn backing_storage_is_lazy_until_first_row() {
+    let (mut writer, reader) = SeqRingWriter::<u64>::new(100_000).unwrap();
+
+    assert_eq!(reader.capacity(), 100_000);
+    assert_eq!(reader.bounds().len, 0);
+    assert!(!reader.is_allocated());
+
+    let mut out = Vec::new();
+    reader.copy_last(10, &mut out);
+    assert!(out.is_empty());
+    assert!(!reader.is_allocated());
+
+    writer.push(7);
+    assert!(reader.is_allocated());
+    reader.copy_last(10, &mut out);
+    assert_eq!(out, vec![7]);
+}
+
+#[test]
+fn default_companion_slots_stay_logical_until_data_or_read() {
+    let (mut writer, reader) = SeqRingWriter::<u64>::new(4).unwrap();
+
+    writer.push_default_lazy();
+    writer.push_default_lazy();
+    assert_eq!(reader.bounds().len, 2);
+    assert!(!reader.is_allocated());
+
+    let mut out = Vec::new();
+    reader.copy_last(4, &mut out);
+    assert_eq!(out, vec![0, 0]);
+    assert!(reader.is_allocated());
+
+    writer.push(9);
+    reader.copy_last(4, &mut out);
+    assert_eq!(out, vec![0, 0, 9]);
+}
+
+#[test]
 fn copies_last_rows_in_sequence_order() {
     let (mut writer, reader) = SeqRingWriter::<u64>::new(4).unwrap();
     writer.push_batch(&[10, 11, 12]);

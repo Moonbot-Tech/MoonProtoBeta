@@ -139,7 +139,7 @@ impl Client {
     pub(crate) fn refresh_subscription_summary(&self, registry: &SubscriptionRegistry) {
         refresh_subscription_summary(
             &self.subscriptions.subscription_summary,
-            &self.subscriptions.subscription_trades_scope,
+            &self.subscriptions.subscription_trade_storage_intent,
             registry,
         );
     }

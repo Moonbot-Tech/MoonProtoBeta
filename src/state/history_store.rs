@@ -29,7 +29,7 @@ mod registry;
 
 pub(crate) use self::config::TradeStorageScope;
 #[cfg(test)]
-use self::config::GIB;
+use self::config::GB;
 pub use self::config::{MarketHistoryConfig, MarketHistorySizing};
 #[cfg(test)]
 use self::derived::combine_deltas;
@@ -482,7 +482,11 @@ impl MarketHistoryStore {
     ) -> Option<u64> {
         let seq = self.mm_orders.as_mut().map(|writer| writer.push(row))?;
         if let Some(writer) = self.mm_order_companion.as_mut() {
-            writer.push(companion.unwrap_or_default());
+            if let Some(companion) = companion {
+                writer.push(companion);
+            } else {
+                writer.push_default_lazy();
+            }
         }
         Some(seq)
     }
