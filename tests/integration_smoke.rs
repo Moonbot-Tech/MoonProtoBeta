@@ -27,6 +27,10 @@ fn exchange_code_stable_id_is_public_without_diagnostics() {
     assert_eq!(ExchangeCode::Binance.stable_id(), 3);
     assert_eq!(ExchangeCode::FBinance.stable_id(), 4);
     assert_eq!(ExchangeCode::FBybit.stable_id(), 2);
+    assert_eq!(ExchangeCode::OKX.stable_id(), 14);
+    assert_eq!(ExchangeCode::FOKX.stable_id(), 15);
+    assert_eq!(ExchangeCode::OKX.name(), "OKX");
+    assert_eq!(ExchangeCode::FOKX.name(), "FOKX");
 }
 
 fn wait_ready(client: &MoonClient, timeout: Duration) -> Vec<LifecycleEvent> {

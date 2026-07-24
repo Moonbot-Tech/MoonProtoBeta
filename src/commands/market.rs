@@ -84,8 +84,14 @@ impl ExchangeCode {
     pub const FBitGet: Self = Self(11);
     pub const Hyper: Self = Self(12);
     pub const FHyper: Self = Self(13);
-    pub const Next5: Self = Self(14);
-    pub const Next6: Self = Self(15);
+    pub const OKX: Self = Self(14);
+    pub const FOKX: Self = Self(15);
+    #[doc(hidden)]
+    #[deprecated(note = "use ExchangeCode::OKX")]
+    pub const Next5: Self = Self::OKX;
+    #[doc(hidden)]
+    #[deprecated(note = "use ExchangeCode::FOKX")]
+    pub const Next6: Self = Self::FOKX;
 
     #[cfg(any(test, feature = "diagnostics"))]
     #[doc(hidden)]
@@ -120,7 +126,7 @@ impl ExchangeCode {
     }
 
     pub const fn is_known(self) -> bool {
-        self.0 <= Self::Next6.0
+        self.0 <= Self::FOKX.0
     }
 
     pub const fn name(self) -> &'static str {
@@ -139,8 +145,8 @@ impl ExchangeCode {
             Self::FBitGet => "FBitGet",
             Self::Hyper => "Hyper",
             Self::FHyper => "FHyper",
-            Self::Next5 => "Next5",
-            Self::Next6 => "Next6",
+            Self::OKX => "OKX",
+            Self::FOKX => "FOKX",
             _ => "Unknown",
         }
     }
