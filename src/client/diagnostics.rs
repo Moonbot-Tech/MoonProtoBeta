@@ -111,7 +111,11 @@ impl ErrEmuSlicedDatagramDiagnostics {
             .count()
     }
 
-    pub fn missing_blocks(&self) -> Vec<u8> {
+    /// Blocks not seen by the current diagnostics window.
+    ///
+    /// A completed datagram can still have unobserved blocks when counters were
+    /// reset while its protocol reassembly was already in progress.
+    pub fn unobserved_blocks(&self) -> Vec<u8> {
         (0..self.blocks_count.min(256))
             .filter_map(|block| {
                 let block = block as u8;
@@ -124,6 +128,18 @@ impl ErrEmuSlicedDatagramDiagnostics {
                 (delivered == 0).then_some(block)
             })
             .collect()
+    }
+
+    /// Blocks still missing from an incomplete datagram.
+    ///
+    /// Completion is proof that the protocol assembler received every block,
+    /// even if a diagnostics reset split the observation window.
+    pub fn missing_blocks(&self) -> Vec<u8> {
+        if self.completed_cmd.is_some() {
+            Vec::new()
+        } else {
+            self.unobserved_blocks()
+        }
     }
 
     pub fn block_drop_count(&self, block_num: u8) -> u64 {
@@ -609,11 +625,21 @@ mod tests {
         assert!(same_num
             .iter()
             .any(|dg| dg.blocks_count == 27 && dg.delivered_unique_blocks() == 1));
-        assert!(same_num.iter().any(|dg| {
-            dg.blocks_count == 15
-                && dg.delivered_unique_blocks() == 1
-                && dg.completed_cmd == Some(Command::API.to_byte())
-        }));
+        let completed = same_num
+            .iter()
+            .find(|dg| dg.blocks_count == 15)
+            .expect("completed 15-block datagram");
+        assert_eq!(completed.delivered_unique_blocks(), 1);
+        assert_eq!(completed.completed_cmd, Some(Command::API.to_byte()));
+        assert!(
+            completed.missing_blocks().is_empty(),
+            "assembler completion proves that no protocol block is missing"
+        );
+        assert_eq!(
+            completed.unobserved_blocks().len(),
+            14,
+            "diagnostics still exposes that its observation window was partial"
+        );
     }
 
     #[test]

@@ -54,8 +54,8 @@
 //! execution would mix scenarios instead of measuring one pipeline.
 //! The one-client public smoke keeps the init-time all-market retention path.
 //! Multi-client destructive sessions retain only the BTC/ETH/SOL markets used
-//! by their assertions, so four simultaneous clients do not each reserve an
-//! independent all-market `MarketHistorySizing::Auto` budget.
+//! by their assertions, so four simultaneous clients do not each materialize
+//! histories for every server market.
 //!
 //! This is a diagnostic/protocol health test, not application example code. The
 //! full profile uses the same public `MoonClient` path as regular applications,
@@ -862,9 +862,6 @@ impl Session {
             ConnectConfig::new(init).with_connect_timeout(cfg.connect_timeout),
         )
         .unwrap_or_else(|err| panic!("FIRETEST {label}: MoonClient connect failed: {err}"));
-        client
-            .debug_reset_err_emu_diagnostics()
-            .unwrap_or_else(|err| panic!("FIRETEST {label}: reset diagnostics failed: {err}"));
         client
             .streams()
             .subscribe_trades_for(TradesStreamMode::TradesOnly, retained_markets.iter())
@@ -4139,6 +4136,8 @@ fn is_sliced_response_candidate(dg: &ErrEmuSlicedDatagramDiagnostics) -> bool {
 fn describe_sliced_candidate(configured_rate: u8, dg: &ErrEmuSlicedDatagramDiagnostics) -> String {
     let missing = dg.missing_blocks();
     let missing_preview = preview_u8(&missing, 24);
+    let unobserved = dg.unobserved_blocks();
+    let unobserved_preview = preview_u8(&unobserved, 24);
     let observed_attempts = dg.delivered_packets + dg.dropped_packets;
     let p = configured_rate as f64 / 100.0;
     let pure_err_emu_p = if missing.is_empty() {
@@ -4167,10 +4166,13 @@ fn describe_sliced_candidate(configured_rate: u8, dg: &ErrEmuSlicedDatagramDiagn
         .completed_payload_hash
         .map(|hash| format!("{hash:016X}"))
         .unwrap_or_else(|| "none".to_string());
-    let observation = if dg.completed_cmd.is_some() && !missing.is_empty() {
-        " observation=incomplete-window"
+    let observation = if dg.completed_cmd.is_some() && !unobserved.is_empty() {
+        format!(
+            " observation=completed-with-partial-diagnostics-window unobserved=[{}]",
+            unobserved_preview
+        )
     } else {
-        ""
+        String::new()
     };
     let orderbook = if dg.completed_cmd == Some(Command::OrderBook.to_byte()) {
         format!(
